@@ -1,4 +1,4 @@
-from .osrm_ext import (
+from .osrm_ext import ( # type: ignore
     OSRM as _OSRM_Base,
     EngineConfig,
     Algorithm,
@@ -26,6 +26,20 @@ from .osrm_ext import (
 
     Array,
     Object,
+    
+    # Preprocessing config classes
+    ExtractorConfig,
+    ContractorConfig,
+    PartitionerConfig,
+    CustomizationConfig,
+)
+
+# Preprocessing functions
+from .preprocessing import (
+    extract,
+    contract,
+    partition,
+    customize,
 )
 
 # String to enum mappings

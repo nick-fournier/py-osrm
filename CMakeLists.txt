@@ -40,6 +40,11 @@ find_package(nanobind CONFIG REQUIRED)
 set(SRCS
   src/osrm_nb.cpp
   src/engineconfig_nb.cpp
+  src/preprocessing_nb.cpp
+  src/extractorconfig_nb.cpp
+  src/contractorconfig_nb.cpp
+  src/partitionerconfig_nb.cpp
+  src/customizerconfig_nb.cpp
   src/utility/osrm_utility.cpp
   src/utility/param_utility.cpp
 
@@ -51,11 +56,11 @@ set(SRCS
   src/parameters/tileparameter_nb.cpp
   src/parameters/tripparameter_nb.cpp
   
+  src/types/optional_nb.cpp
   src/types/coordinate_nb.cpp
   src/types/jsoncontainer_nb.cpp
   src/types/approach_nb.cpp
   src/types/bearing_nb.cpp
-  src/types/optional_nb.cpp
 )
 nanobind_add_module(
   ${EXT_NAME}
@@ -116,6 +121,10 @@ else()
   target_link_libraries(${EXT_NAME}
     PRIVATE
       osrm
+      osrm_extract
+      osrm_contract
+      osrm_partition
+      osrm_customize
   )
 endif()
 

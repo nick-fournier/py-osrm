@@ -15,6 +15,7 @@
 #include <cstdlib>
 
 #include "engineconfig_nb.h"
+#include "preprocessing_nb.h"
 #include "utility/osrm_utility.h"
 #include "types/approach_nb.h"
 #include "types/bearing_nb.h"
@@ -55,6 +56,7 @@ NB_MODULE(osrm_ext, m) {
     using osrm::engine::api::TripParameters;
 
     init_EngineConfig(m);
+    init_Preprocessing(m);
 
     init_Approach(m);
     init_Bearing(m);
