@@ -1,6 +1,6 @@
 import os
 
-path = os.path.dirname(os.path.abspath(__file__)) + "/data/"
+data_dir = os.path.dirname(os.path.abspath(__file__)) + "/data/"
 
 # Constants and fixtures for Python tests on our Monaco dataset.
 
@@ -14,6 +14,10 @@ two_test_coordinates = three_test_coordinates[0:2]
 
 test_tile = {'at': [17059, 11948, 15], 'size': 156539}
 
-data_path = path + "ch/monaco.osrm"
-mld_data_path = path + "mld/monaco.osrm"
-test_memory_path = path + "test_memory"
+# Explicit data paths for different algorithms
+ch_data_path = data_dir + "ch/monaco.osrm"
+mld_data_path = data_dir + "mld/monaco.osrm"
+test_memory_path = data_dir + "test_memory"
+
+# Legacy alias for backward compatibility with test_index.py
+data_path = ch_data_path

@@ -9,7 +9,7 @@ test_memory_path = constants.test_memory_path
 
 class TestIndex:
     def test_default_noparam(self):
-        osrm.OSRM()
+        osrm.OSRM(storage_config = ch_data_path, use_shared_memory = False)
 
     def test_throwifnecessarynotexist(self):
         with pytest.raises(RuntimeError) as ex:
@@ -29,7 +29,8 @@ class TestIndex:
     def test_memfile(self):
         osrm.OSRM(
             storage_config = data_path,
-            memory_file = test_memory_path
+            memory_file = test_memory_path,
+            use_shared_memory = False
         )
 
     def test_shmemfalsenopath(self):
@@ -73,7 +74,7 @@ class TestIndex:
 
         with pytest.raises(RuntimeError) as ex:
             osrm.OSRM(algorithm = "MLD",
-                         storage_config = mld_data_path,
+                         storage_config = ch_data_path,
                          use_shared_memory = False)
         assert("Could not find any metrics for MLD in the data." in str(ex.value))
 
@@ -82,27 +83,29 @@ class TestIndex:
             osrm.OSRM(dataset_name = 1337)
         assert(str(ex.value) == "Invalid type passed for argument: dataset_name")
 
-        osrm.OSRM(dataset_name = "")
+        osrm.OSRM(storage_config = ch_data_path, dataset_name = "", use_shared_memory = False)
         
         with pytest.raises(RuntimeError) as ex:
             osrm.OSRM(dataset_name = "unsued_name___", use_shared_memory = True)
-        assert("Could not find shared memory region" in str(ex.value))
+        assert("No shared memory block" in str(ex.value) or "Could not find shared memory region" in str(ex.value))
 
     def test_defaultradius(self):
-        osrm.OSRM(default_radius = 1)
+        osrm.OSRM(storage_config = ch_data_path, default_radius = 1, use_shared_memory = False)
 
     def test_unlimitedradius(self):
-        osrm.OSRM(default_radius = "unlimited")
+        osrm.OSRM(storage_config = ch_data_path, default_radius = "unlimited", use_shared_memory = False)
 
     def test_customlimits(self):
         osrm.OSRM(
+            storage_config = ch_data_path,
             max_locations_trip = 3,
             max_locations_viaroute = 3,
             max_locations_distance_table = 3,
             max_locations_map_matching = 3,
             max_results_nearest = 1,
             max_alternatives = 1,
-            default_radius = 1
+            default_radius = 1,
+            use_shared_memory = False
         )
 
     def test_invalidlimits(self):

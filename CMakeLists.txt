@@ -55,6 +55,7 @@ set(SRCS
   src/types/jsoncontainer_nb.cpp
   src/types/approach_nb.cpp
   src/types/bearing_nb.cpp
+  src/types/optional_nb.cpp
 )
 nanobind_add_module(
   ${EXT_NAME}

@@ -74,3 +74,8 @@ test-command = [
   "python -m osrm datastore {project}/tests/data/ch/monaco",
   "pytest {project}/tests"
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]

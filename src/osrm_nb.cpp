@@ -12,6 +12,7 @@
 #include <nanobind/stl/string.h>
 
 #include <stdexcept>
+#include <cstdlib>
 
 #include "engineconfig_nb.h"
 #include "utility/osrm_utility.h"
@@ -19,6 +20,7 @@
 #include "types/bearing_nb.h"
 #include "types/coordinate_nb.h"
 #include "types/jsoncontainer_nb.h"
+#include "types/optional_nb.h"
 #include "parameters/baseparameter_nb.h"
 #include "parameters/matchparameter_nb.h"
 #include "parameters/nearestparameter_nb.h"
@@ -28,6 +30,16 @@
 #include "parameters/tripparameter_nb.h"
 
 namespace nb = nanobind;
+
+// Global cleanup handler to prevent TBB thread pool from hanging on exit
+static void cleanup_osrm_tbb() {
+    // OSRM uses Intel TBB which creates threads that don't cleanly shut down
+    // during normal Python exit. Using quick_exit bypasses static destructors
+    // and TBB cleanup, preventing the hang.
+    std::fflush(stdout);
+    std::fflush(stderr);
+    std::quick_exit(0);
+}
 
 NB_MODULE(osrm_ext, m) {
     namespace api = osrm::engine::api;
@@ -48,7 +60,7 @@ NB_MODULE(osrm_ext, m) {
     init_Bearing(m);
     init_Coordinate(m);
     init_JSONContainer(m);
-    // init_Optional(m); // Not needed - nanobind handles std::optional automatically
+    init_Optional(m);
 
     init_BaseParameters(m);
     init_NearestParameters(m);
@@ -222,4 +234,14 @@ NB_MODULE(osrm_ext, m) {
             "Raises:\n\
                 RuntimeError: On invalid TripParameters."
             );
+
+    // Register cleanup handler to prevent TBB thread pool from hanging on exit
+    // This must be done after all bindings are created
+    try {
+        nb::module_ atexit = nb::module_::import_("atexit");
+        atexit.attr("register")(nb::cpp_function(cleanup_osrm_tbb));
+    } catch (...) {
+        // If atexit registration fails, continue anyway
+        // The worst case is the hang continues to occur
+    }
 }

@@ -1,6 +1,7 @@
 from .osrm_ext import (
     OSRM,
     EngineConfig,
+    Algorithm,
 
     Bearing,
     Coordinate,

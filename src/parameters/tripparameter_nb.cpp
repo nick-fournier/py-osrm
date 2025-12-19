@@ -97,7 +97,7 @@ void init_TripParameters(nb::module_& m) {
                     "hints"_a = std::vector<std::optional<osrm::engine::Hint>>(),
                     "radiuses"_a = std::vector<std::optional<double>>(),
                     "bearings"_a = std::vector<std::optional<osrm::engine::Bearing>>(),
-                    "approaches"_a = std::vector<std::string>(),
+                    "approaches"_a = std::vector<std::string*>(),
                     "generate_hints"_a = true,
                     "exclude"_a = std::vector<std::string>(),
                     "snapping"_a = std::string()

@@ -12,6 +12,11 @@ namespace nb = nanobind;
 void init_EngineConfig(nb::module_& m) {
     using osrm::engine::EngineConfig;
 
+    // Bind Algorithm enum first
+    nb::enum_<EngineConfig::Algorithm>(m, "Algorithm")
+        .value("CH", EngineConfig::Algorithm::CH)
+        .value("MLD", EngineConfig::Algorithm::MLD);
+
     nb::class_<EngineConfig>(m, "EngineConfig", nb::is_final())
         .def(nb::init<>())
         .def("__init__", [](EngineConfig* t, const nb::kwargs& kwargs) {
@@ -41,10 +46,4 @@ void init_EngineConfig(nb::module_& m) {
         .def_rw("algorithm", &EngineConfig::algorithm)
         .def_rw("verbosity", &EngineConfig::verbosity)
         .def_rw("dataset_name", &EngineConfig::dataset_name);
-
-    nb::enum_<EngineConfig::Algorithm>(m, "Algorithm", "Routing algorithm type")
-        .value("CH", EngineConfig::Algorithm::CH)
-        .value("MLD", EngineConfig::Algorithm::MLD);
-    
-    nb::implicitly_convertible<std::string, EngineConfig::Algorithm>();
 }
