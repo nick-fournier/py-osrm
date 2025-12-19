@@ -42,13 +42,9 @@ void init_EngineConfig(nb::module_& m) {
         .def_rw("verbosity", &EngineConfig::verbosity)
         .def_rw("dataset_name", &EngineConfig::dataset_name);
 
-    nb::class_<EngineConfig::Algorithm>(m, "Algorithm")
-        .def("__init__", [](EngineConfig::Algorithm* t, const std::string& str) {
-            EngineConfig::Algorithm algorithm = osrm_nb_util::str_to_enum(str, "Algorithm", algorithm_map);
-            new (t) EngineConfig::Algorithm(algorithm);
-        })
-        .def("__repr__", [](EngineConfig::Algorithm type) {
-            return osrm_nb_util::enum_to_str(type, "Algorithm", algorithm_map);
-        });
+    nb::enum_<EngineConfig::Algorithm>(m, "Algorithm", "Routing algorithm type")
+        .value("CH", EngineConfig::Algorithm::CH)
+        .value("MLD", EngineConfig::Algorithm::MLD);
+    
     nb::implicitly_convertible<std::string, EngineConfig::Algorithm>();
 }

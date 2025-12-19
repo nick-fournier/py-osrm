@@ -14,7 +14,7 @@ void init_BaseParameters(nb::module_& m) {
     using osrm::engine::api::BaseParameters;
 
     nb::class_<BaseParameters>(m, "BaseParameters")
-        .def(nb::init<>(), nb::raw_doc("Instantiates an instance of BaseParameters.\n\n"
+        .def(nb::init<>(), "Instantiates an instance of BaseParameters.\n\n"
             "Note:\n\
                 This is the parent class to many parameter classes, and not intended to be used on its own.\n\n"
             "Args:\n\
@@ -40,7 +40,7 @@ void init_BaseParameters(nb::module_& m) {
                 generate_hints (bool): Adds a hint to the response which can be used in subsequent requests.\n\
                 skip_waypoints (list): Removes waypoints from the response.\n\
                 snapping (string): 'default' snapping avoids is_startpoint edges, 'any' will snap to any edge in the graph."
-            ))
+            )
         .def_rw("coordinates", &BaseParameters::coordinates)
         .def_rw("hints", &BaseParameters::hints)
         .def_rw("radiuses", &BaseParameters::radiuses)
@@ -53,23 +53,13 @@ void init_BaseParameters(nb::module_& m) {
         .def_rw("snapping", &BaseParameters::snapping)
         .def("IsValid", &BaseParameters::IsValid);
 
-    nb::class_<BaseParameters::SnappingType>(m, "SnappingType")
-        .def("__init__", [](BaseParameters::SnappingType* t, const std::string& str) {
-            BaseParameters::SnappingType snapping = osrm_nb_util::str_to_enum(str, "SnappingType", snapping_map);
-            new (t) BaseParameters::SnappingType(snapping);
-        }, "Instantiates a SnappingType based on provided String value.")
-        .def("__repr__", [](BaseParameters::SnappingType type) {
-            return osrm_nb_util::enum_to_str(type, "SnappingType", snapping_map);
-        }, "Return a String based on SnappingType value.");
+    nb::enum_<BaseParameters::SnappingType>(m, "SnappingType", "Snapping behavior when matching input coordinates to road network")
+        .value("Default", BaseParameters::SnappingType::Default, "Snap to nearest road segment")
+        .value("Any", BaseParameters::SnappingType::Any, "Allow snapping to any location");
     nb::implicitly_convertible<std::string, BaseParameters::SnappingType>();
 
-    nb::class_<BaseParameters::OutputFormatType>(m, "OutputFormatType")
-        .def("__init__", [](BaseParameters::OutputFormatType* t, const std::string& str) {
-            BaseParameters::OutputFormatType output = osrm_nb_util::str_to_enum(str, "OutputFormatType", output_map);
-            new (t) BaseParameters::OutputFormatType(output);
-        }, "Instantiates a OutputFormatType based on provided String value.")
-        .def("__repr__", [](BaseParameters::OutputFormatType type) {
-            return osrm_nb_util::enum_to_str(type, "OutputFormatType", output_map);
-        }, "Return a String based on OutputFormatType value.");
+    nb::enum_<BaseParameters::OutputFormatType>(m, "OutputFormatType", "Output format for API responses")
+        .value("JSON", BaseParameters::OutputFormatType::JSON, "JSON format")
+        .value("FLATBUFFERS", BaseParameters::OutputFormatType::FLATBUFFERS, "FlatBuffers format");
     nb::implicitly_convertible<std::string, BaseParameters::OutputFormatType>();
 }

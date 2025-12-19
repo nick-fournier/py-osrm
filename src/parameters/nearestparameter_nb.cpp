@@ -15,7 +15,7 @@ void init_NearestParameters(nb::module_& m) {
     using osrm::engine::api::NearestParameters;
 
     nb::class_<NearestParameters, BaseParameters>(m, "NearestParameters")
-        .def(nb::init<>(), nb::raw_doc("Instantiates an instance of NearestParameters.\n\n"
+        .def(nb::init<>(), "Instantiates an instance of NearestParameters.\n\n"
             "Examples:\n\
                 >>> nearest_params = osrm.NearestParameters(\n\
                         coordinates = [(7.41337, 43.72956)],\n\
@@ -31,13 +31,13 @@ void init_NearestParameters(nb::module_& m) {
             "Attributes:\n\
                 number_of_results (unsigned int): Number of nearest segments that should be returned.\n\
                 BaseParameters (osrm.osrm_ext.BaseParameters): Attributes from parent class."
-            ))
+            )
         .def("__init__", [](NearestParameters* t,
                 std::vector<osrm::util::Coordinate> coordinates,
-                std::vector<boost::optional<osrm::engine::Hint>> hints,
-                std::vector<boost::optional<double>> radiuses,
-                std::vector<boost::optional<osrm::engine::Bearing>> bearings,
-                const std::vector<boost::optional<osrm::engine::Approach>>& approaches,
+                std::vector<std::optional<osrm::engine::Hint>> hints,
+                std::vector<std::optional<double>> radiuses,
+                std::vector<std::optional<osrm::engine::Bearing>> bearings,
+                const std::vector<std::optional<osrm::engine::Approach>>& approaches,
                 bool generate_hints,
                 std::vector<std::string> exclude,
                 const BaseParameters::SnappingType snapping
@@ -55,9 +55,9 @@ void init_NearestParameters(nb::module_& m) {
                                                     snapping);
             },
                 "coordinates"_a = std::vector<osrm::util::Coordinate>(),
-                "hints"_a = std::vector<boost::optional<osrm::engine::Hint>>(),
-                "radiuses"_a = std::vector<boost::optional<double>>(),
-                "bearings"_a = std::vector<boost::optional<osrm::engine::Bearing>>(),
+                "hints"_a = std::vector<std::optional<osrm::engine::Hint>>(),
+                "radiuses"_a = std::vector<std::optional<double>>(),
+                "bearings"_a = std::vector<std::optional<osrm::engine::Bearing>>(),
                 "approaches"_a = std::vector<std::string*>(),
                 "generate_hints"_a = true,
                 "exclude"_a = std::vector<std::string>(),

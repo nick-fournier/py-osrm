@@ -15,7 +15,7 @@ void init_TripParameters(nb::module_& m) {
     using osrm::engine::api::TripParameters;
 
     nb::class_<TripParameters, RouteParameters>(m, "TripParameters")
-        .def(nb::init<>(), nb::raw_doc("Instantiates an instance of TripParameters.\n\n"
+        .def(nb::init<>(), "Instantiates an instance of TripParameters.\n\n"
             "Examples:\n\
                 >>> trip_params = osrm.TripParameters(\n\
                         coordinates = [(7.41337, 43.72956), (7.41546, 43.73077)],\n\
@@ -38,7 +38,7 @@ void init_TripParameters(nb::module_& m) {
                 destination (string): Returned route ends at 'any' or 'last' coordinate.\n\
                 roundtrip (bool): Returned route is a roundtrip (route returns to first location).\n\
                 RouteParameters (osrm.RouteParameters): Attributes from parent class."
-            ))
+            )
         .def("__init__", [](TripParameters* t,
                 TripParameters::SourceType source,
                 TripParameters::DestinationType destination,
@@ -48,13 +48,13 @@ void init_TripParameters(nb::module_& m) {
                     const std::vector<RouteParameters::AnnotationsType>& annotations,
                     RouteParameters::GeometriesType geometries,
                     RouteParameters::OverviewType overview,
-                    const boost::optional<bool> continue_straight,
+                    const std::optional<bool> continue_straight,
                     std::vector<std::size_t> waypoints,
                     std::vector<osrm::util::Coordinate> coordinates,
-                    std::vector<boost::optional<osrm::engine::Hint>> hints,
-                    std::vector<boost::optional<double>> radiuses,
-                    std::vector<boost::optional<osrm::engine::Bearing>> bearings,
-                    const std::vector<boost::optional<osrm::engine::Approach>>& approaches,
+                    std::vector<std::optional<osrm::engine::Hint>> hints,
+                    std::vector<std::optional<double>> radiuses,
+                    std::vector<std::optional<osrm::engine::Bearing>> bearings,
+                    const std::vector<std::optional<osrm::engine::Approach>>& approaches,
                     bool generate_hints,
                     std::vector<std::string> exclude,
                     const BaseParameters::SnappingType snapping
@@ -91,13 +91,13 @@ void init_TripParameters(nb::module_& m) {
                     "annotations"_a = std::vector<std::string>(),
                     "geometries"_a = std::string(),
                     "overview"_a = std::string(),
-                    "continue_straight"_a = boost::optional<bool>(),
+                    "continue_straight"_a = std::optional<bool>(),
                     "waypoints"_a = std::vector<std::size_t>(),
                     "coordinates"_a = std::vector<osrm::util::Coordinate>(),
-                    "hints"_a = std::vector<boost::optional<osrm::engine::Hint>>(),
-                    "radiuses"_a = std::vector<boost::optional<double>>(),
-                    "bearings"_a = std::vector<boost::optional<osrm::engine::Bearing>>(),
-                    "approaches"_a = std::vector<std::string*>(),
+                    "hints"_a = std::vector<std::optional<osrm::engine::Hint>>(),
+                    "radiuses"_a = std::vector<std::optional<double>>(),
+                    "bearings"_a = std::vector<std::optional<osrm::engine::Bearing>>(),
+                    "approaches"_a = std::vector<std::string>(),
                     "generate_hints"_a = true,
                     "exclude"_a = std::vector<std::string>(),
                     "snapping"_a = std::string()
@@ -107,23 +107,13 @@ void init_TripParameters(nb::module_& m) {
         .def_rw("roundtrip", &TripParameters::roundtrip)
         .def("IsValid", &TripParameters::IsValid);
 
-    nb::class_<TripParameters::SourceType>(m, "TripSourceType")
-        .def("__init__", [](TripParameters::SourceType* t, const std::string& str) {
-            TripParameters::SourceType source = osrm_nb_util::str_to_enum(str, "TripSourceType", source_map);
-            new (t) TripParameters::SourceType(source);
-        }, "Instantiates a SourceType based on provided String value.")
-        .def("__repr__", [](TripParameters::SourceType type) {
-            return osrm_nb_util::enum_to_str(type, "TripSourceType", source_map);
-        }, "Return a String based on SourceType value.");
+    nb::enum_<TripParameters::SourceType>(m, "TripSourceType", "Starting point for round trip")
+        .value("Any", TripParameters::SourceType::Any, "Start from any waypoint")
+        .value("First", TripParameters::SourceType::First, "Start from first waypoint");
     nb::implicitly_convertible<std::string, TripParameters::SourceType>();
 
-    nb::class_<TripParameters::DestinationType>(m, "TripDestinationType")
-        .def("__init__", [](TripParameters::DestinationType* t, const std::string& str) {
-            TripParameters::DestinationType dest = osrm_nb_util::str_to_enum(str, "TripDestinationType", dest_map);
-            new (t) TripParameters::DestinationType(dest);
-        }, "Instantiates a DestinationType based on provided String value.")
-        .def("__repr__", [](TripParameters::DestinationType type) {
-            return osrm_nb_util::enum_to_str(type, "TripDestinationType", dest_map);
-        }, "Return a String based on DestinationType value.");
+    nb::enum_<TripParameters::DestinationType>(m, "TripDestinationType", "Ending point for round trip")
+        .value("Any", TripParameters::DestinationType::Any, "End at any waypoint")
+        .value("Last", TripParameters::DestinationType::Last, "End at last waypoint");
     nb::implicitly_convertible<std::string, TripParameters::DestinationType>();
 }

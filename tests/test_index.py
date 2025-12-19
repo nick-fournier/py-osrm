@@ -3,7 +3,7 @@ import osrm
 import constants
 
 data_path = constants.data_path
-corech_data_path = constants.corech_data_path
+ch_data_path = constants.ch_data_path
 mld_data_path = constants.mld_data_path
 test_memory_path = constants.test_memory_path
 
@@ -60,24 +60,20 @@ class TestIndex:
                      storage_config = data_path,
                      use_shared_memory = False)
         
-        osrm.OSRM(algorithm = "CoreCH", 
-                     storage_config = corech_data_path,
-                     use_shared_memory = False)
-        
         osrm.OSRM(algorithm = "CH", 
-                     storage_config = corech_data_path,
+                     storage_config = ch_data_path,
                      use_shared_memory = False)
 
     def test_datamatchalgo(self):    
         with pytest.raises(RuntimeError) as ex:
-            osrm.OSRM(algorithm = "CoreCH", 
+            osrm.OSRM(algorithm = "CH", 
                          storage_config = mld_data_path, 
                          use_shared_memory = False)
         assert("Could not find any metrics for CH in the data." in str(ex.value))
 
         with pytest.raises(RuntimeError) as ex:
             osrm.OSRM(algorithm = "MLD",
-                         storage_config = corech_data_path,
+                         storage_config = mld_data_path,
                          use_shared_memory = False)
         assert("Could not find any metrics for MLD in the data." in str(ex.value))
 

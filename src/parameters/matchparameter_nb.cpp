@@ -15,7 +15,7 @@ void init_MatchParameters(nb::module_& m) {
     using osrm::engine::api::MatchParameters;
 
     nb::class_<MatchParameters, RouteParameters>(m, "MatchParameters")
-        .def(nb::init<>(), nb::raw_doc("Instantiates an instance of MatchParameters.\n\n"
+        .def(nb::init<>(), "Instantiates an instance of MatchParameters.\n\n"
             "Examples:\n\
                 >>> match_params = osrm.MatchParameters(\n\
                         coordinates = [(7.41337, 43.72956), (7.41546, 43.73077), (7.41862, 43.73216)],\n\
@@ -38,7 +38,7 @@ void init_MatchParameters(nb::module_& m) {
                 gaps (string): Allows the input track splitting based on huge timestamp gaps between points.\n\
                 tidy (bool): Allows the input track modification to obtain better matching quality for noisy tracks.\n\
                 RouteParameters (osrm.RouteParameters): Attributes from parent class."
-            ))
+            )
         .def("__init__", [](MatchParameters* t,
                 std::vector<unsigned> timestamps,
                 MatchParameters::GapsType gaps_type,
@@ -48,13 +48,13 @@ void init_MatchParameters(nb::module_& m) {
                     const std::vector<RouteParameters::AnnotationsType>& annotations,
                     RouteParameters::GeometriesType geometries,
                     RouteParameters::OverviewType overview,
-                    const boost::optional<bool> continue_straight,
+                    const std::optional<bool> continue_straight,
                     std::vector<std::size_t> waypoints,
                     std::vector<osrm::util::Coordinate> coordinates,
-                    std::vector<boost::optional<osrm::engine::Hint>> hints,
-                    std::vector<boost::optional<double>> radiuses,
-                    std::vector<boost::optional<osrm::engine::Bearing>> bearings,
-                    const std::vector<boost::optional<osrm::engine::Approach>>& approaches,
+                    std::vector<std::optional<osrm::engine::Hint>> hints,
+                    std::vector<std::optional<double>> radiuses,
+                    std::vector<std::optional<osrm::engine::Bearing>> bearings,
+                    const std::vector<std::optional<osrm::engine::Approach>>& approaches,
                     bool generate_hints,
                     std::vector<std::string> exclude,
                     const BaseParameters::SnappingType snapping
@@ -92,12 +92,12 @@ void init_MatchParameters(nb::module_& m) {
                     "annotations"_a = std::vector<std::string>(),
                     "geometries"_a = std::string(),
                     "overview"_a = std::string(),
-                    "continue_straight"_a = boost::optional<bool>(),
+                    "continue_straight"_a = std::optional<bool>(),
                     "waypoints"_a = std::vector<std::size_t>(),
                     "coordinates"_a = std::vector<osrm::util::Coordinate>(),
-                    "hints"_a = std::vector<boost::optional<osrm::engine::Hint>>(),
-                    "radiuses"_a = std::vector<boost::optional<double>>(),
-                    "bearings"_a = std::vector<boost::optional<osrm::engine::Bearing>>(),
+                    "hints"_a = std::vector<std::optional<osrm::engine::Hint>>(),
+                    "radiuses"_a = std::vector<std::optional<double>>(),
+                    "bearings"_a = std::vector<std::optional<osrm::engine::Bearing>>(),
                     "approaches"_a = std::vector<std::string*>(),
                     "generate_hints"_a = true,
                     "exclude"_a = std::vector<std::string>(),
@@ -108,13 +108,8 @@ void init_MatchParameters(nb::module_& m) {
         .def_rw("tidy", &MatchParameters::tidy)
         .def("IsValid", &MatchParameters::IsValid);
 
-    nb::class_<MatchParameters::GapsType>(m, "MatchGapsType")
-        .def("__init__", [](MatchParameters::GapsType* t, const std::string& str) {
-            MatchParameters::GapsType gaps = osrm_nb_util::str_to_enum(str, "MatchGapsType", gaps_map);
-            new (t) MatchParameters::GapsType(gaps);
-        }, "Instantiates a GapsType based on provided String value.")
-        .def("__repr__", [](MatchParameters::GapsType type) {
-            return osrm_nb_util::enum_to_str(type, "MatchGapsType", gaps_map);
-        }, "Return a String based on GapsType value.");
+    nb::enum_<MatchParameters::GapsType>(m, "MatchGapsType", "Handling of gaps in input GPS trace")
+        .value("Split", MatchParameters::GapsType::Split, "Split route at gaps")
+        .value("Ignore", MatchParameters::GapsType::Ignore, "Ignore gaps and match continuously");
     nb::implicitly_convertible<std::string, MatchParameters::GapsType>();
 }

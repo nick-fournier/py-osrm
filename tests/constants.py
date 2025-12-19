@@ -16,5 +16,4 @@ test_tile = {'at': [17059, 11948, 15], 'size': 156539}
 
 data_path = path + "ch/monaco.osrm"
 mld_data_path = path + "mld/monaco.osrm"
-corech_data_path = path + "corech/monaco.osrm"
 test_memory_path = path + "test_memory"

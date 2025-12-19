@@ -51,7 +51,6 @@ set(SRCS
   src/parameters/tileparameter_nb.cpp
   src/parameters/tripparameter_nb.cpp
   
-  src/types/optional_nb.cpp
   src/types/coordinate_nb.cpp
   src/types/jsoncontainer_nb.cpp
   src/types/approach_nb.cpp
@@ -93,7 +92,7 @@ else()
   FetchContent_Declare(
     libosrm
     GIT_REPOSITORY https://github.com/Project-OSRM/osrm-backend
-    GIT_TAG master
+    GIT_TAG v6.0.0
   )
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-array-bounds -Wno-uninitialized -Wno-free-nonheap-object")
 
