@@ -2,19 +2,19 @@ import pytest
 import osrm
 import constants
 
-data_path = constants.data_path
+ch_data_path = constants.ch_data_path
 mld_data_path = constants.mld_data_path
 test_tile = constants.test_tile
 
 class TestTile:
-    py_osrm = osrm.OSRM(
-        storage_config = data_path, 
-        use_shared_memory = False
-    )
+    def setup_method(self):
+        self.py_osrm = osrm.OSRM(
+            storage_config = ch_data_path, 
+            use_shared_memory = False
+        )
 
     def test_tile(self):
-        tile_params = osrm.TileParameters(test_tile["at"])
-        res = self.py_osrm.Tile(tile_params)
+        res = self.py_osrm.Tile(test_tile["at"])
         assert(len(res) == test_tile["size"])
 
     def test_tile_preconditions(self):

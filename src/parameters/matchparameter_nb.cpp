@@ -106,10 +106,11 @@ void init_MatchParameters(nb::module_& m) {
         .def_rw("timestamps", &MatchParameters::timestamps)
         .def_rw("gaps", &MatchParameters::gaps)
         .def_rw("tidy", &MatchParameters::tidy)
+        .def_rw("waypoints", &MatchParameters::waypoints)
         .def("IsValid", &MatchParameters::IsValid);
 
     nb::enum_<MatchParameters::GapsType>(m, "MatchGapsType", "Handling of gaps in input GPS trace")
         .value("Split", MatchParameters::GapsType::Split, "Split route at gaps")
-        .value("Ignore", MatchParameters::GapsType::Ignore, "Ignore gaps and match continuously");
-    nb::implicitly_convertible<std::string, MatchParameters::GapsType>();
+        .value("Ignore", MatchParameters::GapsType::Ignore, "Ignore gaps and match continuously")
+        .export_values();
 }

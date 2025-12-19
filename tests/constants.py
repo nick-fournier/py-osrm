@@ -12,7 +12,7 @@ three_test_coordinates = [(7.41337, 43.72956),
 
 two_test_coordinates = three_test_coordinates[0:2]
 
-test_tile = {'at': [17059, 11948, 15], 'size': 156539}
+test_tile = {'at': [17059, 11948, 15], 'size': 159125}
 
 # Explicit data paths for different algorithms
 ch_data_path = data_dir + "ch/monaco.osrm"

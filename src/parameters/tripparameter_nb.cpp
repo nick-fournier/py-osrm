@@ -105,15 +105,16 @@ void init_TripParameters(nb::module_& m) {
         .def_rw("source", &TripParameters::source)
         .def_rw("destination", &TripParameters::destination)
         .def_rw("roundtrip", &TripParameters::roundtrip)
+        .def_rw("waypoints", &TripParameters::waypoints)
         .def("IsValid", &TripParameters::IsValid);
 
     nb::enum_<TripParameters::SourceType>(m, "TripSourceType", "Starting point for round trip")
         .value("Any", TripParameters::SourceType::Any, "Start from any waypoint")
-        .value("First", TripParameters::SourceType::First, "Start from first waypoint");
-    nb::implicitly_convertible<std::string, TripParameters::SourceType>();
+        .value("First", TripParameters::SourceType::First, "Start from first waypoint")
+        .export_values();
 
     nb::enum_<TripParameters::DestinationType>(m, "TripDestinationType", "Ending point for round trip")
         .value("Any", TripParameters::DestinationType::Any, "End at any waypoint")
-        .value("Last", TripParameters::DestinationType::Last, "End at last waypoint");
-    nb::implicitly_convertible<std::string, TripParameters::DestinationType>();
+        .value("Last", TripParameters::DestinationType::Last, "End at last waypoint")
+        .export_values();
 }

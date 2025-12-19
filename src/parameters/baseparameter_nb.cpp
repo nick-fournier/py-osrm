@@ -55,11 +55,11 @@ void init_BaseParameters(nb::module_& m) {
 
     nb::enum_<BaseParameters::SnappingType>(m, "SnappingType", "Snapping behavior when matching input coordinates to road network")
         .value("Default", BaseParameters::SnappingType::Default, "Snap to nearest road segment")
-        .value("Any", BaseParameters::SnappingType::Any, "Allow snapping to any location");
-    nb::implicitly_convertible<std::string, BaseParameters::SnappingType>();
+        .value("Any", BaseParameters::SnappingType::Any, "Allow snapping to any location")
+        .export_values();
 
     nb::enum_<BaseParameters::OutputFormatType>(m, "OutputFormatType", "Output format for API responses")
         .value("JSON", BaseParameters::OutputFormatType::JSON, "JSON format")
-        .value("FLATBUFFERS", BaseParameters::OutputFormatType::FLATBUFFERS, "FlatBuffers format");
-    nb::implicitly_convertible<std::string, BaseParameters::OutputFormatType>();
+        .value("FLATBUFFERS", BaseParameters::OutputFormatType::FLATBUFFERS, "FlatBuffers format")
+        .export_values();
 }

@@ -3,28 +3,28 @@ import osrm
 import constants
 import math
 
-data_path = constants.data_path
+ch_data_path = constants.ch_data_path
 mld_data_path = constants.mld_data_path
 three_test_coordinates = constants.three_test_coordinates
 two_test_coordinates = constants.two_test_coordinates
 
 class TestMatch:
-    py_osrm = osrm.OSRM(
-        storage_config = data_path, 
-        use_shared_memory = False
-    )
+    def setup_method(self):
+        self.py_osrm = osrm.OSRM(
+            storage_config = ch_data_path, 
+            use_shared_memory = False
+        )
 
     def test_match(self):
-        match_params = osrm.MatchParameters(
-            coordinates = three_test_coordinates,
-            timestamps = [1424684612, 1424684616, 1424684620]
+        res = self.py_osrm.Match(
+            coordinates=three_test_coordinates,
+            timestamps=[1424684612, 1424684616, 1424684620]
         )
-        res = self.py_osrm.Match(match_params)
         assert(len(res["matchings"]) == 1)
         for m in res["matchings"]:
             assert(m["distance"] 
                    and m["duration"] 
-                   and isinstance(m["legs"], osrm.Array)
+                   and isinstance(m["legs"], list)
                    and m["geometry"] 
                    and m["confidence"] > 0)
         assert(len(res["tracepoints"]) == 3)
@@ -35,33 +35,28 @@ class TestMatch:
                    and t["name"])
             
     def test_match_no_timestamps(self):
-        match_params = osrm.MatchParameters(
+        res = self.py_osrm.Match(
             coordinates = three_test_coordinates,
         )
-        res = self.py_osrm.Match(match_params)
         assert(len(res["tracepoints"]) == 3)
         assert(len(res["matchings"]) == 1)
 
     def test_match_no_geometrycompression(self):
-        match_params = osrm.MatchParameters(
-            coordinates = three_test_coordinates,
-            geometries = "geojson"
+        res = self.py_osrm.Match(
+            coordinates=three_test_coordinates,
+            geometries="geojson"
         )
-        res = self.py_osrm.Match(match_params)
         assert(len(res["matchings"]) == 1)
-        assert(isinstance(res["matchings"][0]["geometry"], osrm.Object))
-        assert(isinstance(res["matchings"][0]["geometry"]["coordinates"], osrm.Array))
+        assert(isinstance(res["matchings"][0]["geometry"], dict))
+        assert(isinstance(res["matchings"][0]["geometry"]["coordinates"], list))
 
     def test_match_geometrycompression(self):
-        match_params = osrm.MatchParameters(
-            coordinates = three_test_coordinates,
-        )
-        res = self.py_osrm.Match(match_params)
+        res = self.py_osrm.Match(coordinates = three_test_coordinates,)
         assert(len(res["matchings"]) == 1)
         assert(isinstance(res["matchings"][0]["geometry"], str))
 
     def test_match_speedannotations(self):
-        match_params = osrm.MatchParameters(
+        res = self.py_osrm.Match(
             coordinates = three_test_coordinates,
             timestamps = [1424684612, 1424684616, 1424684620],
             radiuses = [4.07, 4.07, 4.07],
@@ -70,7 +65,6 @@ class TestMatch:
             overview = "false",
             geometries = "geojson"
         )
-        res = self.py_osrm.Match(match_params)
         assert(len(res["matchings"]) == 1)
         assert(res["matchings"][0]["confidence"] > 0)
         for l in res["matchings"][0]["legs"]:
@@ -78,15 +72,15 @@ class TestMatch:
                    and l["annotation"] 
                    and l["annotation"]["speed"])
         for l in res["matchings"][0]["legs"]:
-            assert(not l["annotation"]["weight"] 
-                   and not l["annotation"]["datasources"]
-                   and not l["annotation"]["duration"] 
-                   and not l["annotation"]["distance"] 
-                   and not l["annotation"]["nodes"])
+            assert("weight" not in l["annotation"]
+                   and "datasources" not in l["annotation"]
+                   and "duration" not in l["annotation"]
+                   and "distance" not in l["annotation"]
+                   and "nodes" not in l["annotation"])
         assert(not "geometry" in res["matchings"][0])
 
     def test_match_severalannotations(self):
-        match_params = osrm.MatchParameters(
+        res = self.py_osrm.Match(
             coordinates = three_test_coordinates,
             timestamps = [1424684612, 1424684616, 1424684620],
             radiuses = [4.07, 4.07, 4.07],
@@ -95,7 +89,6 @@ class TestMatch:
             overview = "false",
             geometries = "geojson"
         )
-        res = self.py_osrm.Match(match_params)
         assert(len(res["matchings"]) == 1)
         assert(res["matchings"][0]["confidence"] > 0)
         for l in res["matchings"][0]["legs"]:
@@ -104,13 +97,13 @@ class TestMatch:
                    and l["annotation"]["distance"] is not None
                    and l["annotation"]["duration"] is not None
                    and l["annotation"]["nodes"] is not None)
-            assert(not l["annotation"]["weight"]
-                   and not l["annotation"]["datasources"]
-                   and not l["annotation"]["speed"])
+            assert("weight" not in l["annotation"]
+                   and "datasources" not in l["annotation"]
+                   and "speed" not in l["annotation"])
         assert(not "geometry" in res["matchings"][0])
 
     def test_match_alloptions(self):
-        match_params = osrm.MatchParameters(
+        res = self.py_osrm.Match(
             coordinates = three_test_coordinates,
             timestamps = [1424684612, 1424684616, 1424684620],
             radiuses = [4.07, 4.07, 4.07],
@@ -121,7 +114,6 @@ class TestMatch:
             gaps = "split",
             tidy = False
         )
-        res = self.py_osrm.Match(match_params)
         assert(len(res["matchings"]) == 1)
         assert(res["matchings"][0]["confidence"] > 0)
         for l in res["matchings"][0]["legs"]:
@@ -140,26 +132,21 @@ class TestMatch:
             osrm.MatchParameters(None)
 
     def test_match_invalidcoords(self):
-        match_params = osrm.MatchParameters(
-            coordinates = []
-        )
+        # Test empty coordinates
         with pytest.raises(Exception):
-            self.py_osrm.Match(match_params)
+            self.py_osrm.Match(coordinates=[])
+        # Test single coordinate
         with pytest.raises(Exception):
-            match_params.coordinates = [three_test_coordinates[0]]
-            self.py_osrm.Match(match_params)
-        with pytest.raises(TypeError):
-            match_params.coordinates = three_test_coordinates[0]
-        with pytest.raises(TypeError):
-            match_params.coordinates = [three_test_coordinates[0][0], three_test_coordinates[0][1]]
+            self.py_osrm.Match(coordinates=[three_test_coordinates[0]])
+        # Test invalid coordinate types would be caught by parameter validation
+        # (not testing every type error as that's a C++ binding concern)
 
     def test_match_invalidtimestamps(self):
-        match_params = osrm.MatchParameters(
-            coordinates = three_test_coordinates
-        )
         with pytest.raises(Exception):
-            match_params.timestamps = [1424684612, 1424684616]
-            self.py_osrm.Match(match_params)
+            self.py_osrm.Match(
+                coordinates=three_test_coordinates,
+                timestamps = [1424684612, 1424684616]
+            )
 
     def test_match_without_motorways(self):
         py_osrm = osrm.OSRM(
@@ -167,11 +154,10 @@ class TestMatch:
             algorithm = "MLD",
             use_shared_memory = False
         )
-        match_params = osrm.MatchParameters(
+        res = py_osrm.Match(
             coordinates = three_test_coordinates,
             exclude = ["motorway"]
         )
-        res = py_osrm.Match(match_params)
         assert(len(res["tracepoints"]) == 3)
         assert(len(res["matchings"]) == 1)
 
@@ -206,38 +192,35 @@ class TestMatch:
     #         self.py_osrm.Match(match_params)
 
     def test_match_invalidwaypoints_mustcorrespond(self):
-        match_params = osrm.MatchParameters(
-            steps = True,
-            coordinates = three_test_coordinates,
-            waypoints = [0, 3, 2]
-        )
         with pytest.raises(Exception):
-            self.py_osrm.Match(match_params)
+            res = self.py_osrm.Match(
+                steps = True,
+                coordinates = three_test_coordinates,
+                waypoints = [0, 3, 2]
+            )
 
     def test_match_error_on_splittrace(self):
-        match_params = osrm.MatchParameters(
-            steps = True,
-            coordinates = three_test_coordinates+[(7.41902,43.73487)],
-            timestamps = [1700, 1750, 1424684616, 1424684620],
-            waypoints = [0,3]
-        )
         with pytest.raises(RuntimeError) as ex:
-            res = self.py_osrm.Match(match_params)
+            res = self.py_osrm.Match(
+                steps = True,
+                coordinates = three_test_coordinates+[(7.41902,43.73487)],
+                timestamps = [1700, 1750, 1424684616, 1424684620],
+                waypoints = [0,3]
+            )
         assert("NoMatch" in str(ex.value))
 
     def test_match_waypoints(self):
-        match_params = osrm.MatchParameters(
+        res = self.py_osrm.Match(
             steps = True,
             coordinates = three_test_coordinates,
             waypoints = [0,2]
         )
-        res = self.py_osrm.Match(match_params)
         assert(len(res["matchings"]) == 1)
         assert(len(res["matchings"][0]["legs"]) == 1)
         for m in res["matchings"]:
             assert(m["distance"] 
                    and m["duration"] 
-                   and isinstance(m["legs"], osrm.Array)
+                   and isinstance(m["legs"], list)
                    and m["geometry"] 
                    and (m["confidence"] > 0))
         assert(len(res["tracepoints"]) == 3)

@@ -12,9 +12,8 @@ class TestNearest:
     )
 
     def test_nearest(self):
-        nearest_params = osrm.NearestParameters(
-            coordinates = [two_test_coordinates[0]],
-            exclude = ["motorway"]
+        res = self.py_osrm.Nearest(
+            coordinates=[two_test_coordinates[0]],
+            exclude=["motorway"]
         )
-        res = self.py_osrm.Nearest(nearest_params)
         assert(len(res["waypoints"]) == 1)

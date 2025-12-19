@@ -116,23 +116,35 @@ void init_RouteParameters(nb::module_& m) {
         .def_rw("steps", &RouteParameters::steps)
         .def_rw("alternatives", &RouteParameters::alternatives)
         .def_rw("number_of_alternatives", &RouteParameters::number_of_alternatives)
-        .def_rw("annotations_type", &RouteParameters::annotations_type)
+        .def_prop_rw("annotations_type",
+            [](const RouteParameters& self) { 
+                return static_cast<int>(self.annotations_type); 
+            },
+            [](RouteParameters& self, int value) { 
+                self.annotations_type = static_cast<RouteParameters::AnnotationsType>(value); 
+            })
         .def_rw("geometries", &RouteParameters::geometries)
         .def_rw("overview", &RouteParameters::overview)
         .def_rw("continue_straight", &RouteParameters::continue_straight)
+        .def_rw("waypoints", &RouteParameters::waypoints)
+        .def("set_annotations", [](RouteParameters& self, const std::vector<RouteParameters::AnnotationsType>& annotations) {
+            self.annotations = !annotations.empty();
+            self.annotations_type = osrm_nb_util::calculate_routeannotations_type(annotations);
+        }, "annotations"_a, "Set annotations from a list of AnnotationsType enums")
         .def("IsValid", &RouteParameters::IsValid);
 
+    // Enum types - no string conversion (handled in Python wrapper)
     nb::enum_<RouteParameters::GeometriesType>(m, "RouteGeometriesType", "Geometry encoding format for route shapes")
         .value("Polyline", RouteParameters::GeometriesType::Polyline, "Polyline encoding (precision 5)")
         .value("Polyline6", RouteParameters::GeometriesType::Polyline6, "Polyline encoding (precision 6)")
-        .value("GeoJSON", RouteParameters::GeometriesType::GeoJSON, "GeoJSON LineString format");
-    nb::implicitly_convertible<std::string, RouteParameters::GeometriesType>();
+        .value("GeoJSON", RouteParameters::GeometriesType::GeoJSON, "GeoJSON LineString format")
+        .export_values();
 
     nb::enum_<RouteParameters::OverviewType>(m, "RouteOverviewType", "Level of detail for route overview geometry")
         .value("Simplified", RouteParameters::OverviewType::Simplified, "Simplified geometry")
         .value("Full", RouteParameters::OverviewType::Full, "Full detailed geometry")
-        .value("False", RouteParameters::OverviewType::False, "No overview geometry");
-    nb::implicitly_convertible<std::string, RouteParameters::OverviewType>();
+        .value("False", RouteParameters::OverviewType::False, "No overview geometry")
+        .export_values();
 
     nb::enum_<RouteParameters::AnnotationsType>(m, "RouteAnnotationsType", "Additional route metadata (bitflags)", nb::is_arithmetic())
         .value("None", RouteParameters::AnnotationsType::None, "No annotations")
@@ -151,6 +163,6 @@ void init_RouteParameters(nb::module_& m) {
         }, nb::is_operator())
         .def("__ior__", [](RouteParameters::AnnotationsType& lhs, RouteParameters::AnnotationsType rhs) {
             return lhs = lhs | rhs;
-        }, nb::is_operator());
-    nb::implicitly_convertible<std::string, RouteParameters::AnnotationsType>();
+        }, nb::is_operator())
+        .export_values();
 }

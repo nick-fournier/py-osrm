@@ -115,14 +115,23 @@ static const std::unordered_map<std::string, TableParameters::AnnotationsType> t
         .def_rw("destinations", &TableParameters::destinations)
         .def_rw("fallback_speed", &TableParameters::fallback_speed)
         .def_rw("fallback_coordinate_type", &TableParameters::fallback_coordinate_type)
-        .def_rw("annotations", &TableParameters::annotations)
+        .def_prop_rw("annotations",
+            [](const TableParameters& self) { 
+                return static_cast<int>(self.annotations); 
+            },
+            [](TableParameters& self, int value) { 
+                self.annotations = static_cast<TableParameters::AnnotationsType>(value); 
+            })
         .def_rw("scale_factor", &TableParameters::scale_factor)
+        .def("set_annotations", [](TableParameters& self, const std::vector<TableParameters::AnnotationsType>& annotations) {
+            self.annotations = osrm_nb_util::calculate_tableannotations_type(annotations);
+        }, "annotations"_a, "Set annotations from a list of AnnotationsType enums")
         .def("IsValid", &TableParameters::IsValid);
 
     nb::enum_<TableParameters::FallbackCoordinateType>(m, "TableFallbackCoordinateType", "Coordinate type used when fallback speed is applied")
         .value("Input", TableParameters::FallbackCoordinateType::Input, "Use input coordinates")
-        .value("Snapped", TableParameters::FallbackCoordinateType::Snapped, "Use snapped coordinates");
-    nb::implicitly_convertible<std::string, TableParameters::FallbackCoordinateType>();
+        .value("Snapped", TableParameters::FallbackCoordinateType::Snapped, "Use snapped coordinates")
+        .export_values();
 
     nb::enum_<TableParameters::AnnotationsType>(m, "TableAnnotationsType", "Metadata included in distance table (bitflags)", nb::is_arithmetic())
         .value("None", TableParameters::AnnotationsType::None, "No annotations")
@@ -137,6 +146,6 @@ static const std::unordered_map<std::string, TableParameters::AnnotationsType> t
         }, nb::is_operator())
         .def("__ior__", [](TableParameters::AnnotationsType& lhs, TableParameters::AnnotationsType rhs) {
             return lhs = lhs | rhs;
-        }, nb::is_operator());
-    nb::implicitly_convertible<std::string, TableParameters::AnnotationsType>();
+        }, nb::is_operator())
+        .export_values();
 }
