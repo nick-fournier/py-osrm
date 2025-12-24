@@ -8,16 +8,59 @@ This module provides Python bindings for OSRM's data preprocessing pipeline:
 - customize: Customize partitioned graph for MLD algorithm
 """
 
-import os
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any
 
 from . import osrm_ext
 
 
+def _resolve_profile(profile: str) -> Path:
+    """
+    Resolve a profile name or path to an absolute path.
+    
+    Args:
+        profile: Either a profile name ('car', 'bicycle', 'foot') or a path to a .lua file
+    
+    Returns:
+        Path to the profile file
+    
+    Raises:
+        ValueError: If profile name is not recognized
+        FileNotFoundError: If custom profile path doesn't exist
+    """
+    # Known profile names
+    known_profiles = {'car', 'bicycle', 'foot'}
+    
+    # If it's a simple known profile name, use bundled profile
+    if profile.lower() in known_profiles:
+        package_dir = Path(__file__).parent
+        profile_path = package_dir / 'profiles' / f'{profile.lower()}.lua'
+        
+        if not profile_path.exists():
+            raise FileNotFoundError(
+                f"Bundled profile not found: {profile_path}. "
+                "This is likely a package installation issue."
+            )
+        
+        return profile_path
+    
+    # Otherwise treat as a custom profile path
+    profile_path = Path(profile)
+    
+    # Check if file exists
+    if not profile_path.exists():
+        raise FileNotFoundError(
+            f"Profile file not found: {profile}. "
+            f"Valid profile names are: {', '.join(sorted(known_profiles))} "
+            "or provide a path to a custom .lua profile file."
+        )
+    
+    return profile_path
+
+
 def extract(
     input_path: str,
-    profile_path: str = "car.lua",
+    profile: str = "car",
     output_path: Optional[str] = None,
     threads: Optional[int] = None,
     verbosity: str = "INFO",
@@ -34,7 +77,7 @@ def extract(
     
     Args:
         input_path: Path to input OSM file (.osm, .osm.bz2, or .osm.pbf)
-        profile_path: Path to Lua routing profile (e.g., 'car.lua', 'bicycle.lua')
+        profile: Profile name ('car', 'bicycle', 'foot') or path to custom .lua file
         output_path: Base path for output files. If None, uses input_path base name.
         threads: Number of threads to use. If None, uses all available CPU cores.
         verbosity: Log level - one of: "NONE", "ERROR", "WARNING", "INFO", "DEBUG"
@@ -57,8 +100,14 @@ def extract(
     Example:
         >>> import osrm
         >>> 
-        >>> # Simple extraction
-        >>> result = osrm.extract('data.osm.pbf', profile_path='profiles/car.lua')
+        >>> # Simple extraction with bundled profile
+        >>> result = osrm.extract('data.osm.pbf', profile='car')
+        >>> 
+        >>> # With different profile
+        >>> result = osrm.extract('data.osm.pbf', profile='bicycle')
+        >>> 
+        >>> # With custom profile
+        >>> result = osrm.extract('data.osm.pbf', profile='path/to/custom.lua')
         >>> 
         >>> # With progress callback
         >>> def show_progress(line):
@@ -69,7 +118,7 @@ def extract(
         >>> # With custom settings
         >>> result = osrm.extract(
         ...     'data.osm.pbf',
-        ...     profile_path='profiles/bicycle.lua',
+        ...     profile='bicycle',
         ...     threads=4,
         ...     small_component_size=500,
         ...     use_metadata=True
@@ -79,22 +128,8 @@ def extract(
     config = osrm_ext.ExtractorConfig()
     config.input_path = Path(input_path)
     
-    # Handle profile path
-    profile_path_obj = Path(profile_path)
-    if not profile_path_obj.is_absolute():
-        # Try relative to current directory
-        if profile_path_obj.exists():
-            config.profile_path = profile_path_obj
-        else:
-            # Try relative to package data
-            package_dir = Path(__file__).parent
-            potential_profile = package_dir / profile_path
-            if potential_profile.exists():
-                config.profile_path = potential_profile
-            else:
-                config.profile_path = profile_path_obj
-    else:
-        config.profile_path = profile_path_obj
+    # Resolve profile path
+    config.profile_path = _resolve_profile(profile)
     
     # Set output path
     if output_path:

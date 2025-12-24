@@ -4,44 +4,81 @@ on:
   push:
     branches:
       - main
+      - revival # temp to test ci
     paths-ignore:
       - '*.md'
 
 jobs:
   build_wheels:
-    name: Push - cp38*, ${{ matrix.platform }}
+    name: Push - cp${{ matrix.python_version }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform }}-${{ matrix.version }}
     strategy:
       fail-fast: true
       matrix:
         platform: [ubuntu, macos, windows]
         version: [latest]
+        python_version: [39, 310, 311, 312]
     env:
       GITHUB_TOKEN: ${{ github.token }}
-      ARTIFACT_WORKFLOW: osrm-backend.yml
 
     steps:
     - name: Checkout Project
       uses: actions/checkout@v3
 
-    - name: Get osrm-backend Artifact ID
-      if: matrix.platform != 'ubuntu'
-      shell: bash
+    - name: Ensure vcpkg on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
       run: |
-        echo ARTIFACT_ID=$( \
-          gh api -X GET \
-          repos/${{ github.repository }}/actions/workflows/${{ env.ARTIFACT_WORKFLOW }}/runs \
-          -F status='success' \
-          -F per_page=1 \
-          | jq '.["workflow_runs"][0].id') \
-        >> $GITHUB_ENV
+        if (-not (Test-Path 'C:\vcpkg')) {
+          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+        }
+        if (Test-Path 'C:\vcpkg\bootstrap-vcpkg.bat') {
+          & C:\vcpkg\bootstrap-vcpkg.bat
+        }
 
-    - name: Download osrm-backend Artifact
-      if: matrix.platform != 'ubuntu'
+    - name: Restore vcpkg binary cache (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ github.workspace }}\vcpkg-bincache
+        key: vcpkg-bincache-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json') }}
+
+    - name: Create vcpkg binary cache directory (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
       run: |
-        gh run download ${{ env.ARTIFACT_ID }} -n osrm-backend_${{ matrix.platform }}
+        New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\vcpkg-bincache" | Out-Null
+
+    - name: Install dependencies via vcpkg on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+        VCPKG_FEATURE_FLAGS: binarycaching
+      run: |
+        C:\vcpkg\vcpkg install --triplet x64-windows --x-manifest-root="${{ github.workspace }}"
+
+    # NEW: Save vcpkg binary cache (even if later steps fail)
+    - name: Save vcpkg binary cache (Windows)
+      if: runner.os == 'Windows' && always()
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ github.workspace }}\vcpkg-bincache
+        key: vcpkg-bincache-${{ runner.os }}-x64-windows-${{ hashFiles('vcpkg.json') }}
+
+    - name: Setup MSVC (cl.exe) environment
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
 
     - name: Run CIBuildWheel
-      uses: pypa/cibuildwheel@v2.14.1
+      uses: pypa/cibuildwheel@v3.3.0
       env:
-        CIBW_BUILD: cp38*
+        CIBW_BUILD: cp${{ matrix.python_version }}-*
+        CIBW_CONFIG_SETTINGS_WINDOWS: >
+          cmake.define.CMAKE_BUILD_TYPE=Release
+          cmake.args=-GNinja
+        CIBW_ENVIRONMENT_WINDOWS: >
+          CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+          VCPKG_DEFAULT_TRIPLET=x64-windows

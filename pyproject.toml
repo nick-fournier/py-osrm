@@ -3,12 +3,20 @@ requires = ["scikit-build-core >=0.4.3", "nanobind >=1.3.1"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "osrm-bindings"
-version = "0.0.1"
+name = "py-osrm"
+version = "0.0.2"
 description = "Python bindings for the osrm-backend project"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
 
 [project.urls]
 repository = "https://github.com/gis-ops/py-osrm"
@@ -17,63 +25,53 @@ repository = "https://github.com/gis-ops/py-osrm"
 [tool.scikit-build]
 minimum-version = "0.4"
 build-dir = "build/{wheel_tag}"
-wheel.py-api = "cp312"
-wheel.packages = ["src/osrm", "src/bin"]
 
 [tool.cibuildwheel]
 archs = ["native"]
-build = "cp*"
+build = "cp3{9,10,11,12}-*"
 build-verbosity = 1
 skip = "*musllinux*"
 manylinux-x86_64-image = "ghcr.io/gis-ops/manylinux:2_28_osrm_python"
 test-requires = "pytest"
-test-command = [
-  "cd {project}/tests/data",
-  "make",
-  "python -m osrm datastore {project}/tests/data/ch/monaco",
-  "pytest {project}/tests"
-]
+test-command = "cd {project}/tests/data && make && python -m osrm datastore {project}/tests/data/ch/monaco && pytest {project}/tests"
 
 [tool.cibuildwheel.linux]
-environment = "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/intel64/gcc4.8/"
+build = "cp3{9,10,11,12}-*"
+before-all = """
+  rpm --import https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux || true
+  yum install -y tbb-devel bzip2-devel wget tar pkgconfig expat-devel zlib-devel lua-devel
+  
+  # Build newer Boost from source for BoostConfig.cmake support
+  cd /tmp
+  wget --no-check-certificate -O boost_1_85_0.tar.gz https://sourceforge.net/projects/boost/files/boost/1.85.0/boost_1_85_0.tar.gz/download
+  tar xzf boost_1_85_0.tar.gz
+  cd boost_1_85_0
+  ./bootstrap.sh --with-libraries=date_time,filesystem,iostreams,program_options,regex,system,thread,test
+  ./b2 install --prefix=/usr/local -j$(nproc) link=static,shared cxxflags=-fPIC cflags=-fPIC
+  cd /tmp && rm -rf boost_1_85_0*
+"""
+environment = { LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib:/usr/local/lib/intel64/gcc4.8/", PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/local/lib/pkgconfig" }
 repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
-environment = "MACOSX_DEPLOYMENT_TARGET=10.14"
+environment = "MACOSX_DEPLOYMENT_TARGET=15.0"
 before-all = """
-  mkdir osrm-backend
-  tar -zxf osrm-backend.tgz -C osrm-backend
-  cd osrm-backend
-
-  cp -r include /usr/local
-  cp -r third_party/flatbuffers/include /usr/local
-  cp -r third_party/variant/include /usr/local
-  cp -r profiles /usr/local/share/osrm/
-  cd build
-  cp *.a /usr/local/lib
-  cp osrm-* /usr/local/bin
-  cp libosrm.pc /usr/local/lib/pkgconfig
-
   export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-  brew install lua tbb boost@1.76
-  brew link boost@1.76
+  brew install lua tbb boost@1.85
+  brew link boost@1.85
 """
+repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
 
 [tool.cibuildwheel.windows]
-before-all = [
-  "tar -zxf osrm-backend.tgz",
-  "((robocopy /E /IS /NFL /NDL /NJH /NJS /NP /MOVE .conan C:\\.conan) ^& IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0)",
-  "((robocopy /E /IS /NFL /NDL /NJH /NJS /NP /MOVE Users C:\\Users) ^& IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0)",
-  "MKDIR C:\\OSRM",
-  "((robocopy /E /IS /NFL /NDL /NJH /NJS /NP /MOVE OSRM C:\\OSRM) ^& IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0)",
-  "((robocopy /E /IS /NFL /NDL /NJH /NJS /NP /MOVE C:\\OSRM\\lib\\pkgconfig C:\\Strawberry\\c\\lib\\pkgconfig) ^& IF %ERRORLEVEL% LSS 8 SET ERRORLEVEL = 0)"
-]
-test-command = [
-  "cd /d {project}/tests/data",
-  "windows-build-tests.bat",
-  "python -m osrm datastore {project}/tests/data/ch/monaco",
-  "pytest {project}/tests"
-]
+test-command = "python -m osrm datastore {project}/tests/data/ch/monaco && pytest {project}/tests"
+repair-wheel-command = "python -m pip install delvewheel && python -c \"import os,sys,subprocess,glob; base=sys.base_prefix; paths=[base, os.path.join(base,'DLLs')]; paths += glob.glob(r'{project}\\\\build\\\\*\\\\vcpkg_installed\\\\x64-windows\\\\bin'); args=['delvewheel','repair']; [args.extend(['--add-path',p]) for p in paths if os.path.isdir(p)]; args += ['-w',r'{dest_dir}',r'{wheel}']; subprocess.check_call(args)\""
+
+
+[tool.cibuildwheel.windows.environment]
+CMAKE_TOOLCHAIN_FILE = "C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+VCPKG_MANIFEST_DIR = "{project}"
+VCPKG_DEFAULT_TRIPLET = "x64-windows"
+
 
 [dependency-groups]
 dev = [

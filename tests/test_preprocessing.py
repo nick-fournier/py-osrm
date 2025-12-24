@@ -3,7 +3,6 @@ import osrm
 import tempfile
 import shutil
 from pathlib import Path
-import constants
 
 # Get test data paths
 test_dir = Path(__file__).parent
@@ -27,7 +26,7 @@ class TestPreprocessing:
         """Test basic extract functionality."""
         result = osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR"
         )
@@ -48,7 +47,7 @@ class TestPreprocessing:
         
         result = osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="WARNING",
             progress_callback=progress_callback,
@@ -66,7 +65,7 @@ class TestPreprocessing:
         """Test extract with output capture."""
         result = osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="INFO",
             capture_output=True
@@ -82,7 +81,7 @@ class TestPreprocessing:
         """Test extract with additional options."""
         result = osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR",
             threads=2,
@@ -97,7 +96,7 @@ class TestPreprocessing:
         # First extract
         osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR"
         )
@@ -118,7 +117,7 @@ class TestPreprocessing:
         """Test contract with custom thread count."""
         osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR"
         )
@@ -136,7 +135,7 @@ class TestPreprocessing:
         # First extract
         osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR"
         )
@@ -157,7 +156,7 @@ class TestPreprocessing:
         """Test partition with custom options."""
         osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR"
         )
@@ -177,7 +176,7 @@ class TestPreprocessing:
         # Extract, partition, then customize
         osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR"
         )
@@ -202,7 +201,7 @@ class TestPreprocessing:
         # Extract
         extract_result = osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR"
         )
@@ -223,7 +222,7 @@ class TestPreprocessing:
         # Extract
         extract_result = osrm.extract(
             str(osm_file),
-            profile_path=str(profile_file),
+            profile="car",
             output_path=temp_output,
             verbosity="ERROR"
         )
@@ -293,7 +292,7 @@ class TestPreprocessing:
             
             result = osrm.extract(
                 str(osm_file),
-                profile_path=str(profile_file),
+                profile="car",
                 output_path=temp_output,
                 verbosity=level,
                 capture_output=True
@@ -307,7 +306,7 @@ class TestPreprocessing:
             try:
                 result = osrm.extract(
                     "/nonexistent/file.osm.pbf",
-                    profile_path=str(profile_file),
+                    profile="car",
                     output_path=str(Path(temp_dir) / "output"),
                     verbosity="ERROR",
                     capture_output=True
@@ -320,10 +319,60 @@ class TestPreprocessing:
     
     def test_extract_missing_profile(self, temp_output):
         """Test extract with missing profile file."""
-        with pytest.raises(Exception):
+        with pytest.raises(FileNotFoundError):
             osrm.extract(
                 str(osm_file),
-                profile_path="/nonexistent/profile.lua",
+                profile="/nonexistent/profile.lua",
                 output_path=temp_output,
                 verbosity="ERROR"
             )
+    
+    def test_extract_bicycle_profile(self, temp_output):
+        """Test extract with bicycle profile."""
+        result = osrm.extract(
+            str(osm_file),
+            profile="bicycle",
+            output_path=temp_output,
+            verbosity="ERROR"
+        )
+        
+        assert result["success"] is True
+        assert Path(f"{temp_output}.osrm.ebg").exists()
+    
+    def test_extract_foot_profile(self, temp_output):
+        """Test extract with foot profile."""
+        result = osrm.extract(
+            str(osm_file),
+            profile="foot",
+            output_path=temp_output,
+            verbosity="ERROR"
+        )
+        
+        assert result["success"] is True
+        assert Path(f"{temp_output}.osrm.ebg").exists()
+    
+    def test_extract_custom_profile_path(self, temp_output):
+        """Test extract with custom profile using full path."""
+        result = osrm.extract(
+            str(osm_file),
+            profile=str(profile_file),
+            output_path=temp_output,
+            verbosity="ERROR"
+        )
+        
+        assert result["success"] is True
+        assert Path(f"{temp_output}.osrm.ebg").exists()
+    
+    def test_extract_invalid_profile_name(self, temp_output):
+        """Test extract with invalid profile name."""
+        with pytest.raises(FileNotFoundError) as exc_info:
+            osrm.extract(
+                str(osm_file),
+                profile="truck",
+                output_path=temp_output,
+                verbosity="ERROR"
+            )
+        
+        # Error message should mention valid profile names
+        error_msg = str(exc_info.value)
+        assert "car" in error_msg or "bicycle" in error_msg or "foot" in error_msg
