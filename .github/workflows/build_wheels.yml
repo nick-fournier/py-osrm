@@ -1,16 +1,22 @@
-name: Push Master
+name: Build Wheels
 
 on:
+  workflow_call:
   push:
     branches:
       - main
       - revival # temp to test ci
     paths-ignore:
       - '*.md'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '*.md'
 
 jobs:
   build_wheels:
-    name: Push - cp${{ matrix.python_version }}, ${{ matrix.platform }}
+    name: Build - cp${{ matrix.python_version }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform }}-${{ matrix.version }}
     strategy:
       fail-fast: true
@@ -82,3 +88,9 @@ jobs:
         CIBW_ENVIRONMENT_WINDOWS: >
           CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
           VCPKG_DEFAULT_TRIPLET=x64-windows
+
+    - name: Upload Wheels
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.platform }}-${{ matrix.python_version }}
+        path: wheelhouse/*.whl
