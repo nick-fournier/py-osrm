@@ -1,5 +1,4 @@
 """Smoke tests for py-osrm - basic functionality without requiring OSRM data files."""
-import pytest
 import osrm
 
 
@@ -125,3 +124,86 @@ class TestJSONContainers:
         arr = osrm.Array()
         assert arr is not None
         assert len(arr) == 0
+
+
+class TestProfileFiles:
+    """Test that profile files are properly installed."""
+    
+    def test_profiles_directory_exists(self):
+        """Test that profiles directory exists in installed package."""
+        from pathlib import Path
+        
+        # Get package directory
+        package_dir = Path(osrm.__file__).parent
+        profiles_dir = package_dir / 'profiles'
+        
+        assert profiles_dir.exists(), f"Profiles directory not found: {profiles_dir}"
+        assert profiles_dir.is_dir(), f"Profiles path is not a directory: {profiles_dir}"
+    
+    def test_bundled_profiles_exist(self):
+        """Test that all bundled profile files exist."""
+        from pathlib import Path
+        
+        package_dir = Path(osrm.__file__).parent
+        profiles_dir = package_dir / 'profiles'
+        
+        # Check for the three main profile files
+        required_profiles = ['car.lua', 'bicycle.lua', 'foot.lua']
+        
+        for profile_name in required_profiles:
+            profile_path = profiles_dir / profile_name
+            assert profile_path.exists(), f"Profile file not found: {profile_path}"
+            assert profile_path.is_file(), f"Profile path is not a file: {profile_path}"
+    
+    def test_profile_lib_directory_exists(self):
+        """Test that the lib subdirectory with shared Lua modules exists."""
+        from pathlib import Path
+        
+        package_dir = Path(osrm.__file__).parent
+        lib_dir = package_dir / 'profiles' / 'lib'
+        
+        assert lib_dir.exists(), f"Profiles lib directory not found: {lib_dir}"
+        assert lib_dir.is_dir(), f"Profiles lib path is not a directory: {lib_dir}"
+        
+        # Check for some key lib files
+        key_lib_files = ['utils.lua', 'sequence.lua', 'set.lua', 'way_handlers.lua']
+        for lib_file in key_lib_files:
+            lib_path = lib_dir / lib_file
+            assert lib_path.exists(), f"Library file not found: {lib_path}"
+    
+    def test_profile_resolution_works(self):
+        """Test that the internal _resolve_profile function works correctly."""
+        from osrm.preprocessing import _resolve_profile
+        
+        # Test with bundled profile names
+        for profile_name in ['car', 'bicycle', 'foot']:
+            profile_path = _resolve_profile(profile_name)
+            assert profile_path.exists(), f"Resolved profile doesn't exist: {profile_path}"
+            assert profile_path.suffix == '.lua', f"Resolved profile is not a .lua file: {profile_path}"
+    
+    def test_profile_resolution_returns_absolute_paths(self):
+        """Test that _resolve_profile always returns absolute paths."""
+        from osrm.preprocessing import _resolve_profile
+        
+        # Test with bundled profile names
+        for profile_name in ['car', 'bicycle', 'foot']:
+            profile_path = _resolve_profile(profile_name)
+            assert profile_path.is_absolute(), f"Profile path is not absolute: {profile_path}"
+    
+    def test_profile_works_with_extractor_config(self):
+        """Test that resolved profile can be assigned to ExtractorConfig."""
+        from osrm.preprocessing import _resolve_profile
+        import osrm
+        from pathlib import Path
+        
+        # Create an ExtractorConfig
+        config = osrm.ExtractorConfig()
+        
+        # Test assigning resolved profile paths
+        for profile_name in ['car', 'bicycle', 'foot']:
+            profile_path = _resolve_profile(profile_name)
+            # Convert to string as done in extract() function
+            config.profile_path = str(profile_path.absolute())
+            
+            # Verify it was set (should not raise an exception)
+            assert config.profile_path is not None

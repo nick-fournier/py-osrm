@@ -42,7 +42,7 @@ def _resolve_profile(profile: str) -> Path:
                 "This is likely a package installation issue."
             )
         
-        return profile_path
+        return profile_path.absolute()
     
     # Otherwise treat as a custom profile path
     profile_path = Path(profile)
@@ -55,7 +55,7 @@ def _resolve_profile(profile: str) -> Path:
             "or provide a path to a custom .lua profile file."
         )
     
-    return profile_path
+    return profile_path.absolute()
 
 
 def extract(
@@ -128,8 +128,9 @@ def extract(
     config = osrm_ext.ExtractorConfig()
     config.input_path = Path(input_path)
     
-    # Resolve profile path
-    config.profile_path = _resolve_profile(profile)
+    # Resolve profile path - convert to absolute string for C++ binding
+    profile_path = _resolve_profile(profile)
+    config.profile_path = str(profile_path.absolute())
     
     # Set output path
     if output_path:

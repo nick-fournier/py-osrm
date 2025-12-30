@@ -1,3 +1,37 @@
+# Import-time validation of profile files
+from pathlib import Path as _Path
+
+_package_dir = _Path(__file__).parent
+_profiles_dir = _package_dir / 'profiles'
+_required_profiles = ['car.lua', 'bicycle.lua', 'foot.lua']
+_lib_dir = _profiles_dir / 'lib'
+
+# Check profiles directory exists
+if not _profiles_dir.exists() or not _profiles_dir.is_dir():
+    raise ImportError(
+        f"Profile files missing: {_profiles_dir} not found.\n"
+        f"This indicates a broken package installation. "
+        f"Try reinstalling: pip install --force-reinstall py-osrm"
+    )
+
+# Check main profile files exist
+for profile in _required_profiles:
+    _profile_path = _profiles_dir / profile
+    if not _profile_path.exists():
+        raise ImportError(
+            f"Profile file missing: {_profile_path} not found.\n"
+            f"This indicates a broken package installation. "
+            f"Try reinstalling: pip install --force-reinstall py-osrm"
+        )
+
+# Check lib directory exists (required by all profiles)
+if not _lib_dir.exists() or not _lib_dir.is_dir():
+    raise ImportError(
+        f"Profile library directory missing: {_lib_dir} not found.\n"
+        f"This indicates a broken package installation. "
+        f"Try reinstalling: pip install --force-reinstall py-osrm"
+    )
+
 from .osrm_ext import ( # type: ignore
     OSRM as _OSRM_Base,
     EngineConfig,

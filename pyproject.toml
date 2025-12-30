@@ -23,8 +23,15 @@ repository = "https://github.com/gis-ops/py-osrm"
 "osrm-backend repository" = "https://github.com/Project-OSRM/osrm-backend"
 
 [tool.scikit-build]
-minimum-version = "0.4"
+minimum-version = "0.5"
 build-dir = "build/{wheel_tag}"
+
+# Explicitly specify what to install
+wheel.packages = ["src/osrm"]
+
+# Editable install configuration
+editable.mode = "redirect"
+editable.verbose = true
 
 [tool.cibuildwheel]
 archs = ["native"]
