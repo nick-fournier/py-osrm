@@ -1,0 +1,73 @@
+name: GitHub Release
+
+# This workflow creates GitHub Releases with pre-built wheels
+# Tag naming: Use v{version} matching pyproject.toml (e.g., v0.0.2)
+# Pre-releases: Use format like v0.1.0-beta1, v0.1.0-rc1
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  validate_version:
+    name: Validate Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Get version from pyproject.toml
+      id: get_version
+      run: |
+        VERSION=$(grep -oP '(?<=^version = ")[^"]+' pyproject.toml)
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "pyproject.toml version: $VERSION"
+    
+    - name: Get tag version
+      id: get_tag
+      run: |
+        TAG_VERSION=${GITHUB_REF#refs/tags/v}
+        echo "tag_version=$TAG_VERSION" >> $GITHUB_OUTPUT
+        echo "Git tag version: $TAG_VERSION"
+    
+    - name: Compare versions
+      run: |
+        PYPROJECT_VERSION="${{ steps.get_version.outputs.version }}"
+        TAG_VERSION="${{ steps.get_tag.outputs.tag_version }}"
+        
+        if [[ "$TAG_VERSION" != "$PYPROJECT_VERSION"* ]]; then
+          echo "❌ ERROR: Tag version ($TAG_VERSION) does not match pyproject.toml version ($PYPROJECT_VERSION)"
+          echo "Please update pyproject.toml version or use correct tag"
+          exit 1
+        fi
+        echo "✅ Version validation passed"
+
+  build_wheels:
+    name: Build Wheels
+    needs: [validate_version]
+    uses: ./.github/workflows/build_wheels.yml
+
+  create_release:
+    name: Create GitHub Release
+    needs: [validate_version, build_wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: wheels-*
+        path: dist
+        merge-multiple: true
+
+    - name: Upload to GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: dist/*
+        fail_on_unmatched_files: true
+        draft: false
+        generate_release_notes: true

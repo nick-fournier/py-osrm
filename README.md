@@ -3,6 +3,8 @@
 
 **py-osrm is a Python package that binds to [osrm-backend](https://github.com/Project-OSRM/osrm-backend) using [nanobind](https://github.com/wjakob/nanobind).**
 
+This package binds to **OSRM v6.0.0** backend and includes preprocessing functionality.
+
 ---
 
 ## Supported Platforms
@@ -14,36 +16,134 @@ Windows | x86_64
 ---
 
 ## Installation
-py-osrm is supported on **CPython 3.8+**, and can be installed from source via running the following command in the source folder:
+py-osrm is supported on **CPython 3.9+**.
+
+**Quick Install (with auto-platform detection):**
+```bash
+python -c "$(curl -fsSL https://raw.githubusercontent.com/nick-fournier/py-osrm/revival/scripts/install.py)"
 ```
+
+**Or manually install from GitHub Releases:**
+
+Download the appropriate wheel for your platform from [Releases](https://github.com/nick-fournier/py-osrm/releases):
+```bash
+pip install https://github.com/nick-fournier/py-osrm/releases/download/v0.0.2/py_osrm-0.0.2-cp39-abi3-linux_x86_64.whl
+```
+
+**Development install (requires compilation, ~5-10 min):**
+```bash
+pip install git+https://github.com/nick-fournier/py-osrm.git@revival
+```
+
+**From source:**
+```bash
+git clone https://github.com/nick-fournier/py-osrm.git
+cd py-osrm
+git checkout revival
 pip install .
 ```
 
-## Example
-The following example will showcase the process of calculating routes between two coordinates.
+> **Note:** Development and source installations require a C++ compiler (GCC/Clang) and CMake.
 
-First, import the `osrm` library, and instantiate an instance of OSRM:
+## Quick Start
+
 ```python
 import osrm
 
-# Instantiate py_osrm instance
-py_osrm = osrm.OSRM("./tests/test_data/ch/monaco.osrm")
+# Load preprocessed data
+py_osrm = osrm.OSRM("path/to/data.osrm")
+
+# Calculate route - pass coordinates directly!
+result = py_osrm.Route([(7.41337, 43.72956), (7.41546, 43.73077)])
+print(result["routes"][0]["distance"])  # Distance in meters
 ```
 
-Then, declare `RouteParameters`, and then pass it into the `py_osrm` instance:
+## Usage
+
+### Routing Services
+
+**Route** - Calculate routes between coordinates:
 ```python
-# Declare Route Parameters
+result = py_osrm.Route(
+    coordinates=[(7.41337, 43.72956), (7.41546, 43.73077)],
+    steps=True,
+    geometries="geojson",
+    annotations=["speed", "distance"]
+)
+```
+
+**Table** - Calculate distance/duration matrices:
+```python
+result = py_osrm.Table(
+    coordinates=[(7.41337, 43.72956), (7.41546, 43.73077), (7.41862, 43.73216)],
+    annotations=["distance", "duration"]
+)
+# Access via result["distances"] and result["durations"]
+```
+
+**Nearest** - Find nearest road segment:
+```python
+result = py_osrm.Nearest(
+    coordinates=[(7.41337, 43.72956)],
+    number=3
+)
+```
+
+See the [documentation](https://gis-ops.github.io/py-osrm/) for Trip, Match, and Tile services.
+
+### Preprocessing
+
+Before routing, you must preprocess OpenStreetMap data. Built-in profiles include `car`, `bicycle`, and `foot`:
+
+**CH (Contraction Hierarchies) - Fastest queries:**
+```python
+import osrm
+
+# Extract road network from OSM data
+osrm.extract("data.osm.pbf", profile="car", output_path="data")
+
+# Build routing graph (CH)
+osrm.contract("data")
+
+# Ready to use
+py_osrm = osrm.OSRM("data.osrm")
+```
+
+**Using a custom profile:**
+```python
+osrm.extract("data.osm.pbf", profile="/path/to/custom.lua", output_path="data")
+```
+
+**CLI usage:**
+```bash
+python -m osrm extract data.osm.pbf --profile car
+python -m osrm contract data
+```
+
+For **MLD (Multi-Level Dijkstra)** on larger datasets, see [preprocessing documentation](https://gis-ops.github.io/py-osrm/).
+
+## Advanced Usage
+
+### Legacy Parameter Objects
+
+<details>
+<summary>Alternative usage with parameter objects (click to expand)</summary>
+
+Parameter objects are still supported for backwards compatibility:
+
+```python
+# Create parameter object
 route_params = osrm.RouteParameters(
-    coordinates = [(7.41337, 43.72956), (7.41546, 43.73077)]
+    coordinates=[(7.41337, 43.72956), (7.41546, 43.73077)]
 )
 
-# Pass it into the py_osrm instance
-res = py_osrm.Route(route_params)
-
-# Print out result output
-print(res["waypoints"])
-print(res["routes"])
+# Pass to Route method
+result = py_osrm.Route(route_params)
 ```
+
+This pattern is useful when constructing parameters programmatically or reusing them across multiple requests. However, the direct keyword argument pattern shown above is now recommended for most use cases.
+
+</details>
 
 ---
 
