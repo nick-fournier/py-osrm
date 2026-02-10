@@ -23,6 +23,10 @@ classifiers = [
 repository = "https://github.com/gis-ops/py-osrm"
 "osrm-backend repository" = "https://github.com/Project-OSRM/osrm-backend"
 
+[project.optional-dependencies]
+bulk = ["polars>=0.20.0"]
+bulk-progress = ["polars>=0.20.0", "tqdm>=4.65.0"]
+
 [tool.scikit-build]
 minimum-version = "0.5"
 build-dir = "build/{wheel_tag}"
@@ -84,4 +88,6 @@ VCPKG_DEFAULT_TRIPLET = "x64-windows"
 [dependency-groups]
 dev = [
     "pytest>=8.3.5",
+    "polars>=0.20.0",
+    "tqdm>=4.65.0",
 ]

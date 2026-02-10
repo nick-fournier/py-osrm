@@ -43,6 +43,15 @@ from .preprocessing import (
     customize,
 )
 
+# Bulk processing functions (optional - only if used)
+try:
+    from .bulk import bulk_route, bulk_table
+    _BULK_AVAILABLE = True
+except ImportError:
+    _BULK_AVAILABLE = False
+    bulk_route = None
+    bulk_table = None
+
 # Import-time validation of profile files
 from pathlib import Path as _Path
 

@@ -91,6 +91,46 @@ result = py_osrm.Nearest(
 
 See the [documentation](https://gis-ops.github.io/py-osrm/) for Trip, Match, and Tile services.
 
+### Bulk Processing (Concurrent)
+
+Process multiple routes in parallel using ThreadPoolExecutor for significant speedup:
+
+```python
+import polars as pl
+import osrm
+
+# Initialize OSRM instance
+py_osrm = osrm.OSRM("path/to/data.osrm")
+
+# Create DataFrame with origin-destination pairs
+df = pl.DataFrame({
+    "origin_lon": [7.41337, 7.41862, 7.42150],
+    "origin_lat": [43.72956, 43.73216, 43.73400],
+    "dest_lon": [7.41546, 7.42000, 7.42300],
+    "dest_lat": [43.73077, 43.73300, 43.73500]
+})
+
+# Process all routes concurrently (releases GIL for true parallelism)
+results = osrm.bulk_route(py_osrm, df, steps=True, geometries="geojson")
+
+# Results DataFrame includes: distance, duration, geometry, success, error
+print(results.select(["distance", "duration", "success"]))
+```
+
+**Installation with bulk processing support:**
+```bash
+pip install py-osrm[bulk]           # Polars only
+pip install py-osrm[bulk-progress]  # Polars + tqdm progress bar
+```
+
+**Key features:**
+- True parallel execution (GIL released in C++)
+- Works with Polars DataFrames or dict-of-lists
+- Per-row parameter customization
+- Automatic error handling with `fail_fast` option
+- Progress tracking with `show_progress=True`
+- Typically 3-4x faster than sequential processing on 4+ cores
+
 ### Preprocessing
 
 Before routing, you must preprocess OpenStreetMap data. Built-in profiles include `car`, `bicycle`, and `foot`:
