@@ -4,16 +4,9 @@ import pytest
 import time
 import osrm
 import constants
+import polars as pl
 
 ch_data_path = constants.ch_data_path
-
-# Test if polars is available
-try:
-    import polars as pl
-    POLARS_AVAILABLE = True
-except ImportError:
-    POLARS_AVAILABLE = False
-    pl = None
 
 
 class TestBulkRoute:
@@ -32,7 +25,6 @@ class TestBulkRoute:
             (7.41400, 43.72900, 7.42400, 43.73550),
         ]
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_route_basic_polars(self):
         """Test basic bulk_route with Polars DataFrame."""
         df = pl.DataFrame({
@@ -76,7 +68,6 @@ class TestBulkRoute:
         assert all(d is not None for d in results["distance"])
         assert all(d is not None for d in results["duration"])
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_route_with_parameters(self):
         """Test bulk_route with additional parameters."""
         df = pl.DataFrame({
@@ -97,7 +88,6 @@ class TestBulkRoute:
         # Geometry should be present (as GeoJSON structure)
         assert results["geometry"].null_count() == 0
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_route_mixed_success_failure(self):
         """Test bulk_route with some invalid coordinates."""
         df = pl.DataFrame({
@@ -120,7 +110,6 @@ class TestBulkRoute:
         assert len(failed) > 0
         assert failed["error"][0] is not None
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_route_performance(self):
         """Test that bulk_route provides parallel speedup."""
         # Create more test data for meaningful comparison
@@ -212,7 +201,6 @@ class TestBulkRoute:
         with pytest.raises(TypeError, match="must be a Polars DataFrame or dict-of-lists"):
             osrm.bulk_route(self.py_osrm, "invalid input")
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_route_per_row_parameters(self):
         """Test per-row parameter variations."""
         df = pl.DataFrame({
@@ -265,7 +253,6 @@ class TestBulkNearest:
             (7.41400, 43.72900),
         ]
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_nearest_basic_polars(self):
         """Test basic bulk_nearest with Polars DataFrame."""
         df = pl.DataFrame({
@@ -307,7 +294,6 @@ class TestBulkNearest:
         assert all(d is not None for d in results["waypoint_lon"])
         assert all(d is not None for d in results["waypoint_lat"])
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_nearest_with_number(self):
         """Test bulk_nearest with number parameter to get multiple results."""
         df = pl.DataFrame({
@@ -320,7 +306,6 @@ class TestBulkNearest:
         assert results["success"].all()
         assert results["distance"].null_count() == 0
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_nearest_mixed_success_failure(self):
         """Test bulk_nearest with some invalid coordinates."""
         df = pl.DataFrame({
@@ -400,7 +385,6 @@ class TestBulkMatch:
             [(7.41500, 43.73000), (7.41700, 43.73100), (7.41900, 43.73200)],
         ]
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_match_basic_polars(self):
         """Test basic bulk_match with Polars DataFrame."""
         df = pl.DataFrame({
@@ -450,7 +434,6 @@ class TestBulkMatch:
                 assert results["distance"][i] is not None
                 assert results["duration"][i] is not None
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_match_with_parameters(self):
         """Test bulk_match with additional parameters."""
         df = pl.DataFrame({
@@ -472,7 +455,6 @@ class TestBulkMatch:
         assert len(successful) > 0
         assert successful["geometry"].null_count() == 0
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_match_with_timestamps(self):
         """Test bulk_match with timestamps."""
         df = pl.DataFrame({
@@ -485,7 +467,6 @@ class TestBulkMatch:
         assert results["success"].all()
         assert results["confidence"].null_count() == 0
     
-    @pytest.mark.skipif(not POLARS_AVAILABLE, reason="Polars not installed")
     def test_bulk_match_mixed_success_failure(self):
         """Test bulk_match with some invalid traces."""
         df = pl.DataFrame({
