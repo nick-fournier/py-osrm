@@ -45,11 +45,13 @@ from .preprocessing import (
 
 # Bulk processing functions (optional - only if used)
 try:
-    from .bulk import bulk_route, bulk_table
+    from .bulk import bulk_route, bulk_nearest, bulk_match, bulk_table
     _BULK_AVAILABLE = True
 except ImportError:
     _BULK_AVAILABLE = False
     bulk_route = None
+    bulk_nearest = None
+    bulk_match = None
     bulk_table = None
 
 # Import-time validation of profile files
