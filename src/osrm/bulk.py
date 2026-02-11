@@ -2,18 +2,45 @@
 
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, TypeVar, Union, overload
+
+# TypeVar for DataFrame type (Polars DataFrame)
+DataFrameT = TypeVar('DataFrameT')
 
 
+@overload
 def bulk_route(
     osrm_instance,
-    df: Union[Any, Dict[str, List]],
+    df: Dict[str, List],
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
     show_progress: bool = False,
     **default_params
-) -> Union[Any, Dict[str, List]]:
+) -> Dict[str, List]: ...
+
+
+@overload
+def bulk_route(
+    osrm_instance,
+    df: DataFrameT,
+    max_workers: Optional[int] = None,
+    fail_fast: bool = False,
+    timeout: Optional[float] = None,
+    show_progress: bool = False,
+    **default_params
+) -> DataFrameT: ...
+
+
+def bulk_route(
+    osrm_instance,
+    df: Union[DataFrameT, Dict[str, List]],
+    max_workers: Optional[int] = None,
+    fail_fast: bool = False,
+    timeout: Optional[float] = None,
+    show_progress: bool = False,
+    **default_params
+) -> Union[DataFrameT, Dict[str, List]]:
     """
     Process multiple route requests in parallel from a DataFrame.
     
@@ -205,15 +232,39 @@ def bulk_route(
         return {key: [r[key] for r in results] for key in keys}
 
 
+@overload
 def bulk_nearest(
     osrm_instance,
-    df: Union[Any, Dict[str, List]],
+    df: Dict[str, List],
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
     show_progress: bool = False,
     **default_params
-) -> Union[Any, Dict[str, List]]:
+) -> Dict[str, List]: ...
+
+
+@overload
+def bulk_nearest(
+    osrm_instance,
+    df: DataFrameT,
+    max_workers: Optional[int] = None,
+    fail_fast: bool = False,
+    timeout: Optional[float] = None,
+    show_progress: bool = False,
+    **default_params
+) -> DataFrameT: ...
+
+
+def bulk_nearest(
+    osrm_instance,
+    df: Union[DataFrameT, Dict[str, List]],
+    max_workers: Optional[int] = None,
+    fail_fast: bool = False,
+    timeout: Optional[float] = None,
+    show_progress: bool = False,
+    **default_params
+) -> Union[DataFrameT, Dict[str, List]]:
     """
     Process multiple nearest requests in parallel from a DataFrame.
     
@@ -392,15 +443,39 @@ def bulk_nearest(
         return {key: [r[key] for r in results] for key in keys}
 
 
+@overload
 def bulk_match(
     osrm_instance,
-    df: Union[Any, Dict[str, List]],
+    df: Dict[str, List],
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
     show_progress: bool = False,
     **default_params
-) -> Union[Any, Dict[str, List]]:
+) -> Dict[str, List]: ...
+
+
+@overload
+def bulk_match(
+    osrm_instance,
+    df: DataFrameT,
+    max_workers: Optional[int] = None,
+    fail_fast: bool = False,
+    timeout: Optional[float] = None,
+    show_progress: bool = False,
+    **default_params
+) -> DataFrameT: ...
+
+
+def bulk_match(
+    osrm_instance,
+    df: Union[DataFrameT, Dict[str, List]],
+    max_workers: Optional[int] = None,
+    fail_fast: bool = False,
+    timeout: Optional[float] = None,
+    show_progress: bool = False,
+    **default_params
+) -> Union[DataFrameT, Dict[str, List]]:
     """
     Process multiple match requests in parallel from a DataFrame.
     
@@ -583,15 +658,39 @@ def bulk_match(
         return {key: [r[key] for r in results] for key in keys}
 
 
+@overload
 def bulk_table(
     osrm_instance,
-    df: Union[Any, Dict[str, List]],
+    df: Dict[str, List],
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
     show_progress: bool = False,
     **default_params
-) -> Union[Any, Dict[str, List]]:
+) -> Dict[str, List]: ...
+
+
+@overload
+def bulk_table(
+    osrm_instance,
+    df: DataFrameT,
+    max_workers: Optional[int] = None,
+    fail_fast: bool = False,
+    timeout: Optional[float] = None,
+    show_progress: bool = False,
+    **default_params
+) -> DataFrameT: ...
+
+
+def bulk_table(
+    osrm_instance,
+    df: Union[DataFrameT, Dict[str, List]],
+    max_workers: Optional[int] = None,
+    fail_fast: bool = False,
+    timeout: Optional[float] = None,
+    show_progress: bool = False,
+    **default_params
+) -> Union[DataFrameT, Dict[str, List]]:
     """
     Process multiple table (distance matrix) requests in parallel from a DataFrame.
     
