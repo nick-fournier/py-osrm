@@ -15,7 +15,7 @@ def bulk_route(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> Dict[str, List]: ...
 
@@ -27,7 +27,7 @@ def bulk_route(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> DataFrameT: ...
 
@@ -38,7 +38,7 @@ def bulk_route(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> Union[DataFrameT, Dict[str, List]]:
     """
@@ -54,7 +54,7 @@ def bulk_route(
         max_workers: Number of parallel workers (default: os.cpu_count())
         fail_fast: If True, raise on first error; if False, collect all results
         timeout: Timeout in seconds for individual route requests
-        show_progress: Show progress bar if tqdm is installed
+        show_progress: If True (default), display progress bar with processing rate and error count
         **default_params: Default parameters applied to all routes (overridden by row params)
     
     Returns:
@@ -113,10 +113,17 @@ def bulk_route(
     
     # Optional progress bar
     progress_bar = None
+    error_count = 0
     if show_progress:
         try:
             from tqdm import tqdm
-            progress_bar = tqdm(total=len(rows), desc="Processing routes")
+            progress_bar = tqdm(
+                total=len(rows),
+                desc="Routing",
+                unit="req",
+                unit_scale=False,
+                postfix={"errors": 0}
+            )
         except ImportError:
             pass  # tqdm not installed, skip progress bar
     
@@ -199,8 +206,12 @@ def bulk_route(
             for future in as_completed(future_to_index, timeout=timeout):
                 index = future_to_index[future]
                 try:
-                    results[index] = future.result()
+                    result = future.result()
+                    results[index] = result
+                    if not result.get('success', False):
+                        error_count += 1
                 except Exception as e:
+                    error_count += 1
                     if fail_fast:
                         raise
                     # Store error result
@@ -214,6 +225,7 @@ def bulk_route(
                     })
                 
                 if progress_bar:
+                    progress_bar.set_postfix({"errors": error_count})
                     progress_bar.update(1)
                     
         finally:
@@ -239,7 +251,7 @@ def bulk_nearest(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> Dict[str, List]: ...
 
@@ -251,7 +263,7 @@ def bulk_nearest(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> DataFrameT: ...
 
@@ -262,7 +274,7 @@ def bulk_nearest(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> Union[DataFrameT, Dict[str, List]]:
     """
@@ -277,7 +289,7 @@ def bulk_nearest(
         max_workers: Number of parallel workers (default: os.cpu_count())
         fail_fast: If True, raise on first error; if False, collect all results
         timeout: Timeout in seconds for individual nearest requests
-        show_progress: Show progress bar if tqdm is installed
+        show_progress: If True (default), display progress bar with processing rate and error count
         **default_params: Default parameters applied to all nearest requests (overridden by row params)
     
     Returns:
@@ -334,10 +346,17 @@ def bulk_nearest(
     
     # Optional progress bar
     progress_bar = None
+    error_count = 0
     if show_progress:
         try:
             from tqdm import tqdm
-            progress_bar = tqdm(total=len(rows), desc="Processing nearest")
+            progress_bar = tqdm(
+                total=len(rows),
+                desc="Nearest",
+                unit="req",
+                unit_scale=False,
+                postfix={"errors": 0}
+            )
         except ImportError:
             pass
     
@@ -411,8 +430,12 @@ def bulk_nearest(
             for future in as_completed(future_to_index, timeout=timeout):
                 index = future_to_index[future]
                 try:
-                    results[index] = future.result()
+                    result = future.result()
+                    results[index] = result
+                    if not result.get('success', False):
+                        error_count += 1
                 except Exception as e:
+                    error_count += 1
                     if fail_fast:
                         raise
                     results[index] = rows[index].copy()
@@ -426,6 +449,7 @@ def bulk_nearest(
                     })
                 
                 if progress_bar:
+                    progress_bar.set_postfix({"errors": error_count})
                     progress_bar.update(1)
                     
         finally:
@@ -450,7 +474,7 @@ def bulk_match(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> Dict[str, List]: ...
 
@@ -462,7 +486,7 @@ def bulk_match(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> DataFrameT: ...
 
@@ -473,7 +497,7 @@ def bulk_match(
     max_workers: Optional[int] = None,
     fail_fast: bool = False,
     timeout: Optional[float] = None,
-    show_progress: bool = False,
+    show_progress: bool = True,
     **default_params
 ) -> Union[DataFrameT, Dict[str, List]]:
     """
@@ -489,7 +513,7 @@ def bulk_match(
         max_workers: Number of parallel workers (default: os.cpu_count())
         fail_fast: If True, raise on first error; if False, collect all results
         timeout: Timeout in seconds for individual match requests
-        show_progress: Show progress bar if tqdm is installed
+        show_progress: If True (default), display progress bar with processing rate and error count
         **default_params: Default parameters applied to all matches (overridden by row params)
     
     Returns:
@@ -548,10 +572,17 @@ def bulk_match(
     
     # Optional progress bar
     progress_bar = None
+    error_count = 0
     if show_progress:
         try:
             from tqdm import tqdm
-            progress_bar = tqdm(total=len(rows), desc="Processing matches")
+            progress_bar = tqdm(
+                total=len(rows),
+                desc="Matching",
+                unit="req",
+                unit_scale=False,
+                postfix={"errors": 0}
+            )
         except ImportError:
             pass
     
@@ -626,8 +657,12 @@ def bulk_match(
             for future in as_completed(future_to_index, timeout=timeout):
                 index = future_to_index[future]
                 try:
-                    results[index] = future.result()
+                    result = future.result()
+                    results[index] = result
+                    if not result.get('success', False):
+                        error_count += 1
                 except Exception as e:
+                    error_count += 1
                     if fail_fast:
                         raise
                     results[index] = rows[index].copy()
@@ -641,6 +676,7 @@ def bulk_match(
                     })
                 
                 if progress_bar:
+                    progress_bar.set_postfix({"errors": error_count})
                     progress_bar.update(1)
                     
         finally:

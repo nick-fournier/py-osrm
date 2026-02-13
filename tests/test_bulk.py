@@ -113,7 +113,7 @@ class TestBulkRoute:
     def test_bulk_route_performance(self):
         """Test that bulk_route provides parallel speedup."""
         # Create more test data for meaningful comparison
-        large_coords = self.test_coords * 20  # 100 routes for better timing resolution
+        large_coords = self.test_coords * 500  # 1250 routes for better timing resolution
         
         df = pl.DataFrame({
             "origin_lon": [c[0] for c in large_coords],
@@ -133,9 +133,9 @@ class TestBulkRoute:
             )
         sequential_time = time.time() - start
         
-        # Time parallel processing
+        # Time parallel processing (disable progress bar for accurate timing)
         start = time.time()
-        results = osrm.bulk_route(self.py_osrm, df, max_workers=4)
+        results = osrm.bulk_route(self.py_osrm, df, max_workers=4, show_progress=False)
         parallel_time = time.time() - start
         
         # Parallel should be significantly faster (at least 1.3x on 4 cores)
@@ -216,6 +216,73 @@ class TestBulkRoute:
         assert results["success"].all()
         # Both should have valid results
         assert results["distance"].null_count() == 0
+    
+    def test_bulk_route_progress_bar_default(self):
+        """Test that progress bar is shown by default."""
+        from unittest.mock import patch, MagicMock
+        
+        df = pl.DataFrame({
+            "origin_lon": [c[0] for c in self.test_coords[:3]],
+            "origin_lat": [c[1] for c in self.test_coords[:3]],
+            "dest_lon": [c[2] for c in self.test_coords[:3]],
+            "dest_lat": [c[3] for c in self.test_coords[:3]],
+        })
+        
+        with patch('tqdm.tqdm') as mock_tqdm:
+            mock_progress = MagicMock()
+            mock_tqdm.return_value = mock_progress
+            
+            results = osrm.bulk_route(self.py_osrm, df)
+            
+            # tqdm should be called (progress bar enabled by default)
+            mock_tqdm.assert_called_once()
+            # Progress bar should be updated for each item
+            assert mock_progress.update.call_count == 3
+            # Progress bar should be closed
+            mock_progress.close.assert_called_once()
+            assert results["success"].all()
+    
+    def test_bulk_route_progress_bar_disabled(self):
+        """Test that progress bar can be disabled."""
+        from unittest.mock import patch
+        
+        df = pl.DataFrame({
+            "origin_lon": [c[0] for c in self.test_coords[:3]],
+            "origin_lat": [c[1] for c in self.test_coords[:3]],
+            "dest_lon": [c[2] for c in self.test_coords[:3]],
+            "dest_lat": [c[3] for c in self.test_coords[:3]],
+        })
+        
+        with patch('tqdm.tqdm') as mock_tqdm:
+            results = osrm.bulk_route(self.py_osrm, df, show_progress=False)
+            
+            # tqdm should NOT be called when show_progress=False
+            mock_tqdm.assert_not_called()
+            assert results["success"].all()
+    
+    def test_bulk_route_progress_bar_error_tracking(self):
+        """Test that progress bar tracks errors."""
+        from unittest.mock import patch, MagicMock
+        
+        df = pl.DataFrame({
+            "origin_lon": [7.41337, 999.0, 7.41862],  # Invalid coord in middle
+            "origin_lat": [43.72956, 43.73216, 43.73216],
+            "dest_lon": [7.41546, 7.42000, 7.42000],
+            "dest_lat": [43.73077, 43.73300, 43.73300],
+        })
+        
+        with patch('tqdm.tqdm') as mock_tqdm:
+            mock_progress = MagicMock()
+            mock_tqdm.return_value = mock_progress
+            
+            results = osrm.bulk_route(self.py_osrm, df, fail_fast=False)
+            
+            # Progress bar should track errors in postfix
+            # Extract error counts from all set_postfix calls
+            postfix_calls = [call.args[0]['errors'] if call.args else call.kwargs.get('errors', 0) 
+                           for call in mock_progress.set_postfix.call_args_list]
+            # At least one call should have errors > 0 (the invalid coordinate should fail)
+            assert any(errors > 0 for errors in postfix_calls), f"Error count should be tracked, got: {postfix_calls}"
 
 
 class TestBulkTable:
@@ -369,6 +436,45 @@ class TestBulkNearest:
         """Test error handling for invalid input type."""
         with pytest.raises(TypeError, match="must be a Polars DataFrame or dict-of-lists"):
             osrm.bulk_nearest(self.py_osrm, "invalid input")
+    
+    def test_bulk_nearest_progress_bar_default(self):
+        """Test that progress bar is shown by default."""
+        from unittest.mock import patch, MagicMock
+        
+        df = pl.DataFrame({
+            "lon": [c[0] for c in self.test_coords[:3]],
+            "lat": [c[1] for c in self.test_coords[:3]],
+        })
+        
+        with patch('tqdm.tqdm') as mock_tqdm:
+            mock_progress = MagicMock()
+            mock_tqdm.return_value = mock_progress
+            
+            results = osrm.bulk_nearest(self.py_osrm, df)
+            
+            # tqdm should be called (progress bar enabled by default)
+            mock_tqdm.assert_called_once()
+            # Progress bar should be updated for each item
+            assert mock_progress.update.call_count == 3
+            # Progress bar should be closed
+            mock_progress.close.assert_called_once()
+            assert results["success"].all()
+    
+    def test_bulk_nearest_progress_bar_disabled(self):
+        """Test that progress bar can be disabled."""
+        from unittest.mock import patch
+        
+        df = pl.DataFrame({
+            "lon": [c[0] for c in self.test_coords[:3]],
+            "lat": [c[1] for c in self.test_coords[:3]],
+        })
+        
+        with patch('tqdm.tqdm') as mock_tqdm:
+            results = osrm.bulk_nearest(self.py_osrm, df, show_progress=False)
+            
+            # tqdm should NOT be called when show_progress=False
+            mock_tqdm.assert_not_called()
+            assert results["success"].all()
 
 
 class TestBulkMatch:
@@ -530,6 +636,41 @@ class TestBulkMatch:
         """Test error handling for invalid input type."""
         with pytest.raises(TypeError, match="must be a Polars DataFrame or dict-of-lists"):
             osrm.bulk_match(self.py_osrm, "invalid input")
+    
+    def test_bulk_match_progress_bar_default(self):
+        """Test that progress bar is shown by default."""
+        from unittest.mock import patch, MagicMock
+        
+        df = pl.DataFrame({
+            "coordinates": self.test_traces[:2],
+        })
+        
+        with patch('tqdm.tqdm') as mock_tqdm:
+            mock_progress = MagicMock()
+            mock_tqdm.return_value = mock_progress
+            
+            results = osrm.bulk_match(self.py_osrm, df, fail_fast=False)
+            
+            # tqdm should be called (progress bar enabled by default)
+            mock_tqdm.assert_called_once()
+            # Progress bar should be updated for each item
+            assert mock_progress.update.call_count == 2
+            # Progress bar should be closed
+            mock_progress.close.assert_called_once()
+    
+    def test_bulk_match_progress_bar_disabled(self):
+        """Test that progress bar can be disabled."""
+        from unittest.mock import patch
+        
+        df = pl.DataFrame({
+            "coordinates": self.test_traces[:2],
+        })
+        
+        with patch('tqdm.tqdm') as mock_tqdm:
+            results = osrm.bulk_match(self.py_osrm, df, show_progress=False, fail_fast=False)
+            
+            # tqdm should NOT be called when show_progress=False
+            mock_tqdm.assert_not_called()
 
 
 class TestBulkTable:
