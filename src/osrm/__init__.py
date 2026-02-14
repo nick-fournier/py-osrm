@@ -22,7 +22,6 @@ Main Components:
         bulk_route: Parallel route calculations
         bulk_nearest: Parallel nearest road queries
         bulk_match: Parallel GPS trace matching
-        bulk_table: Placeholder for distance matrices
     
     Preprocessing:
         extract: Extract road network from OSM data
@@ -80,7 +79,7 @@ from .preprocessing import (
 )
 
 # Bulk processing functions
-from .bulk import bulk_route, bulk_nearest, bulk_match, bulk_table
+from .bulk import bulk_route, bulk_nearest, bulk_match
 
 # HTTP client
 from .http_client import OSRM_HTTP
@@ -569,5 +568,4 @@ __all__ = [
     "bulk_route",
     "bulk_nearest",
     "bulk_match",
-    "bulk_table",
 ]

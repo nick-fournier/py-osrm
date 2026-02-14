@@ -292,17 +292,6 @@ class TestBulkTable:
             use_shared_memory=False
         )
     
-    def test_bulk_table_not_implemented(self):
-        """Test that bulk_table raises NotImplementedError."""
-        df = {
-            "locations": [
-                [(7.41337, 43.72956), (7.41546, 43.73077)],
-            ]
-        }
-        
-        with pytest.raises(NotImplementedError):
-            osrm.bulk_table(self.py_osrm, df)
-
 
 class TestBulkNearest:
     def setup_method(self):
@@ -673,20 +662,3 @@ class TestBulkMatch:
             mock_tqdm.assert_not_called()
 
 
-class TestBulkTable:
-    def setup_method(self):
-        self.py_osrm = osrm.OSRM(
-            storage_config=ch_data_path,
-            use_shared_memory=False
-        )
-    
-    def test_bulk_table_not_implemented(self):
-        """Test that bulk_table raises NotImplementedError."""
-        df = {
-            "locations": [
-                [(7.41337, 43.72956), (7.41546, 43.73077)],
-            ]
-        }
-        
-        with pytest.raises(NotImplementedError):
-            osrm.bulk_table(self.py_osrm, df)
