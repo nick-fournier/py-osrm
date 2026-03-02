@@ -235,7 +235,7 @@ def bulk_route(
     # Convert results back to DataFrame or dict-of-lists
     if is_polars:
         import polars as pl
-        return pl.DataFrame(results)
+        return pl.DataFrame(results, infer_schema_length=None)
     else:
         # Convert list-of-dicts back to dict-of-lists
         if not results:
@@ -459,7 +459,7 @@ def bulk_nearest(
     # Convert results back to DataFrame or dict-of-lists
     if is_polars:
         import polars as pl
-        return pl.DataFrame(results)
+        return pl.DataFrame(results, infer_schema_length=None)
     else:
         if not results:
             return {}
@@ -686,7 +686,7 @@ def bulk_match(
     # Convert results back to DataFrame or dict-of-lists
     if is_polars:
         import polars as pl
-        return pl.DataFrame(results)
+        return pl.DataFrame(results, infer_schema_length=None)
     else:
         if not results:
             return {}
