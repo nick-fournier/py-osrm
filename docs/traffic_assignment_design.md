@@ -292,6 +292,43 @@ class NetworkState:
 A hash map `(from_osm_id, to_osm_id) → edge_ordinal` provides O(1) lookup
 during flow accumulation.
 
+### 4.4  Flow accumulation semantics: why occupancy is already correct
+
+A common concern: if a trip traverses links A → B → C, does the vehicle
+contribute to density on all three links simultaneously? The answer is **no**
+— the standard flow-to-density conversion handles this automatically.
+
+**Flow** is a rate: vehicles passing a point per unit time.
+
+```
+q_e = (number of trips using link e in bin t) / Δt    [veh/hr]
+```
+
+**Density** is derived from flow via the fundamental relationship:
+
+```
+k_e = q_e / v_e
+```
+
+The division by v_e is critical: it converts a *passage count rate* into an
+*average spatial occupancy*. A vehicle traveling at 60 km/h on a 1 km link
+occupies it for 1 minute. In a 15-minute bin, its average contribution to
+the link's instantaneous vehicle count is 1/15. The math confirms:
+
+```
+q = 1 trip / 0.25 hr = 4 veh/hr
+k = q / v = 4 / 60 = 1/15 veh/km  ← matches 1 vehicle × (1 min / 15 min) / 1 km
+```
+
+Slow links naturally get higher density contributions per vehicle (longer
+dwell time), fast links get lower. **No additional normalization is needed.**
+
+> **Implementation warning**: Do NOT accumulate density directly as vehicle
+> counts per link. Always accumulate **flow** (trips/Δt), then convert to
+> density via the VDF's inverse (§5.6) or the fundamental relationship.
+> Direct count-based density would overcount by treating each vehicle as
+> simultaneously present on every link of its route.
+
 ---
 
 ## 5  Bi-parabolic flow-density VDF
