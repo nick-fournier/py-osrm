@@ -652,24 +652,22 @@ zones, which better respects the directional structure of traffic flow.
 
 ## 6  Temporal model: discrete time slices
 
-### 6.1  Slice lifecycle
+### 6.1  Slice lifecycle (overview)
+
+The assignment processes all demand across all time bins simultaneously, then
+distributes flow to bins via travel-time offsets (see §6.3 for details).
 
 ```
-For each time slice t ∈ {0, 1, ..., T-1} of duration Δt:
+For each outer iteration:
 
-  1. DEMAND   Collect all OD pairs with departure in [t·Δt, (t+1)·Δt)
-  2. ROUTE    Route all OD pairs on current (frozen) network costs
-             Request annotations=["nodes", "distance"]
-  3. DECOMPOSE Extract edge sequences from consecutive node pairs
-  4. ACCUMULATE  For each edge, sum assigned vehicles → flow q_e
-  5. DENSITY  Convert flow to density via fundamental relationship (§5.6)
-  6. SMOOTH   Apply mesoscopic density smoothing (§5.8) — zone or neighbor
-  7. VDF      Evaluate bi-parabolic model → new speed per edge
-  8. CSV      Write segment-speed CSV to /dev/shm/ (§2.6)
-  9. CUSTOMIZE Run osrm.customize() with segment-speed-file
-  10. RELOAD   Refresh engine (Strategy A or B, §2.5)
-  11. (optional) CONVERGE  Inner loop: repeat steps 2–10 within the
-              same slice until flow changes fall below threshold
+  1. ROUTE      Route all OD pairs on current (frozen) network costs
+               Request annotations=["nodes", "distance", "duration"]
+  2. DISTRIBUTE Assign fractional flow to (link, bin) pairs via time offsets
+  3. PER-BIN    For each bin: aggregate flow → density → smooth → VDF → speeds
+  4. CSV        Write updated speeds to /dev/shm/ (§2.6)
+  5. CUSTOMIZE  Run osrm.customize() with segment-speed-file
+  6. RELOAD     Refresh engine (Strategy A or B, §2.5)
+  7. (optional) CONVERGE  Repeat until flow changes fall below threshold
 ```
 
 ### 6.2  Slice width
@@ -682,27 +680,126 @@ Recommended starting point: **15 minutes**. This balances:
 
 Sensitivity analysis on slice width is a key validation task.
 
-### 6.3  Carry-over between slices
+### 6.3  Multi-bin trips: fractional link loading
 
-Vehicles that depart in slice t but haven't arrived by t+Δt create residual
-link occupancy. For the first prototype:
+Vehicles that depart in slice t may traverse links that fall in slices
+t, t+1, t+2, etc. The design handles this via **travel-time offset loading**:
+each link on a route is assigned to the time bin when the vehicle would
+actually be traversing it, based on cumulative travel time from departure.
 
-- **Approximation**: Assume all trips complete within-slice. This is reasonable
-  when Δt is larger than the longest trip duration in the network.
-- **Future refinement**: Maintain a residual occupancy buffer that rolls
-  forward. Vehicles in transit contribute to the next slice's initial density.
+#### Algorithm
+
+OSRM returns per-link `duration` (seconds) in route annotations. For a trip
+departing at time t_dep with route links [e₁, e₂, ..., e_n]:
+
+```
+cum_time = 0
+for each link e_i with duration d_i:
+    enter_time = t_dep + cum_time
+    exit_time  = t_dep + cum_time + d_i
+    bin_enter  = floor(enter_time / Δt)
+    bin_exit   = floor(exit_time / Δt)
+
+    if bin_enter == bin_exit:
+        # Entire link traversal within one bin
+        load link e_i into bin bin_enter with full weight
+    else:
+        # Link traversal spans bin boundary — split proportionally
+        for bin_k in range(bin_enter, bin_exit + 1):
+            bin_start = bin_k * Δt
+            bin_end   = (bin_k + 1) * Δt
+            overlap   = min(exit_time, bin_end) - max(enter_time, bin_start)
+            fraction  = overlap / d_i
+            load link e_i into bin bin_k with weight = fraction
+
+    cum_time += d_i
+```
+
+This is exact given frozen costs, requires no vehicle state tracking,
+and uses only the per-link duration annotations OSRM already provides.
+
+#### Flow interpretation
+
+Each link-bin pair accumulates a fractional vehicle count. The flow rate for
+link e in bin t is:
+
+```
+q_e,t = (Σ fractional vehicles on e in bin t) / Δt    [veh/hr]
+```
+
+This means a 45-minute trip across a 15-minute bin structure correctly loads
+links in 3 different bins proportional to time spent, rather than dumping
+all flow into the departure bin.
+
+#### Vectorized implementation sketch
+
+```python
+def distribute_route_to_bins(
+    link_durations_s: np.ndarray,   # per-link duration in seconds
+    departure_time_s: float,        # seconds from epoch
+    bin_width_s: float,             # Δt in seconds
+) -> list[tuple[int, int, float]]:
+    """Return [(link_idx, bin_idx, fraction), ...] for flow accumulation."""
+    assignments = []
+    cum = departure_time_s
+    for i, d in enumerate(link_durations_s):
+        if d <= 0:
+            continue
+        enter = cum
+        exit_ = cum + d
+        b_enter = int(enter // bin_width_s)
+        b_exit  = int(exit_ // bin_width_s)
+        for b in range(b_enter, b_exit + 1):
+            bs = b * bin_width_s
+            be = (b + 1) * bin_width_s
+            overlap = min(exit_, be) - max(enter, bs)
+            assignments.append((i, b, overlap / d))
+        cum = exit_
+    return assignments
+```
+
+In production, this inner loop should be vectorized or moved to C++ for
+large route sets. The key insight is that no state is maintained between
+bins — the route annotations contain all the information needed.
+
+#### Implications for the slice lifecycle
+
+The slice lifecycle (§6.1) changes: instead of processing one bin at a time
+independently, **all trips for all bins are routed first** on the current
+network state, then flow is distributed across bins via the offset algorithm.
+The updated lifecycle becomes:
+
+```
+1. ROUTE     Route ALL trips (all departure times) on current network costs
+2. DECOMPOSE Extract per-link durations from annotations
+3. DISTRIBUTE Assign fractional flow to (link, bin) pairs via time offsets
+4. For each bin t = 0, 1, ..., T-1:
+   a. AGGREGATE  Sum fractional flows for bin t → q_e,t per link
+   b. DENSITY    Convert flow to density (§5.6)
+   c. SMOOTH     Neighbor-based smoothing (§5.8)
+   d. VDF        Evaluate bi-parabolic → speed per link for bin t
+5. WRITE CSV  Write final speeds (e.g., last bin or weighted average) to /dev/shm/
+6. CUSTOMIZE  Run osrm.customize()
+7. RELOAD     Refresh engine
+8. (optional) CONVERGE — repeat from step 1 until gap < ε
+```
+
+This is more faithful to dynamic assignment: network conditions in each bin
+reflect only the vehicles actually present in that bin, not all vehicles
+that departed during it.
 
 ### 6.4  Inner convergence loop (optional)
 
-Within a single time slice, the single-pass all-or-nothing loading may not
-reach equilibrium. An inner loop can be added:
+Within the outer loop, a single all-or-nothing loading may not reach
+equilibrium. An inner loop blends successive assignments:
 
 ```
-Repeat within slice t:
-  1. Route all demand → paths
-  2. Accumulate flows
-  3. Blend with previous iteration (MSA: x_new = x_old + (1/n)(x_aon - x_old))
-  4. Smooth density (§5.8) → VDF → write CSV to /dev/shm/ → customize → reload
+Repeat (outer iteration n):
+  1. Route all demand → paths (with per-link durations)
+  2. Distribute flow to (link, bin) pairs via time offsets
+  3. Blend with previous iteration (MSA: q_new = q_old + (1/n)(q_aon - q_old))
+  4. Per-bin: density → smooth → VDF → speeds
+  5. Write CSV to /dev/shm/ → customize → reload
   Until: max |Δq_e| / q_e < ε  or  iteration limit reached
 ```
 
