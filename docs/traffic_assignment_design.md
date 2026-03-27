@@ -966,12 +966,187 @@ touching OSRM core.
 
 ---
 
-## 9  Expected performance characteristics
+## 9  Testing, validation, and benchmarking
 
-### 9.1  Customize latency
+### 9.1  Test tiers
 
-OSRM's MLD customize step is designed for fast updates. Expected latency
-(order of magnitude):
+| Tier | Scope | Network | Purpose |
+|------|-------|---------|---------|
+| **Unit** | Individual functions | None (pure math) | VDF correctness, solver accuracy, CSV writer |
+| **Component** | Subsystem integration | Synthetic 4–5 node | Flow accumulation, density smoothing, engine refresh |
+| **Structural validation** | Known theoretical results | Braess (4 nodes), Nguyen-Dupuis (13 nodes) | Verify equilibrium properties hold |
+| **Benchmark validation** | Published test networks | Sioux Falls (24 nodes, 76 links) | Convergence, Wardrop conditions, flow patterns |
+| **Regional benchmark** | Runtime at scale | Monaco (~5k edges), metro (~100k+ edges) | Wall-clock profiling, memory, throughput |
+
+### 9.2  Unit tests (pure Python, no OSRM dependency)
+
+These test the mathematical components in isolation:
+
+```
+tests/assignment/
+├── test_vdf.py              # Bi-parabolic VDF
+├── test_flow_to_density.py  # Closed-form inverse
+├── test_density_smoothing.py
+├── test_fractional_loading.py
+├── test_csv_writer.py
+└── test_network_state.py
+```
+
+**VDF tests** (`test_vdf.py`):
+- v(0) = v_f (free-flow speed at zero density)
+- v(k_c) = v_f / 2 (critical speed)
+- v(k_j) = 0 (jam density → zero speed) for congested branch
+- q(k_c) = q_c = v_f · k_c / 2 (capacity flow at critical density)
+- C¹ continuity: v(k_c⁻) = v(k_c⁺) and dv/dk matches at k_c
+- Monotonicity: v is non-increasing on [0, k_j]
+- Vectorized output matches scalar loop for random inputs
+
+**Closed-form inverse tests** (`test_flow_to_density.py`):
+- Round-trip: q → k(q) → q(k) = q for random flows in [0, q_c]
+- k(0) = 0
+- k(q_c) = k_c
+- Boundary: k(q > q_c) clamped to k_c
+- Numerical accuracy: |q - k·v(k)| < ε for all test cases
+
+**Fractional loading tests** (`test_fractional_loading.py`):
+- Single-bin trip: all flow in departure bin, fractions sum to 1.0
+- Multi-bin trip: fractions sum to 1.0 per link
+- Boundary alignment: trip exactly spanning bin boundary
+- Zero-duration links: skipped correctly
+
+**Density smoothing tests** (`test_density_smoothing.py`):
+- Identity: β=0 returns original density
+- Conservation: total density · length is preserved by smoothing
+- Convergence: repeated passes converge to uniform density on connected graph
+- Known topology: 3-link chain with handcalculated expected output
+
+### 9.3  Structural validation: Braess network
+
+> Source: `bstabler/TransportationNetworks/Braess-Example`
+> 4 nodes, 5 links, 1 OD pair.
+
+Braess's paradox: adding a zero-cost shortcut link between nodes 3→4 causes
+the total system travel time to INCREASE under user equilibrium, because
+selfish routing overloads the shortcut.
+
+**What we validate** (VDF-independent — works with bi-parabolic):
+
+1. **Without the shortcut link (4 links)**: equilibrium has symmetric flow
+   split between the two paths 1→3→2 and 1→4→2.
+2. **With the shortcut link (5 links)**: equilibrium shifts to overuse the
+   path 1→3→4→2, and total system travel time increases.
+3. **Wardrop condition**: at convergence, all used paths have equal cost.
+   No unused path has lower cost.
+
+**Implementation**: Synthesize a minimal OSM XML file with 4 nodes at
+arbitrary coordinates and ways matching the Braess topology. Process through
+OSRM extract/partition/customize. Run assignment with a single OD pair. The
+test passes if conditions 1–3 hold.
+
+### 9.4  Benchmark validation: Sioux Falls
+
+> Source: `bstabler/TransportationNetworks/SiouxFalls`
+> 24 nodes, 76 links, 528 OD pairs, published UE solution.
+> Node coordinates available in `SiouxFallsCoordinates.geojson`.
+
+The Sioux Falls network is the canonical traffic assignment benchmark.
+Published solutions use BPR (α=0.15, β=4), so our bi-parabolic VDF will
+produce **different** equilibrium flows. What we CAN validate:
+
+**Structural properties** (VDF-independent):
+
+1. **Wardrop conditions at convergence**: for every OD pair, all used paths
+   have equal travel time, and no unused path is cheaper. Measured as
+   relative gap:
+   ```
+   gap = Σ_a x_a · t_a / Σ_rs q_rs · π_rs − 1
+   ```
+   where π_rs is the shortest-path cost between r and s. Gap < 0.01 is
+   the conventional target.
+
+2. **Convergence monotonicity**: gap decreases (non-increasing) across
+   MSA iterations. Failure indicates a bug in flow blending or VDF.
+
+3. **Flow conservation**: Σ paths for each OD pair = demand for that pair.
+
+4. **Link flow non-negativity**: all q_e ≥ 0.
+
+**Qualitative comparison with BPR solution**:
+
+5. **Correlation**: rank-order link flows should correlate strongly with
+   published BPR equilibrium flows (r > 0.9). The VDF changes magnitudes,
+   not the overall congestion pattern.
+
+6. **Highly loaded links**: the same links that are congested in the BPR
+   solution should also be congested in our solution (top-10 overlap).
+
+**Implementation**: Synthesize an OSM XML from the GeoJSON coordinates and
+TNTP link topology. Map TNTP capacity to lane count + k_j. Map TNTP
+free-flow time to OSRM profile speeds. Process through OSRM, run full
+assignment with the published OD matrix, and check conditions 1–6.
+
+**TNTP-to-OSM bridge utility**:
+
+```python
+def tntp_to_osm(nodes_geojson, net_tntp, output_osm):
+    """Convert TNTP network files to OSM XML for OSRM processing.
+
+    Reads node coordinates from GeoJSON and link topology from TNTP net file.
+    Produces a minimal .osm XML with nodes and one-way highway segments.
+    Link attributes (capacity, free-flow time, lanes) are mapped to OSM tags.
+    """
+    ...
+```
+
+This utility is reusable for any TNTP network that has geographic coordinates.
+
+### 9.5  Benchmark validation: Nguyen-Dupuis (optional)
+
+> Source: `bstabler/TransportationNetworks/NguyenDupuis`
+> 13 nodes, 19 links.
+
+Smaller than Sioux Falls but with more route alternatives per OD pair,
+making it useful for testing convergence behavior on overlapping paths.
+Same validation properties as §9.4, items 1–4.
+
+### 9.6  Regional runtime benchmarking
+
+#### Tier 1: Monaco (already in repo)
+
+- **Network**: `tests/data/monaco.osm.pbf` (~5k edges)
+- **Purpose**: Fast CI-friendly benchmark. Validates end-to-end pipeline
+  runs without errors. Measures per-iteration wall clock.
+- **Demand**: Synthetic — uniform random OD sampling from network nodes.
+- **Metrics**: total wall-clock, customize latency, routing throughput,
+  memory high-water mark.
+
+#### Tier 2: Metro-scale (offline benchmark)
+
+- **Network**: A Geofabrik OSM extract for a mid-size metro area
+  (e.g., Lyon, Stuttgart, Salt Lake City — ~100k–500k edges).
+- **Purpose**: Stress-test scalability of customize loop, flow accumulation,
+  and memory footprint. Not run in CI.
+- **Demand**: Synthetic gravity model or a published OD matrix if available.
+- **Metrics**:
+
+| Metric | Target (metro scale) |
+|--------|---------------------|
+| Customize latency (per iteration) | < 30 seconds |
+| Routing throughput | > 50k routes/second |
+| Full assignment (20 iterations, single time bin) | < 30 minutes |
+| Peak memory | < 8 GB |
+| Convergence gap after 20 iterations | < 0.05 |
+
+#### Tier 3: Region-scale (stretch goal)
+
+- **Network**: A full US state or small European country (~1M+ edges).
+- **Purpose**: Determine the ceiling of the OSRM-based approach before
+  in-memory weight injection becomes necessary.
+- **Demand**: Synthetic or LODES/Census commute flow data.
+
+### 9.7  Expected performance characteristics
+
+#### Customize latency
 
 | Network size | Customize time | Source |
 |-------------|---------------|--------|
@@ -985,7 +1160,7 @@ is the primary scalability concern and the strongest argument for eventually
 moving to an in-memory weight update mechanism (which would require OSRM-core
 changes).
 
-### 9.2  Routing throughput
+#### Routing throughput
 
 OSRM routing with GIL release and thread pool:
 
@@ -993,11 +1168,23 @@ OSRM routing with GIL release and thread pool:
 - Bulk parallel: ~50k–200k routes/second (depending on path length and cores)
 - Table queries: much faster for dense OD matrices
 
-### 9.3  Memory footprint
+#### Memory footprint
 
 - OSRM engine: ~1–4 GB for a large metro area
 - NetworkState: ~100 bytes/edge × 1M edges = ~100 MB
 - Path storage (if retained): potentially large; may need streaming
+
+### 9.8  CI integration
+
+Unit tests (§9.2) and the Monaco smoke benchmark (§9.6 Tier 1) run in CI
+on every PR. Structural validation (Braess, §9.3) also runs in CI — the
+synthetic OSM is tiny and processes in seconds.
+
+Sioux Falls validation (§9.4) runs in CI but with relaxed iteration limits
+(5 iterations, gap < 0.1) for speed. Full convergence is an offline test.
+
+Metro and region benchmarks are manual / scheduled nightly runs, not
+blocking PR checks.
 
 ---
 
@@ -1014,52 +1201,59 @@ OSRM routing with GIL release and thread pool:
 - Add integration test: extract → partition → customize with speed file → route
   and verify changed travel times
 
-### Phase 2: Network state and VDF
+### Phase 2: Network state, VDF, and unit tests
 
 **Deliverable**: A `NetworkState` class that can be populated from OSRM route
-annotations, a `BiParabolicVDF` (Fournier et al. Eq. 11) that evaluates
-vectorized speed from density, and a `DensitySmoothing` module for mesoscopic
-spatial averaging.
+annotations, a `BiParabolicVDF` (Fournier et al.) that evaluates
+vectorized speed from density, a `DensitySmoothing` module, and full unit
+test coverage (§9.2).
 
 **Scope**:
 - `NetworkState`: edge registry, flow accumulation, density conversion
 - `BiParabolicVDF`: vectorized NumPy implementation (§5.2–5.7)
-- `DensitySmoothing`: zone-based and neighbor-based smoothing (§5.8)
+- `DensitySmoothing`: neighbor-based smoothing (§5.8)
 - `SegmentSpeedWriter`: generate CSV to tmpfs `/dev/shm/` (§2.6)
-- Unit tests on toy networks with known analytical solutions
+- `FractionalLoader`: travel-time offset bin distribution (§6.3)
+- Unit tests for all of the above (§9.2)
+- TNTP-to-OSM bridge utility for test network synthesis (§9.4)
 
-### Phase 3: Assignment loop (OD-matrix)
+### Phase 3: Assignment loop, Braess, and Monaco
 
 **Deliverable**: End-to-end assignment on Monaco with OD-matrix input,
-discrete time slices, MSA convergence, and link-flow output.
+MSA convergence, and link-flow output. Braess paradox structural validation.
 
 **Scope**:
-- `AssignmentLoop` orchestrator
+- `AssignmentLoop` orchestrator with fractional loading
 - `ODMatrixAdapter` demand input
-- Convergence reporting and diagnostics
-- Integration test on Monaco
+- Convergence reporting (relative gap, iteration log)
+- Braess paradox validation (§9.3) — synthesize OSM, verify paradox manifests
+- Monaco smoke benchmark (§9.6 Tier 1)
+- CI integration for unit tests + Braess + Monaco
 
-### Phase 4: Matrix-free adapter and validation
+### Phase 4: Sioux Falls validation and matrix-free adapter
 
-**Deliverable**: Trip-stream demand input on the same assignment core.
-Validation against known equilibrium solutions on toy networks.
-
-**Scope**:
-- `TripStreamAdapter`
-- Braess network validation (known UE solution)
-- Sioux Falls benchmark (if feasible at this scale)
-
-### Phase 5: Performance optimization
-
-**Deliverable**: Profiling-driven optimization of the hot path.
+**Deliverable**: Sioux Falls benchmark validation (§9.4). Trip-stream demand
+input on the same assignment core.
 
 **Scope**:
+- TNTP-to-OSM synthesis for Sioux Falls (24 nodes, 76 links, 528 OD pairs)
+- Wardrop condition verification (relative gap < 0.01)
+- Flow pattern correlation with published BPR equilibrium (r > 0.9)
+- `TripStreamAdapter` for matrix-free demand
+- Nguyen-Dupuis validation (optional)
+
+### Phase 5: Performance optimization and regional benchmarking
+
+**Deliverable**: Profiling-driven optimization. Metro-scale runtime benchmarks.
+
+**Scope**:
+- Metro-scale benchmark (§9.6 Tier 2) — Geofabrik extract, synthetic demand
 - Benchmark customize latency at scale (tmpfs CSV vs. disk, §2.6)
 - C++ flow-accumulation extension if Python is bottleneck
 - Evaluate shared-memory hot-swap (§2.5 Strategy B) — wrap
   `storage::Storage::Run()` or use subprocess `osrm-datastore`
 - Evaluate feasibility of in-memory `LookupTable` bypass (skip CSV entirely)
-- Evaluate feasibility of direct weight injection (OSRM-core spike)
+- Region-scale stretch test (§9.6 Tier 3) if metro results are promising
 
 ---
 
