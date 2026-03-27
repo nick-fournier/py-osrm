@@ -528,6 +528,9 @@ addressed by the mesoscopic density smoothing in §5.8.
 > link-based microsimulation. Pure per-link density is fragile: short links
 > exhibit volatile densities, spillback crosses link boundaries, and
 > isolated link states cannot represent network-level congestion effects.
+>
+> **Preferred approach**: topological neighbor-based smoothing. Zone-based
+> aggregation is available as a fallback but is not the default.
 
 #### The problem with raw link density
 
@@ -542,17 +545,70 @@ urban segments), even a few vehicles produce extreme densities. Moreover,
 when a downstream link reaches jam density, the physical spillback into
 upstream links is not represented — each link is an island.
 
-#### Approach: subnetwork density smoothing
+#### Primary approach: neighbor-based smoothing
 
-Partition the network into **zones** Z (from TAZs, a grid, or graph-based
-clustering). For each zone z, compute an aggregate density:
+Smooth each link's density with its immediate **topological neighbors** —
+the links that share a node (upstream or downstream):
+
+```
+k̃_e = (1 − β) · k_e + β · Σ_{j ∈ N(e)} w_ej · k_j
+```
+
+where:
+- N(e) is the set of links sharing a node with e
+- w_ej are normalized weights (e.g., proportional to link length L_j)
+- β ∈ [0, 0.5] is a smoothing parameter (default: 0.3)
+
+**Why this is preferred**:
+
+- **No zone definitions needed** — operates purely on network topology.
+- **Computationally cheap** — one sparse matrix-vector multiply per iteration.
+  The adjacency structure is static and can be precomputed as a CSR matrix.
+- **Physically motivated** — spillback is a local phenomenon that propagates
+  along connected links, not across arbitrary zone boundaries.
+- **Multi-pass option** — applying the smoothing kernel N times is equivalent
+  to diffusing density over N hops, giving tunable spatial reach without
+  requiring explicit zone sizes.
+
+**Vectorized implementation sketch**:
+
+```python
+# Precompute once from network topology
+# W is (N_edges, N_edges) sparse CSR, row-normalized
+# W[e, j] = L_j / Σ_{m ∈ N(e)} L_m  for j ∈ N(e), else 0
+
+def smooth_density(k, W, beta=0.3, passes=1):
+    """Neighbor-based density smoothing. O(nnz) per pass."""
+    k_smooth = k.copy()
+    for _ in range(passes):
+        k_smooth = (1 - beta) * k_smooth + beta * (W @ k_smooth)
+    return k_smooth
+```
+
+The smoothed density k̃_e then feeds the VDF:
+
+```
+v_e = VDF(k̃_e)
+```
+
+#### Fallback: zone-based aggregation (H3)
+
+When zone-level aggregation is desired (e.g., for MFD diagnostics or
+comparison with bathtub models), use **Uber H3 hexagonal cells** rather
+than arbitrary grids or TAZs:
+
+- H3 provides a standardized, hierarchical spatial index with consistent
+  cell sizes at each resolution level.
+- Resolution 7 (~5.16 km² per cell) or 8 (~0.74 km²) are reasonable
+  starting points for urban networks.
+- Each link is assigned to the H3 cell containing its midpoint.
+- The `h3` Python package is lightweight and well-maintained.
+
+For each H3 cell z, compute an aggregate density:
 
 ```
 K_z = Σ_{e ∈ z} (k_e · L_e) / Σ_{e ∈ z} L_e
 ```
-
-This is a lane-km-weighted average density across all links in the zone.
-It directly parallels the accumulation variable in MFD/bathtub models.
 
 The zone-level density feeds the VDF to produce a **zone-level reference speed**:
 
@@ -560,71 +616,37 @@ The zone-level density feeds the VDF to produce a **zone-level reference speed**
 V_z = VDF(K_z)     (using zone-average v_f and k_j)
 ```
 
-Individual link speeds are then scaled proportionally:
-
-```
-v_e = v_f,e · (V_z / v_f,z)
-```
-
-where v_f,z is the (length-weighted) average free-flow speed in zone z. This
-preserves relative speed differences between link types while applying the
-aggregate congestion effect.
-
-#### Blending: per-link and zone-level
-
-A tunable blending parameter λ ∈ [0, 1] controls the mix:
+Individual link speeds can then be blended:
 
 ```
 v_e = λ · VDF(k_e)  +  (1 − λ) · v_f,e · (V_z / v_f,z)
 ```
 
-- **λ = 1**: pure link-level density (classical).
+- **λ = 1**: pure link-level (no zone influence).
 - **λ = 0**: pure zone-level MFD (bathtub-like).
-- **λ ≈ 0.5–0.7**: recommended starting point — respects link-level
-  variation while smoothing out noise and approximating spillback.
-
-#### Neighbor-based smoothing (alternative)
-
-Instead of zone-based aggregation, smooth each link's density with its
-immediate topological neighbors:
-
-```
-k̃_e = (1 − β) · k_e + β · Σ_{j ∈ N(e)} w_ej · k_j
-```
-
-where N(e) is the set of links sharing a node with e, w_ej are weights
-(e.g., proportional to link length), and β ∈ [0, 0.5] is a smoothing
-parameter. This is computationally cheap (sparse matrix multiply) and
-captures local spillover without requiring zone definitions.
+- This is primarily useful for **diagnostics and validation**, not as the
+  default production smoothing strategy.
 
 #### Implementation recommendation
 
-For the prototype, implement **both** approaches behind a config flag:
-
 ```python
 class DensitySmoothingConfig:
-    method: str = "zone"     # "zone", "neighbor", or "none"
-    blend_lambda: float = 0.6
+    method: str = "neighbor"    # "neighbor" (default), "h3", or "none"
     neighbor_beta: float = 0.3
-    zone_source: str = "grid"  # "grid", "taz", or "custom"
-    grid_cell_m: float = 500.0  # grid cell size if zone_source="grid"
+    neighbor_passes: int = 1    # multi-pass for wider spatial reach
+    h3_resolution: int = 8      # only used if method="h3"
+    h3_blend_lambda: float = 0.7
 ```
-
-Zone boundaries can be:
-- **Grid-based** (default): partition the bounding box into cells.
-  Simple, no external data needed.
-- **TAZ-based**: use the same TAZs as the OD matrix.
-- **Custom**: user-provided zone polygon GeoJSON.
 
 #### Relationship to the MFD literature
 
-This smoothing approach is directly inspired by the Macroscopic Fundamental
+The neighbor-based smoothing is inspired by the Macroscopic Fundamental
 Diagram (MFD) / Network Fundamental Diagram (NFD) literature (Geroliminis &
-Daganzo, 2008). The insight is that network-level speed is a well-defined
-function of network-level density, even when individual links exhibit large
-variance. By evaluating the VDF at the zone level and distributing back to
-links, we get the stability benefits of MFD models while retaining the
-link-level resolution needed for path-based routing.
+Daganzo, 2008). The MFD insight — that network-level speed is a well-defined
+function of network-level density, even when individual links vary widely —
+motivates smoothing in general. The neighbor-based approach applies this
+principle locally along the network graph rather than within arbitrary spatial
+zones, which better respects the directional structure of traffic flow.
 
 ---
 
@@ -918,7 +940,7 @@ Validation against known equilibrium solutions on toy networks.
 | **Path decomposition is too slow in Python** for large networks | Medium | Medium | Move to C++ extension; the nanobind build system already supports adding new .cpp sources |
 | **Bi-parabolic VDF produces unrealistic speeds** on certain link types | Medium | Low | Validate against observed speed-flow data; allow per-link VDF parameter overrides |
 | **OSRM upstream changes break FetchContent build** | Low | Low | Pin to v6.0.0; upgrade deliberately |
-| **Zone-based density smoothing introduces artifacts at zone boundaries** | Medium | Medium | Test with multiple zone sizes; provide neighbor-based smoothing as alternative; allow user to override zones |
+| **Neighbor-based smoothing over-diffuses** on sparse networks | Medium | Medium | Cap passes at 2; expose β as tunable; validate against known congestion patterns |
 | **Shared-memory hot-swap requires external osrm-datastore process** | Low | Medium | Prototype with Strategy A (destroy/recreate); add programmatic `storage::Storage::Run()` binding later |
 | **Short-link density volatility** despite smoothing | Medium | Medium | Minimum link-length filter; merge very short links into preceding link for assignment purposes |
 
@@ -946,9 +968,9 @@ Validation against known equilibrium solutions on toy networks.
 6. **Multi-class assignment**: Should the design anticipate multiple vehicle
    classes (car, truck, transit) from the start, or defer to a later phase?
 
-7. **Density smoothing calibration**: What λ (blend) value should be the
-   default? Should it vary by road class or zone type? Should the prototype
-   ship with grid-based zones only, or also support TAZ-based zones?
+7. **Density smoothing calibration**: What β (neighbor smoothing) value and
+   how many passes? Should multi-pass be the default, or single-pass with
+   higher β?
 
 8. **Hot-swap vs. destroy/recreate**: Should the prototype invest in wrapping
    `storage::Storage::Run()` for programmatic hot-swap, or is subprocess
@@ -1010,19 +1032,16 @@ Closed-form flow-to-density inverse (congested):
   k(q) = k_c + (k_j − k_c) · √(1 − q/q_c)
 ```
 
-Mesoscopic zone-level evaluation (see §5.8):
+Mesoscopic density smoothing (see §5.8):
 
 ```
-Given: zone z with links {e₁, e₂, ...}
+Neighbor-based (default):
+  k̃_e = (1 − β) · k_e + β · Σ_{j ∈ N(e)} w_ej · k_j
+  v_e = VDF(k̃_e)
+  Default: β = 0.3, passes = 1
 
-Zone aggregate density:
+H3 zone-based (fallback, for diagnostics):
   K_z = Σ_{e ∈ z} (k_e · L_e) / Σ_{e ∈ z} L_e
-
-Zone reference speed:
-  V_z = VDF(K_z)   (using zone-average v_f, k_j)
-
-Blended link speed:
+  V_z = VDF(K_z)
   v_e = λ · VDF(k_e) + (1 − λ) · v_f,e · (V_z / v_f,z)
-
-Recommended: λ ∈ [0.5, 0.7]
 ```
