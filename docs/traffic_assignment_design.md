@@ -1109,7 +1109,47 @@ Smaller than Sioux Falls but with more route alternatives per OD pair,
 making it useful for testing convergence behavior on overlapping paths.
 Same validation properties as §9.4, items 1–4.
 
-### 9.6  Regional runtime benchmarking
+### 9.6  Empirical validation against observed traffic data
+
+Proving equilibrium on toy networks shows the algorithm is correct. Matching
+**observed real-world traffic** shows the model is *useful*. Several open
+data sources enable this:
+
+| Source | Coverage | Data type | OSM-compatible? |
+|--------|----------|-----------|-----------------|
+| **Caltrans PeMS** | California freeways | 5-min flow, speed, occupancy at ~40k detectors | Stations have lat/lon; map-matchable to OSM |
+| **Uber Movement** | ~50+ global cities | Aggregated link speeds by hour-of-day | OSM segment IDs directly |
+| **Nature unified dataset** (2024) | 20 US cities | Flow, speed, density, travel time | Built on OSM networks |
+| **State DOT count programs** | US statewide | AADT and hourly counts at stations | Lat/lon; map-matchable |
+| **graphhopper/open-traffic-collection** | Global directory | Links to open count/speed portals | Varies |
+
+**Recommended empirical validation workflow**:
+
+1. **Pick a city with both OSM coverage and open traffic counts** (e.g., a
+   California metro with PeMS sensor coverage, or a city from the Nature
+   unified dataset).
+2. **Obtain or synthesize an OD matrix** — from Census LODES commute data,
+   a gravity model, or the unified dataset's included demand.
+3. **Run assignment** on the OSM network with our bi-parabolic VDF.
+4. **Compare assigned link flows/speeds with observed data**:
+   - GEH statistic (industry standard): GEH < 5 for >85% of count locations
+     is considered a good model.
+   - Speed RMSE by facility type.
+   - Scatter plot of assigned vs. observed (visual sanity check).
+
+```
+GEH = √(2(M − C)² / (M + C))
+
+where M = model flow, C = count (observed flow)
+GEH < 5 is acceptable for individual links
+```
+
+This is a stretch goal — it requires external data procurement and OD matrix
+estimation, which are projects in themselves. But it's the gold standard for
+model credibility and would strongly differentiate this tool from academic
+prototypes.
+
+### 9.7  Regional runtime benchmarking
 
 #### Tier 1: Monaco (already in repo)
 
@@ -1144,7 +1184,7 @@ Same validation properties as §9.4, items 1–4.
   in-memory weight injection becomes necessary.
 - **Demand**: Synthetic or LODES/Census commute flow data.
 
-### 9.7  Expected performance characteristics
+### 9.8  Expected performance characteristics
 
 #### Customize latency
 
@@ -1174,7 +1214,7 @@ OSRM routing with GIL release and thread pool:
 - NetworkState: ~100 bytes/edge × 1M edges = ~100 MB
 - Path storage (if retained): potentially large; may need streaming
 
-### 9.8  CI integration
+### 9.9  CI integration
 
 Unit tests (§9.2) and the Monaco smoke benchmark (§9.6 Tier 1) run in CI
 on every PR. Structural validation (Braess, §9.3) also runs in CI — the
