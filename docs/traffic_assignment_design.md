@@ -266,13 +266,21 @@ dimension. Store N × E metric sets (N periods × E exclude classes). Query
 with `departure_period=k` or `departure_time=T` → facade factory selects
 metric set `k`.
 
-**Patch scope** (~350 lines across ~7 files):
+**Patch scope** (~350 lines across ~8 files):
 
 1. **`include/engine/api/base_parameters.hpp`**
    - Add `std::optional<unsigned> departure_period` — explicit period index
    - Add `std::optional<double> departure_time` — epoch seconds, auto-mapped
 
-2. **`include/engine/datafacade_factory.hpp`**
+2. **`include/server/api/base_parameters_grammar.hpp`**
+   - Add Boost.Spirit parsing rules for `departure_period=` and
+     `departure_time=` URL query parameters
+   - Add to the `base_rule` alternation chain
+   - Since `BaseParameters` is inherited by all services, this exposes
+     the parameters on **every HTTP endpoint** (Route, Table, Match,
+     Nearest, Trip) automatically — no per-service changes needed
+
+3. **`include/engine/datafacade_factory.hpp`**
    - Extend facade vector: `facades[period * num_excludes + exclude_index]`
    - Period resolution logic (in priority order):
      ```cpp
@@ -285,27 +293,27 @@ metric set `k`.
      ```
    - Load period schedule from data index at construction time
 
-3. **`include/customizer/files.hpp`**
+4. **`include/customizer/files.hpp`**
    - Extended TAR paths: `/mld/metrics/{name}/period/{P}/exclude/{E}/`
    - Backward-compatible: if no period entries, treat as single period
 
-4. **`src/customize/customizer.cpp`**
+5. **`src/customize/customizer.cpp`**
    - Accept a `period_index` parameter (default 0)
    - Write metrics under the period-indexed path
 
-5. **`include/engine/datafacade/contiguous_internalmem_datafacade.hpp`**
+6. **`include/engine/datafacade/contiguous_internalmem_datafacade.hpp`**
    - Load N period metric sets during initialization
    - `GetCellMetric()` returns the period-appropriate view (selected by
      the facade factory, not the search algorithm)
 
-6. **Period schedule file** (new, small)
+7. **Period schedule file** (new, small)
    - Stored alongside OSRM data as `.osrm.period_schedule`
    - Simple format: list of `(period_index, start_epoch, end_epoch)` tuples
    - Supports arbitrary period boundaries (hourly, custom, weekday/weekend)
    - Optional: if absent, only explicit `departure_period` is available
    - Written by the assignment tool or by hand for production routing
 
-7. **`include/engine/routing_algorithms/routing_base_mld.hpp`**
+8. **`include/engine/routing_algorithms/routing_base_mld.hpp`**
    - **No changes.** The search algorithm still calls `GetCellMetric()` and
      gets whichever view the facade was initialized with.
 
@@ -582,15 +590,12 @@ over the original "sequential customize" approach.
 
 ### 3.9  Valhalla as optional alternative
 
-Valhalla remains an option if OSRM's coarse-period model proves
-insufficient for a specific use case. Valhalla provides native
-`date_time` routing with per-edge speed profiles indexed by time-of-week,
-at the cost of ~5–10× slower per-query routing (100–500 QPS vs 2000–5000).
-
-The assignment core (VDF, density, smoothing, convergence) is designed to
-be engine-independent, so a `ValhallaBackend` could be added as a future
-extension without restructuring. However, with the multi-period OSRM
-patch, Valhalla is no longer a required dependency for DTA.
+If OSRM's discrete-period model proves insufficient for a niche use case,
+Valhalla could be added as an alternative backend. Valhalla supports native
+`date_time` routing (100–500 QPS vs OSRM's 2000–5000). The assignment
+core (VDF, density, smoothing, convergence) is engine-independent, so a
+Valhalla backend would not require restructuring. With the multi-period
+OSRM patch, Valhalla is not a planned dependency.
 
 ---
 
@@ -1370,25 +1375,26 @@ OSRM engine instance serves all time periods concurrently.
 
 ## 9  Concrete implementation gaps
 
-### 9.1  Must-build wrapper changes
+### 9.1  py-osrm wrapper changes (Phase 1)
 
-These are required before any assignment work can begin:
+Required before any assignment work can begin:
 
 | Gap | Location | Work |
 |-----|----------|------|
 | **Expose `updater_config`** on `CustomizationConfig` | `src/customizerconfig_nb.cpp` | Bind `segment_speed_lookup_paths` and `turn_penalty_lookup_paths` as read-write properties |
 | **Python `customize()` must accept speed/penalty file args** | `src/osrm/preprocessing.py` | Forward `segment_speed_file` and `turn_penalty_file` kwargs to `updater_config` paths |
-| **Engine destroy-and-reload helper** | `src/osrm/__init__.py` | Add `OSRM.reload()` or document the `del engine; customize(); engine = OSRM(...)` pattern |
+| **Expose `departure_period` / `departure_time`** | `src/osrm_nb.cpp` | Add to RouteParameters / TableParameters bindings (after OSRM core patch, Phase 5) |
 | **tmpfs CSV writer** | `src/osrm/assignment.py` | Write segment-speed CSV to `/dev/shm/` for zero-disk-I/O (§2.6) |
 
 ### 9.2  New assignment module
 
-A new `src/osrm/assignment.py` (or `src/osrm/assignment/` package) containing:
+A new `src/osrm/assignment/` package containing:
 
 - `NetworkState` — per-edge state arrays, edge index, flow accumulation
 - `BiParabolicVDF` — vectorized VDF evaluation, flow-to-density solver (§6)
-- `DensitySmoothing` — zone-based and neighbor-based smoothing (§6.8)
-- `AssignmentLoop` — outer time-slice loop, inner convergence loop
+- `DensitySmoothing` — neighbor-based smoothing (§6.8)
+- `AssignmentLoop` — outer loop, multi-period routing, convergence control
+- `PeriodConfig` — user-defined period mappings (§3.5)
 - `DemandAdapter` — abstract base, `ODMatrixAdapter`, `TripStreamAdapter`
 - `SegmentSpeedWriter` — generates CSV to tmpfs from `NetworkState`
 
@@ -1635,11 +1641,11 @@ prototypes.
 | City (~100k edges) | 2–10 seconds | OSRM wiki estimates |
 | Region (~1M edges) | 30–120 seconds | Depends on partition depth |
 
-This is the per-iteration cost. For 50 inner iterations × 16 time slices,
-a city-scale network would spend ~30–80 minutes just on customize calls. This
-is the primary scalability concern and the strongest argument for eventually
-moving to an in-memory weight update mechanism (which would require OSRM-core
-changes).
+This is the per-iteration cost. For 20 outer iterations × 24 hourly periods,
+a city-scale network would spend ~20–40 minutes on customize calls (with
+parallel customize across cores, this drops proportionally). The sparse
+cell-delta optimization (§3.6) reduces output size but not customize
+compute time itself.
 
 #### Routing throughput
 
@@ -1726,20 +1732,25 @@ input on the same assignment core.
 ### Phase 5: OSRM multi-period patch and DTA
 
 **Deliverable**: The OSRM core patch (§3.3) enabling multi-period metric
-storage and `departure_period` query parameter. Multi-period DTA on OSRM.
+storage, `departure_period` and `departure_time` query parameters (both
+C++ library and HTTP API). Multi-period DTA on OSRM.
 
 **Scope**:
-- Implement the ~300-line OSRM core patch (§3.3):
-  - `BaseParameters` → `departure_period`
-  - `DataFacadeFactory` → period × exclude indexing
+- Implement the ~350-line OSRM core patch (§3.3):
+  - `BaseParameters` → `departure_period`, `departure_time`
+  - `base_parameters_grammar.hpp` → HTTP parsing rules
+  - `DataFacadeFactory` → period × exclude indexing, time resolution
   - `customizer/files.hpp` → period-indexed TAR paths
   - `Customizer::Run()` → `period_index` parameter
   - `ContiguousInternalMemoryAlgorithmDataFacade` → multi-period load
+  - `.osrm.period_schedule` file format and reader
+- Sparse cell-delta storage (§3.6) as optimization pass
 - Backward compatibility: existing OSRM data (no period entries) loads as
   single period (period_index=0)
 - `PeriodConfig` Python class for user-defined period mappings (§3.5)
 - Multi-period assignment loop (§3.8)
-- py-osrm binding updates: expose `departure_period` on Route/Table
+- py-osrm binding updates: expose `departure_period`/`departure_time`
+  on Route/Table
 - Integration tests: Monaco with 2–4 periods, verify different routes per
   period under different congestion states
 - Prepare PR to OSRM upstream (clean commit, tests, documentation)
@@ -1829,17 +1840,16 @@ runtime benchmarks.
 | `src/osrm/__init__.py` | Python OSRM wrapper class |
 | `CMakeLists.txt` | Build config — links `osrm_customize` library |
 | OSRM `include/updater/updater_config.hpp` | UpdaterConfig with speed/penalty paths |
-| OSRM `include/updater/source.hpp` | Segment/Turn/SpeedSource/PenaltySource structs |
 | OSRM `include/updater/csv_file_parser.hpp` | CSV parser — uses `mapped_file_source` (§2.6) |
 | OSRM `src/updater/updater.cpp` | CSV read → edge weight update logic |
-| OSRM `src/customize/customizer.cpp` | Customizer::Run() — calls Updater then recomputes metrics (**patch target: period_index**) |
+| OSRM `src/customize/customizer.cpp` | Customizer::Run() (**patch target: period_index**) |
 | OSRM `include/customizer/cell_metric.hpp` | CellMetric struct: `{weights[], durations[], distances[]}` |
 | OSRM `include/customizer/files.hpp` | Read/write `.osrm.cell_metrics` TAR (**patch target: period-indexed paths**) |
-| OSRM `include/engine/api/base_parameters.hpp` | BaseParameters (**patch target: departure_period**) |
+| OSRM `include/engine/api/base_parameters.hpp` | BaseParameters (**patch target: departure_period, departure_time**) |
+| OSRM `include/server/api/base_parameters_grammar.hpp` | HTTP URL param parser (**patch target: grammar rules**) |
 | OSRM `include/engine/datafacade_factory.hpp` | DataFacadeFactory — `vector<Facade>`, per-query selection (**patch target: period × exclude**) |
 | OSRM `include/engine/datafacade/contiguous_internalmem_datafacade.hpp` | MLD facade impl, `GetCellMetric()` (**patch target: multi-period load**) |
 | OSRM `include/engine/routing_algorithms/routing_base_mld.hpp` | MLD search — `relaxOutgoingEdges()` (unchanged by patch) |
-| OSRM `include/engine/data_watchdog.hpp` | DataWatchdog for shared-memory hot-swap (§2.5) |
 | OSRM `include/engine/datafacade_provider.hpp` | WatchingProvider / ImmutableProvider / ExternalProvider |
 | `docs/Fournier_Ped_Transit_priority_manuscript_v4.pdf` | Bi-parabolic VDF derivation (Eq. 11) |
 
