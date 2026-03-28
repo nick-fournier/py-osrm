@@ -352,17 +352,106 @@ class PeriodConfig:
 The same `PeriodConfig` drives both the customize step (which period's
 speed CSV to use) and the query step (which `departure_period` to pass).
 
-### 3.6  Memory and runtime costs
+### 3.6  Sparse cell-delta storage
 
-**Memory per period** (weight-dependent data only):
+A naive multi-period implementation stores N full copies of all cell
+shortcut tables. But most cells — those containing only local/residential
+roads — have identical shortcuts across all periods. Only cells containing
+congested arterials or highways produce different shortcut weights under
+peak conditions.
 
-For a network with E edges and C cell boundary pairs, each period stores:
-- Cell metrics: 3 arrays (weight, duration, distance) × C entries
-- MLD graph weights: proportional to E
-- Geometry durations: proportional to E
-- Turn penalties: proportional to turn count
+**How MLD cells work:**
 
-Rough estimates by network scale:
+OSRM partitions the road network into a hierarchy of cells — nested
+geographic regions:
+
+- **Level 1 cells**: Small clusters (~50–500 nodes, a few city blocks).
+- **Level 2+ cells**: Each higher level groups several lower-level cells
+  (neighborhoods → districts → regions).
+
+For each cell, OSRM pre-computes **shortcut weights** between all
+**boundary nodes** — the nodes where roads cross cell boundaries. If a
+cell has 10 entry points and 8 exit points, it stores a 10×8 matrix of
+shortest-path costs through that cell.
+
+At query time, the MLD search **never enters cells** at levels 1+. It
+hops between boundary nodes using the pre-computed shortcuts. Detailed
+node-by-node search only happens at level 0 near the origin and
+destination.
+
+**The sparse optimization:**
+
+Instead of N full copies of every cell's shortcut table, store:
+- **One base (freeflow) metric set** — full, shared across all periods
+- **Per period**: a bitset of which cells differ + only those cells' shortcuts
+
+```
+Cell 17 (residential only):
+  Freeflow: entry A → exit B = 45s     ← stored once
+  AM peak:  entry A → exit B = 45s     ← bitset says "use base"
+  PM peak:  entry A → exit B = 45s     ← bitset says "use base"
+
+Cell 22 (contains I-580 interchange):
+  Freeflow: entry A → exit B = 30s     ← stored
+  AM peak:  entry A → exit B = 90s     ← bitset says "use override"
+  PM peak:  entry A → exit B = 75s     ← stored as override
+```
+
+At query time, the search reaches a cell boundary and needs the shortcut
+cost. One bitset check determines which table to read from:
+
+```cpp
+const auto &metric = cell_has_override.test(cell_id)
+    ? period_overrides[period].GetCell(cell_id)
+    : base_metrics.GetCell(cell_id);
+```
+
+**Performance impact: effectively zero.** This check happens once per cell
+traversal — about 10–50 times per route. A bitset test is a single AND
+instruction hitting L1 cache (~1 ns). On a route taking ~0.5 ms, this is
+unmeasurable. The shortcut weight arrays accessed afterward remain
+contiguous and cache-friendly regardless of which copy is used.
+
+**The intra-cell edge weights** (mldgr, used for level-0 search near
+origin/destination) still need full per-period storage, since we can't
+predict which cells will contain trip endpoints. However, the mldgr is
+smaller than cell metrics for large networks — cell metrics store
+precomputed shortcut matrices across all hierarchical levels, while
+the mldgr stores raw edge weights.
+
+**Geometry** (per-edge durations used for route annotations) does not need
+per-period storage. It is only read during route unpacking after the
+search completes, and the correct durations can be reconstructed from the
+chosen route's edge weights on the fly.
+
+**Impact on preprocessing:**
+
+Only the `customize` step changes — `extract` and `partition` are
+untouched (cell boundaries are topological, independent of weights).
+
+Current customize pipeline:
+1. Read segment-speed CSV
+2. Update edge weights
+3. Recompute all cell shortcut tables
+4. Write `.osrm.cell_metrics`
+
+Multi-period customize with sparse output:
+1. Compute freeflow shortcuts (period 0) — full, as today
+2. For each additional period:
+   a. Apply that period's segment-speed CSV
+   b. Recompute cell shortcuts
+   c. **Diff against freeflow** — compare shortcut arrays per cell
+   d. Store only cells that produced different results + the bitset
+3. Write base metrics + per-period sparse overrides
+
+The diff detection is cheap: an element-wise comparison of the shortcut
+weight arrays after each cell is processed. The core customize algorithm
+(recomputing boundary-to-boundary shortest paths within cells) is
+identical — it just runs N times and records which cells changed.
+
+### 3.7  Memory and runtime costs
+
+**Naive (full copy) memory per period:**
 
 | Network | Total OSRM data | Per-period overhead (~42%) | Shared (~58%) |
 |---------|-----------------|---------------------------|---------------|
@@ -370,17 +459,22 @@ Rough estimates by network scale:
 | Metro (~500K edges) | ~400 MB | ~170 MB | ~230 MB |
 | California (~10M edges) | ~4 GB | ~1.7 GB | ~2.3 GB |
 
-**Memory for N periods:**
+**With sparse cell-delta storage:**
 
-| Periods | Use case | Extra memory (CA) | Hardware |
-|---------|----------|-------------------|----------|
-| 2 | Peak/offpeak | ~3.4 GB | Laptop |
-| 4–6 | AM/midday/PM/evening | 7–10 GB | Workstation |
-| 24 | Hourly | ~41 GB | Server (64 GB) |
-| 96 | 15-minute bins | ~163 GB | HPC / cloud |
+Assuming ~15–25% of cells contain congested edges during peak periods
+(arterials and highways only), cell metric overhead drops proportionally.
+The mldgr (intra-cell edge weights) remains full-copy but is a smaller
+fraction of total per-period data.
 
-For most DTA use cases, 4–8 periods captures the essential dynamics.
-96 periods is feasible on server-class hardware.
+| Periods | Use case | Naive (CA) | Sparse (CA, ~20% cells) | Hardware |
+|---------|----------|------------|-------------------------|----------|
+| 2 | Peak/offpeak | ~3.4 GB | ~1.0 GB | Laptop |
+| 4–6 | AM/midday/PM/evening | 7–10 GB | ~2–3 GB | Laptop/workstation |
+| 24 | Hourly | ~41 GB | ~10–12 GB | Workstation |
+| 96 | 15-minute bins | ~163 GB | ~35–45 GB | Server (64 GB) |
+
+The sparse approach makes 24 periods workstation-feasible and 96 periods
+server-feasible, where the naive approach would require HPC resources.
 
 **Customize cost (pre-computation per outer iteration):**
 
@@ -399,7 +493,7 @@ Once customized, **all routing is at full OSRM speed (2000–5000 QPS/core)
 with instant period selection.** Queries for different periods can run
 concurrently — each facade is immutable and thread-safe.
 
-### 3.7  Assignment loop with multi-period routing
+### 3.8  Assignment loop with multi-period routing
 
 ```
 for iteration in 1..max_iter:
@@ -431,7 +525,7 @@ engine handles period selection internally — no sequential
 customize-per-period-per-batch. This is the key performance advantage
 over the original "sequential customize" approach.
 
-### 3.8  Valhalla as optional alternative
+### 3.9  Valhalla as optional alternative
 
 Valhalla remains an option if OSRM's coarse-period model proves
 insufficient for a specific use case. Valhalla provides native
@@ -1554,7 +1648,7 @@ storage and `departure_period` query parameter. Multi-period DTA on OSRM.
 - Backward compatibility: existing OSRM data (no period entries) loads as
   single period (period_index=0)
 - `PeriodConfig` Python class for user-defined period mappings (§3.5)
-- Multi-period assignment loop (§3.7)
+- Multi-period assignment loop (§3.8)
 - py-osrm binding updates: expose `departure_period` on Route/Table
 - Integration tests: Monaco with 2–4 periods, verify different routes per
   period under different congestion states
