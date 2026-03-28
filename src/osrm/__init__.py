@@ -1,3 +1,38 @@
+"""
+py-osrm: Python bindings for OSRM routing engine
+
+This package provides native Python bindings to the OSRM (Open Source Routing Machine)
+backend, enabling high-performance routing directly from Python without HTTP overhead.
+
+Quick Start:
+    >>> import osrm
+    >>> 
+    >>> # Load preprocessed OSRM data
+    >>> engine = osrm.OSRM("path/to/map.osrm")
+    >>> 
+    >>> # Calculate route
+    >>> result = engine.Route([(7.41, 43.73), (7.42, 43.74)])
+    >>> print(result["routes"][0]["distance"])
+
+Main Components:
+    OSRM: Native routing engine (loads .osrm files)
+    OSRM_HTTP: HTTP client for remote OSRM servers
+    
+    Bulk Processing:
+        bulk_route: Parallel route calculations
+        bulk_nearest: Parallel nearest road queries
+        bulk_match: Parallel GPS trace matching
+    
+    Preprocessing:
+        extract: Extract road network from OSM data
+        contract: Contract graph for CH algorithm
+        partition: Partition graph for MLD algorithm
+        customize: Customize graph for specific profile
+
+For detailed documentation, visit: https://github.com/gis-ops/py-osrm
+"""
+
+# ruff: noqa: F401
 
 from .osrm_ext import ( # type: ignore
     OSRM as _OSRM_Base,
@@ -42,6 +77,12 @@ from .preprocessing import (
     partition,
     customize,
 )
+
+# Bulk processing functions
+from .bulk import bulk_route, bulk_nearest, bulk_match
+
+# HTTP client
+from .http_client import OSRM_HTTP
 
 # Import-time validation of profile files
 from pathlib import Path as _Path
@@ -475,3 +516,56 @@ class OSRM:
         if isinstance(result, bytes):
             return result
         return result.to_dict()
+
+
+# Public API
+__all__ = [
+    # Main classes
+    "OSRM",
+    "OSRM_HTTP",
+    "EngineConfig",
+    "Algorithm",
+    
+    # Data types
+    "Bearing",
+    "Coordinate",
+    "Array",
+    "Object",
+    
+    # Parameter classes
+    "RouteParameters",
+    "NearestParameters",
+    "TableParameters",
+    "TileParameters",
+    "TripParameters",
+    "MatchParameters",
+    
+    # Enums
+    "RouteGeometriesType",
+    "RouteOverviewType",
+    "RouteAnnotationsType",
+    "MatchGapsType",
+    "OutputFormatType",
+    "SnappingType",
+    "TableAnnotationsType",
+    "TableFallbackCoordinateType",
+    "TripSourceType",
+    "TripDestinationType",
+    
+    # Preprocessing functions
+    "extract",
+    "contract",
+    "partition",
+    "customize",
+    
+    # Preprocessing config classes
+    "ExtractorConfig",
+    "ContractorConfig",
+    "PartitionerConfig",
+    "CustomizationConfig",
+    
+    # Bulk processing functions
+    "bulk_route",
+    "bulk_nearest",
+    "bulk_match",
+]

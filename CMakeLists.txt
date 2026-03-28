@@ -124,6 +124,19 @@ else()
 endif()
 
 
+# --- Lua: pin to 5.4 on macOS (keg-only, needs explicit prefix) ---
+if(APPLE)
+  execute_process(
+    COMMAND brew --prefix lua@5.4
+    OUTPUT_VARIABLE _brew_lua_prefix
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_brew_lua_prefix)
+    list(PREPEND CMAKE_PREFIX_PATH "${_brew_lua_prefix}")
+  endif()
+endif()
+
 # Find Lua and ensure include directory is set for OSRM's sol2
 find_package(Lua REQUIRED)
 

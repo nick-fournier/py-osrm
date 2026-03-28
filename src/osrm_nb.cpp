@@ -122,7 +122,11 @@ NB_MODULE(osrm_ext, m) {
             }
 
             json::Object result;
-            osrm::engine::Status status = t->Match(params, result);
+            osrm::engine::Status status;
+            {
+                nb::gil_scoped_release release;
+                status = t->Match(params, result);
+            }
             osrm_nb_util::check_status(status, result);
 
             return result;
@@ -142,7 +146,11 @@ NB_MODULE(osrm_ext, m) {
             }
 
             json::Object result;
-            osrm::engine::Status status = t->Nearest(params, result);
+            osrm::engine::Status status;
+            {
+                nb::gil_scoped_release release;
+                status = t->Nearest(params, result);
+            }
             osrm_nb_util::check_status(status, result);
 
             return result;
@@ -162,7 +170,11 @@ NB_MODULE(osrm_ext, m) {
             }
 
             json::Object result;
-            osrm::engine::Status status = t->Route(params, result);
+            osrm::engine::Status status;
+            {
+                nb::gil_scoped_release release;
+                status = t->Route(params, result);
+            }
             osrm_nb_util::check_status(status, result);
 
             return result;
@@ -182,7 +194,11 @@ NB_MODULE(osrm_ext, m) {
             }
 
             json::Object result;
-            osrm::engine::Status status = t->Table(params, result);
+            osrm::engine::Status status;
+            {
+                nb::gil_scoped_release release;
+                status = t->Table(params, result);
+            }
             osrm_nb_util::check_status(status, result);
 
             return result;
@@ -222,7 +238,11 @@ NB_MODULE(osrm_ext, m) {
             }
 
             json::Object result;
-            osrm::engine::Status status = t->Trip(params, result);
+            osrm::engine::Status status;
+            {
+                nb::gil_scoped_release release;
+                status = t->Trip(params, result);
+            }
             osrm_nb_util::check_status(status, result);
 
             return result;
