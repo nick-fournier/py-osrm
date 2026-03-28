@@ -8,30 +8,48 @@
 
 ## 1  Executive summary
 
-OSRM is a static shortest-path engine. Traffic assignment requires iterative,
-demand-responsive network loading where link costs change as vehicles are
-assigned. This document defines how to bridge that gap by treating OSRM as the
-**path engine** inside an outer assignment loop that owns demand, network state,
-and convergence control.
+Traffic assignment requires iterative, demand-responsive network loading where
+link costs change as vehicles are assigned. This document defines an
+**engine-agnostic assignment framework** where the routing engine is a
+pluggable backend, and all assignment logic (VDF, density, smoothing,
+convergence) lives in a shared core.
 
-The central mechanism is OSRM's **MLD customization pipeline**, which already
-supports segment-speed and turn-penalty CSV updates. These fields exist in the
-C++ `CustomizationConfig.updater_config` struct but are **not yet exposed** by
-the py-osrm Python binding. Exposing them is the first concrete implementation
-task.
+The framework supports **progressive capability milestones**:
+
+1. **OSRM static assignment** — single period, state-scale, fast. Proves the
+   VDF/density model. Uses MLD customize to update edge weights between
+   iterations.
+2. **OSRM coarse-period DTA** — 4–6 time periods (AM peak, midday, PM peak,
+   etc.), overnight batch. One customize per period per iteration.
+3. **Valhalla full-day DTA** — 96 bins (15-min × 24 hrs) with native
+   time-dependent routing via `date_time` parameter. No customize bottleneck.
+
+### Why two engines?
+
+| | OSRM (MLD) | Valhalla |
+|---|---|---|
+| Routing QPS/core | 2000–5000 | 100–500 |
+| Time-dependent costs | ❌ Single weight set | ✅ Native `date_time` |
+| Cost update mechanism | Customize (~5 min for CA) | Tile-based, incremental |
+| Best for | Static / single-period | Full-day DTA |
+| State-scale (CA ~10M edges) | ✅ | ✅ (slower per query) |
+
+The assignment core is **engine-independent**: VDF evaluation, density
+smoothing, flow accumulation, convergence control, and demand adapters are
+shared. Only the routing and cost-update interfaces differ.
 
 ### Architectural decisions locked in
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Routing algorithm | **MLD only** | CH requires full re-contraction for cost updates; MLD customize is ~100× cheaper |
+| **Routing backend** | **Pluggable: OSRM (first) + Valhalla (second)** | OSRM for speed, Valhalla for time-dependent; shared assignment core |
 | First demand interface | **OD-matrix** | Easier to validate; matrix-free adapter comes second on the same core |
-| Timing model | **Discrete time slices** | Frozen costs inside each slice; MLD refresh between slices |
+| Timing model | **Discrete time slices** | Frozen costs inside each slice; engine refresh between slices |
 | VDF family | **Bi-parabolic flow-density** (Fournier et al.) | Parameter-light (v_f, k_j); grounded in fundamental diagram; closed-form inverse; avoids BPR |
-| Density model | **Mesoscopic with spatial smoothing** (§5.8) | Zone-averaged density avoids short-link volatility; handles spillover |
-| CSV I/O | **tmpfs (`/dev/shm/`)** for prototype (§2.6) | Zero disk I/O; no OSRM changes needed; future: in-memory bypass |
-| Engine refresh | **Destroy/recreate** (prototype), **shared-memory hot-swap** (production, §2.5) | Hot-swap is zero-downtime but requires `osrm-datastore` integration |
-| Assignment logic location | **Wrapper side** (Python + C++ extension) | Avoid OSRM-core fork until profiling proves the boundary is the bottleneck |
+| Density model | **Mesoscopic with spatial smoothing** (§6.8) | Neighbor-based smoothing avoids short-link volatility; handles spillover |
+| CSV I/O (OSRM) | **tmpfs (`/dev/shm/`)** for prototype (§2.6) | Zero disk I/O; no OSRM changes needed; future: in-memory bypass |
+| Engine refresh (OSRM) | **Destroy/recreate** (prototype), **shared-memory hot-swap** (production, §2.5) | Hot-swap is zero-downtime but requires `osrm-datastore` integration |
+| Assignment logic location | **Wrapper side** (Python + C++ extension) | Avoid OSRM-core fork; engine-agnostic design enables Valhalla backend |
 
 ---
 
@@ -188,7 +206,112 @@ upstream PR.
 
 ---
 
-## 3  Path-to-link accounting
+## 3  Routing backend abstraction
+
+The assignment core communicates with the routing engine through a narrow
+interface. This allows OSRM and Valhalla (and potentially other engines) to
+be used interchangeably.
+
+### 3.1  Backend interface
+
+```python
+from abc import ABC, abstractmethod
+
+class RoutingBackend(ABC):
+    """Abstract interface for routing engines used in assignment."""
+
+    @abstractmethod
+    def route(self, origins, destinations, departure_time=None):
+        """Route OD pairs. Returns per-route link sequences with durations.
+
+        Args:
+            origins: list of (lon, lat)
+            destinations: list of (lon, lat)
+            departure_time: optional, seconds from epoch (used by Valhalla)
+
+        Returns:
+            List of RouteResult, each containing:
+              - node_ids: list of OSM node IDs along the route
+              - link_durations_s: per-link traversal time in seconds
+              - link_distances_m: per-link distance in meters
+              - total_duration_s: total trip time
+        """
+        ...
+
+    @abstractmethod
+    def update_costs(self, edge_speeds_kmh):
+        """Push updated link speeds to the engine for the next routing batch.
+
+        Args:
+            edge_speeds_kmh: dict mapping (from_osm_id, to_osm_id) → speed
+                             or NumPy arrays for vectorized backends.
+        """
+        ...
+
+    @abstractmethod
+    def supports_time_dependent(self) -> bool:
+        """Whether this backend supports departure_time in route queries."""
+        ...
+```
+
+### 3.2  OSRM backend
+
+- **`route()`**: Calls `OSRM.Route()` with `annotations=["nodes", "duration", "distance"]`.
+  Ignores `departure_time` (OSRM has a single weight set).
+- **`update_costs()`**: Writes segment-speed CSV to `/dev/shm/`, runs
+  `osrm.customize()`, refreshes engine (§2.5).
+- **`supports_time_dependent()`**: Returns `False`.
+
+For multi-period assignment (milestone 2), the assignment loop calls
+`update_costs()` once per period per iteration. The cost:
+
+```
+periods × iterations × customize_latency
+
+ 4 periods × 20 iters × 5 min (CA) = 6.7 hours   (overnight batch)
+ 6 periods × 20 iters × 5 min (CA) = 10 hours     (aggressive but doable)
+ 1 period  × 20 iters × 5 min (CA) = 1.7 hours    (single peak, practical)
+```
+
+### 3.3  Valhalla backend (milestone 3)
+
+- **`route()`**: Calls Valhalla's `/route` API with `date_time` parameter.
+  Each query gets time-appropriate edge costs automatically.
+- **`update_costs()`**: Writes updated speed profiles to Valhalla's
+  traffic tile format. Valhalla supports incremental tile updates without
+  a full rebuild.
+- **`supports_time_dependent()`**: Returns `True`.
+
+Valhalla's time-dependent routing uses per-edge speed profiles indexed by
+time-of-week. The assignment loop writes updated profiles after each
+iteration; Valhalla applies them on the next query based on `departure_time`.
+
+```
+# No per-bin customize needed — Valhalla handles time natively
+iterations × tile_update_latency
+
+20 iters × ~30s tile update (CA) = ~10 min
+```
+
+This eliminates the `bins × customize_latency` bottleneck entirely, at the
+cost of ~5–10× slower per-query routing.
+
+### 3.4  Assignment loop implications
+
+| Mode | Engine | Customize calls per iteration | Per-query time-dep? |
+|------|--------|-------------------------------|---------------------|
+| **Static (1 period)** | OSRM | 1 | No |
+| **Coarse DTA (4–6 periods)** | OSRM | 4–6 | No (one customize per period) |
+| **Full DTA (96 bins)** | Valhalla | 1 (tile update) | Yes (native `date_time`) |
+
+For OSRM multi-period: the loop routes each period's trips on that period's
+costs sequentially. For Valhalla: all trips are routed in one pass with
+`departure_time` set per trip, and Valhalla internally selects the right
+speed profile.
+
+---
+
+## 4  Path-to-link accounting
 
 Route annotations are the bridge between OSRM's path output and the assignment
 engine's link-level state.
@@ -238,9 +361,9 @@ These must come from external data or heuristics.
 
 ---
 
-## 4  Network state model
+## 5  Network state model
 
-### 4.1  Link state variables
+### 5.1  Link state variables
 
 For each directed edge `(from_osm_id, to_osm_id)`, the assignment engine
 maintains:
@@ -255,7 +378,7 @@ maintains:
 | Current density | k_e | veh/km | Derived from q_e and v_e |
 | Current speed | v_e | km/h | Evaluated from VDF(k_e) |
 
-### 4.2  Default assumptions for missing data
+### 5.2  Default assumptions for missing data
 
 OSM coverage of capacity-related attributes is incomplete. Defaults:
 
@@ -270,7 +393,7 @@ OSM coverage of capacity-related attributes is incomplete. Defaults:
 
 These are starting points; calibration against observed data is expected.
 
-### 4.3  Data structure sketch
+### 5.3  Data structure sketch
 
 ```python
 import numpy as np
@@ -292,7 +415,7 @@ class NetworkState:
 A hash map `(from_osm_id, to_osm_id) → edge_ordinal` provides O(1) lookup
 during flow accumulation.
 
-### 4.4  Flow accumulation semantics: why occupancy is already correct
+### 5.4  Flow accumulation semantics: why occupancy is already correct
 
 A common concern: if a trip traverses links A → B → C, does the vehicle
 contribute to density on all three links simultaneously? The answer is **no**
@@ -325,20 +448,20 @@ dwell time), fast links get lower. **No additional normalization is needed.**
 
 > **Implementation warning**: Do NOT accumulate density directly as vehicle
 > counts per link. Always accumulate **flow** (trips/Δt), then convert to
-> density via the VDF's inverse (§5.6) or the fundamental relationship.
+> density via the VDF's inverse (§6.6) or the fundamental relationship.
 > Direct count-based density would overcount by treating each vehicle as
 > simultaneously present on every link of its route.
 
 ---
 
-## 5  Bi-parabolic flow-density VDF
+## 6  Bi-parabolic flow-density VDF
 
 > **Reference**: The bi-parabolic formulation used here follows Fournier et al.,
 > "Pedestrian and Transit Priority Zoning."
 > See `docs/Fournier_Ped_Transit_priority_manuscript_v4.pdf` for full
 > derivations and default parameter recommendations.
 
-### 5.1  Why not BPR?
+### 6.1  Why not BPR?
 
 The Bureau of Public Roads (BPR) function `t = t_0 [1 + α(v/c)^β]` maps
 volume-to-capacity ratio to delay. It has well-known problems:
@@ -352,9 +475,9 @@ volume-to-capacity ratio to delay. It has well-known problems:
 A speed-density model grounded in the fundamental diagram avoids these issues,
 requires fewer arbitrary calibration constants, and — critically — uses density
 as its state variable, which makes it compatible with mesoscopic modeling and
-MFD-based smoothing (see §5.8).
+MFD-based smoothing (see §6.8).
 
-### 5.2  Functional form (from Fournier et al.)
+### 6.2  Functional form (from Fournier et al.)
 
 The model defines **flow as a function of density** using two parabolic
 branches in q-k (flow-density) space — i.e., it IS a macroscopic fundamental
@@ -403,7 +526,7 @@ Where:
 - k_c = critical density at which flow is maximized
 - q_c = capacity flow (veh/hr) — maximum throughput
 
-### 5.3  Parameter relationships
+### 6.3  Parameter relationships
 
 At k = 0 (empty network):
 
@@ -428,7 +551,7 @@ Uncongested: dq/dk = q_c · (2k_c − 2k) / k_c²      → at k_c: 0  ✓
 Congested:   dq/dk = −2q_c · (k − k_c) / (k_j − k_c)²  → at k_c: 0  ✓
 ```
 
-### 5.4  Default parameters (from Fournier et al.)
+### 6.4  Default parameters (from Fournier et al.)
 
 The bi-parabolic model is "parameter-light" — only two inputs are strictly
 required per link:
@@ -461,7 +584,7 @@ The paper also provides defaults for pedestrian and transit modes; those are
 not needed for the vehicular assignment prototype but could extend to
 multimodal assignment later.
 
-### 5.5  From density to OSRM weights
+### 6.5  From density to OSRM weights
 
 The VDF produces speed v(k) in km/h. OSRM's segment-speed CSV takes speed in
 km/h. The mapping is therefore direct:
@@ -475,7 +598,7 @@ Congested:   v_e = q_c · [1 − (k_e − k_c)² / (k_j − k_c)²] / k_e
 
 OSRM internally converts speed to duration: `duration = distance / (speed / 3.6)`
 
-### 5.6  From flow to density (closed-form inverse)
+### 6.6  From flow to density (closed-form inverse)
 
 The assignment loop produces flows q_e (veh/hr). We need density k_e to
 evaluate the VDF. Unlike many VDF formulations that require iterative solvers,
@@ -513,7 +636,7 @@ k = k_c + (k_j − k_c) · √(1 − q/q_c)
 
 - **If q_e ≤ q_c**: use the uncongested branch (lower k, higher v).
   This is the standard equilibrium assumption.
-- **If q_e > q_c**: the link is oversaturated. See §5.7.
+- **If q_e > q_c**: the link is oversaturated. See §6.7.
 
 **Vectorized implementation** (production use over all edges):
 
@@ -547,7 +670,7 @@ formulations that require iterative inversion. For N edges, the entire
 flow-to-speed conversion is a single vectorized NumPy operation — O(N) with
 no loops.
 
-### 5.7  Oversaturation policy
+### 6.7  Oversaturation policy
 
 When assigned flow exceeds capacity, physical queuing occurs. For the first
 prototype, we use a simple penalty:
@@ -557,9 +680,9 @@ prototype, we use a simple penalty:
 - Optionally report oversaturated links for diagnostics.
 
 Spillback modeling (queues propagating upstream) is deferred but partially
-addressed by the mesoscopic density smoothing in §5.8.
+addressed by the mesoscopic density smoothing in §6.8.
 
-### 5.8  Mesoscopic density model: spatial smoothing
+### 6.8  Mesoscopic density model: spatial smoothing
 
 > **Design decision**: This is a **mesoscopic** model, not a purely
 > link-based microsimulation. Pure per-link density is fragile: short links
@@ -687,12 +810,12 @@ zones, which better respects the directional structure of traffic flow.
 
 ---
 
-## 6  Temporal model: discrete time slices
+## 7  Temporal model: discrete time slices
 
-### 6.1  Slice lifecycle (overview)
+### 7.1  Slice lifecycle (overview)
 
 The assignment processes all demand across all time bins simultaneously, then
-distributes flow to bins via travel-time offsets (see §6.3 for details).
+distributes flow to bins via travel-time offsets (see §7.3 for details).
 
 ```
 For each outer iteration:
@@ -707,7 +830,7 @@ For each outer iteration:
   7. (optional) CONVERGE  Repeat until flow changes fall below threshold
 ```
 
-### 6.2  Slice width
+### 7.2  Slice width
 
 Recommended starting point: **15 minutes**. This balances:
 
@@ -717,7 +840,7 @@ Recommended starting point: **15 minutes**. This balances:
 
 Sensitivity analysis on slice width is a key validation task.
 
-### 6.3  Multi-bin trips: fractional link loading
+### 7.3  Multi-bin trips: fractional link loading
 
 Vehicles that depart in slice t may traverse links that fall in slices
 t, t+1, t+2, etc. The design handles this via **travel-time offset loading**:
@@ -801,7 +924,7 @@ bins — the route annotations contain all the information needed.
 
 #### Implications for the slice lifecycle
 
-The slice lifecycle (§6.1) changes: instead of processing one bin at a time
+The slice lifecycle (§7.1) changes: instead of processing one bin at a time
 independently, **all trips for all bins are routed first** on the current
 network state, then flow is distributed across bins via the offset algorithm.
 The updated lifecycle becomes:
@@ -812,8 +935,8 @@ The updated lifecycle becomes:
 3. DISTRIBUTE Assign fractional flow to (link, bin) pairs via time offsets
 4. For each bin t = 0, 1, ..., T-1:
    a. AGGREGATE  Sum fractional flows for bin t → q_e,t per link
-   b. DENSITY    Convert flow to density (§5.6)
-   c. SMOOTH     Neighbor-based smoothing (§5.8)
+   b. DENSITY    Convert flow to density (§6.6)
+   c. SMOOTH     Neighbor-based smoothing (§6.8)
    d. VDF        Evaluate bi-parabolic → speed per link for bin t
 5. WRITE CSV  Write final speeds (e.g., last bin or weighted average) to /dev/shm/
 6. CUSTOMIZE  Run osrm.customize()
@@ -825,7 +948,7 @@ This is more faithful to dynamic assignment: network conditions in each bin
 reflect only the vehicles actually present in that bin, not all vehicles
 that departed during it.
 
-### 6.4  Inner convergence loop (optional)
+### 7.4  Inner convergence loop (optional)
 
 Within the outer loop, a single all-or-nothing loading may not reach
 equilibrium. An inner loop blends successive assignments:
@@ -846,9 +969,9 @@ sophisticated methods (Frank-Wolfe, path-based algorithms) can be added later.
 
 ---
 
-## 7  Demand interfaces
+## 8  Demand interfaces
 
-### 7.1  Shared assignment core
+### 8.1  Shared assignment core
 
 Both demand modes feed the same engine:
 
@@ -873,7 +996,7 @@ Both demand modes feed the same engine:
                     └──────────────────────────────┘
 ```
 
-### 7.2  OD-matrix adapter (first)
+### 8.2  OD-matrix adapter (first)
 
 Input: a matrix of shape `(n_origins, n_destinations)` with vehicle counts per
 time slice. Origins and destinations are coordinates or zone centroids.
@@ -885,7 +1008,7 @@ assigner = osrm.TrafficAssignment(
     algorithm="MLD",
     vdf="bi-parabolic",
     slice_duration_minutes=15,
-    density_smoothing="zone",     # "zone", "neighbor", or "none" (§5.8)
+    density_smoothing="zone",     # "zone", "neighbor", or "none" (§6.8)
     smoothing_lambda=0.6,         # blending parameter
     csv_backend="tmpfs",          # "tmpfs" (/dev/shm/), "disk", or "memory"
     engine_refresh="destroy",     # "destroy" (Strategy A) or "hotswap" (Strategy B, §2.5)
@@ -911,7 +1034,7 @@ results.od_paths         # Path assignments per OD pair
 results.convergence_log  # Gap metric per iteration
 ```
 
-### 7.3  Matrix-free trip adapter (second)
+### 8.3  Matrix-free trip adapter (second)
 
 Input: a stream of individual trips `(origin, destination, departure_time)`.
 Trips are bucketed into time slices by the adapter.
@@ -927,9 +1050,9 @@ The assignment core is identical; only the demand ingestion differs.
 
 ---
 
-## 8  Concrete implementation gaps
+## 9  Concrete implementation gaps
 
-### 8.1  Must-build wrapper changes
+### 9.1  Must-build wrapper changes
 
 These are required before any assignment work can begin:
 
@@ -940,18 +1063,18 @@ These are required before any assignment work can begin:
 | **Engine destroy-and-reload helper** | `src/osrm/__init__.py` | Add `OSRM.reload()` or document the `del engine; customize(); engine = OSRM(...)` pattern |
 | **tmpfs CSV writer** | `src/osrm/assignment.py` | Write segment-speed CSV to `/dev/shm/` for zero-disk-I/O (§2.6) |
 
-### 8.2  New assignment module
+### 9.2  New assignment module
 
 A new `src/osrm/assignment.py` (or `src/osrm/assignment/` package) containing:
 
 - `NetworkState` — per-edge state arrays, edge index, flow accumulation
-- `BiParabolicVDF` — vectorized VDF evaluation, flow-to-density solver (§5)
-- `DensitySmoothing` — zone-based and neighbor-based smoothing (§5.8)
+- `BiParabolicVDF` — vectorized VDF evaluation, flow-to-density solver (§6)
+- `DensitySmoothing` — zone-based and neighbor-based smoothing (§6.8)
 - `AssignmentLoop` — outer time-slice loop, inner convergence loop
 - `DemandAdapter` — abstract base, `ODMatrixAdapter`, `TripStreamAdapter`
 - `SegmentSpeedWriter` — generates CSV to tmpfs from `NetworkState`
 
-### 8.3  Performance-critical path (candidate for C++ extension)
+### 9.3  Performance-critical path (candidate for C++ extension)
 
 The flow accumulation step (decompose millions of paths into per-edge flow
 increments) is the most likely bottleneck. If Python + NumPy is too slow,
@@ -966,9 +1089,9 @@ touching OSRM core.
 
 ---
 
-## 9  Testing, validation, and benchmarking
+## 10  Testing, validation, and benchmarking
 
-### 9.1  Test tiers
+### 10.1  Test tiers
 
 | Tier | Scope | Network | Purpose |
 |------|-------|---------|---------|
@@ -978,7 +1101,7 @@ touching OSRM core.
 | **Benchmark validation** | Published test networks | Sioux Falls (24 nodes, 76 links) | Convergence, Wardrop conditions, flow patterns |
 | **Regional benchmark** | Runtime at scale | Monaco (~5k edges), metro (~100k+ edges) | Wall-clock profiling, memory, throughput |
 
-### 9.2  Unit tests (pure Python, no OSRM dependency)
+### 10.2  Unit tests (pure Python, no OSRM dependency)
 
 These test the mathematical components in isolation:
 
@@ -1020,7 +1143,7 @@ tests/assignment/
 - Convergence: repeated passes converge to uniform density on connected graph
 - Known topology: 3-link chain with handcalculated expected output
 
-### 9.3  Structural validation: Braess network
+### 10.3  Structural validation: Braess network
 
 > Source: `bstabler/TransportationNetworks/Braess-Example`
 > 4 nodes, 5 links, 1 OD pair.
@@ -1043,7 +1166,7 @@ arbitrary coordinates and ways matching the Braess topology. Process through
 OSRM extract/partition/customize. Run assignment with a single OD pair. The
 test passes if conditions 1–3 hold.
 
-### 9.4  Benchmark validation: Sioux Falls
+### 10.4  Benchmark validation: Sioux Falls
 
 > Source: `bstabler/TransportationNetworks/SiouxFalls`
 > 24 nodes, 76 links, 528 OD pairs, published UE solution.
@@ -1100,16 +1223,16 @@ def tntp_to_osm(nodes_geojson, net_tntp, output_osm):
 
 This utility is reusable for any TNTP network that has geographic coordinates.
 
-### 9.5  Benchmark validation: Nguyen-Dupuis (optional)
+### 10.5  Benchmark validation: Nguyen-Dupuis (optional)
 
 > Source: `bstabler/TransportationNetworks/NguyenDupuis`
 > 13 nodes, 19 links.
 
 Smaller than Sioux Falls but with more route alternatives per OD pair,
 making it useful for testing convergence behavior on overlapping paths.
-Same validation properties as §9.4, items 1–4.
+Same validation properties as §10.4, items 1–4.
 
-### 9.6  Empirical validation against observed traffic data
+### 10.6  Empirical validation against observed traffic data
 
 Proving equilibrium on toy networks shows the algorithm is correct. Matching
 **observed real-world traffic** shows the model is *useful*. Several open
@@ -1149,7 +1272,7 @@ estimation, which are projects in themselves. But it's the gold standard for
 model credibility and would strongly differentiate this tool from academic
 prototypes.
 
-### 9.7  Regional runtime benchmarking
+### 10.7  Regional runtime benchmarking
 
 #### Tier 1: Monaco (already in repo)
 
@@ -1184,7 +1307,7 @@ prototypes.
   in-memory weight injection becomes necessary.
 - **Demand**: Synthetic or LODES/Census commute flow data.
 
-### 9.8  Expected performance characteristics
+### 10.8  Expected performance characteristics
 
 #### Customize latency
 
@@ -1214,13 +1337,13 @@ OSRM routing with GIL release and thread pool:
 - NetworkState: ~100 bytes/edge × 1M edges = ~100 MB
 - Path storage (if retained): potentially large; may need streaming
 
-### 9.9  CI integration
+### 10.9  CI integration
 
-Unit tests (§9.2) and the Monaco smoke benchmark (§9.6 Tier 1) run in CI
-on every PR. Structural validation (Braess, §9.3) also runs in CI — the
+Unit tests (§10.2) and the Monaco smoke benchmark (§10.6 Tier 1) run in CI
+on every PR. Structural validation (Braess, §10.3) also runs in CI — the
 synthetic OSM is tiny and processes in seconds.
 
-Sioux Falls validation (§9.4) runs in CI but with relaxed iteration limits
+Sioux Falls validation (§10.4) runs in CI but with relaxed iteration limits
 (5 iterations, gap < 0.1) for speed. Full convergence is an offline test.
 
 Metro and region benchmarks are manual / scheduled nightly runs, not
@@ -1228,7 +1351,7 @@ blocking PR checks.
 
 ---
 
-## 10  Implementation phases
+## 11  Implementation phases
 
 ### Phase 1: Expose traffic update surface
 
@@ -1246,16 +1369,16 @@ blocking PR checks.
 **Deliverable**: A `NetworkState` class that can be populated from OSRM route
 annotations, a `BiParabolicVDF` (Fournier et al.) that evaluates
 vectorized speed from density, a `DensitySmoothing` module, and full unit
-test coverage (§9.2).
+test coverage (§10.2).
 
 **Scope**:
 - `NetworkState`: edge registry, flow accumulation, density conversion
-- `BiParabolicVDF`: vectorized NumPy implementation (§5.2–5.7)
-- `DensitySmoothing`: neighbor-based smoothing (§5.8)
+- `BiParabolicVDF`: vectorized NumPy implementation (§6.2–5.7)
+- `DensitySmoothing`: neighbor-based smoothing (§6.8)
 - `SegmentSpeedWriter`: generate CSV to tmpfs `/dev/shm/` (§2.6)
-- `FractionalLoader`: travel-time offset bin distribution (§6.3)
-- Unit tests for all of the above (§9.2)
-- TNTP-to-OSM bridge utility for test network synthesis (§9.4)
+- `FractionalLoader`: travel-time offset bin distribution (§7.3)
+- Unit tests for all of the above (§10.2)
+- TNTP-to-OSM bridge utility for test network synthesis (§10.4)
 
 ### Phase 3: Assignment loop, Braess, and Monaco
 
@@ -1266,13 +1389,13 @@ MSA convergence, and link-flow output. Braess paradox structural validation.
 - `AssignmentLoop` orchestrator with fractional loading
 - `ODMatrixAdapter` demand input
 - Convergence reporting (relative gap, iteration log)
-- Braess paradox validation (§9.3) — synthesize OSM, verify paradox manifests
-- Monaco smoke benchmark (§9.6 Tier 1)
+- Braess paradox validation (§10.3) — synthesize OSM, verify paradox manifests
+- Monaco smoke benchmark (§10.6 Tier 1)
 - CI integration for unit tests + Braess + Monaco
 
 ### Phase 4: Sioux Falls validation and matrix-free adapter
 
-**Deliverable**: Sioux Falls benchmark validation (§9.4). Trip-stream demand
+**Deliverable**: Sioux Falls benchmark validation (§10.4). Trip-stream demand
 input on the same assignment core.
 
 **Scope**:
@@ -1282,26 +1405,44 @@ input on the same assignment core.
 - `TripStreamAdapter` for matrix-free demand
 - Nguyen-Dupuis validation (optional)
 
-### Phase 5: Performance optimization and regional benchmarking
+### Phase 5: Performance optimization and coarse-period DTA
 
 **Deliverable**: Profiling-driven optimization. Metro-scale runtime benchmarks.
+Coarse-period DTA (milestone 2) with 4–6 time periods on OSRM.
 
 **Scope**:
-- Metro-scale benchmark (§9.6 Tier 2) — Geofabrik extract, synthetic demand
+- Metro-scale benchmark (§10.7 Tier 2) — Geofabrik extract, synthetic demand
 - Benchmark customize latency at scale (tmpfs CSV vs. disk, §2.6)
 - C++ flow-accumulation extension if Python is bottleneck
 - Evaluate shared-memory hot-swap (§2.5 Strategy B) — wrap
   `storage::Storage::Run()` or use subprocess `osrm-datastore`
 - Evaluate feasibility of in-memory `LookupTable` bypass (skip CSV entirely)
-- Region-scale stretch test (§9.6 Tier 3) if metro results are promising
+- Multi-period assignment loop: sequential customize per period per iteration
+- Region-scale stretch test (§10.7 Tier 3) if metro results are promising
+
+### Phase 6: Valhalla backend for full-day DTA
+
+**Deliverable**: Valhalla routing backend implementing `RoutingBackend` (§3.1).
+Full 24-hour DTA with native time-dependent routing.
+
+**Scope**:
+- `ValhallaBackend` class implementing the routing backend interface
+- Valhalla traffic tile writer for cost updates
+- Integration with existing assignment core (VDF, density, demand adapters)
+- `departure_time` propagation from demand through to Valhalla queries
+- Benchmarking: Valhalla DTA vs. OSRM coarse-period on same network/demand
+- State-scale (California) feasibility test
 
 ---
 
-## 11  Risk register
+## 12  Risk register
 
 | Risk | Severity | Likelihood | Mitigation |
 |------|----------|------------|------------|
-| **Customize latency dominates runtime** at metro scale | High | High | Profile early on realistic networks; use tmpfs CSV (§2.6) to eliminate I/O; consider in-memory weight mutation as Phase 5 escalation |
+| **Customize latency dominates runtime** at metro scale | High | High | Profile early; use tmpfs CSV (§2.6); coarse periods (4–6) for OSRM; Valhalla backend for full DTA (Phase 6) |
+| **OSRM single weight set limits temporal resolution** | High | Certain | By design: OSRM for static/coarse-period, Valhalla for full-day DTA. Engine-agnostic core means this is a backend choice, not a rewrite |
+| **Valhalla integration adds complexity and dependency** | Medium | Medium | Phase 6 only; OSRM phases 1–5 deliver standalone value; Valhalla backend is additive |
+| **Valhalla per-query latency may limit state-scale DTA** | Medium | Medium | Horizontal scaling; batched queries; compare coarse OSRM vs. Valhalla DTA on same network |
 | **OSM lacks lane/capacity data** for many links | Medium | High | Ship sensible defaults by road class; allow user overrides via enrichment CSV |
 | **Engine re-instantiation has hidden side effects** (TBB thread pool, memory leaks) | Medium | Medium | py-osrm already has a TBB cleanup handler; test repeated create/destroy cycles; migrate to shared-memory hot-swap (§2.5 Strategy B) if problematic |
 | **Flow-to-density solver diverges** for edge cases | Low | Medium | Clamp density to [0, k_j]; use robust Newton with bisection fallback |
@@ -1314,7 +1455,7 @@ input on the same assignment core.
 
 ---
 
-## 12  Open questions
+## 13  Open questions
 
 1. **Slice width**: What is the right default? 15 minutes is proposed; should
    it be configurable per study?
@@ -1400,7 +1541,7 @@ Closed-form flow-to-density inverse (congested):
   k(q) = k_c + (k_j − k_c) · √(1 − q/q_c)
 ```
 
-Mesoscopic density smoothing (see §5.8):
+Mesoscopic density smoothing (see §6.8):
 
 ```
 Neighbor-based (default):
