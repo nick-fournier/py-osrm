@@ -279,6 +279,8 @@ def partition(
 def customize(
     input_path: str,
     threads: Optional[int] = None,
+    segment_speed_file: Optional[str] = None,
+    turn_penalty_file: Optional[str] = None,
     verbosity: str = "INFO",
     progress_callback: Optional[Callable[[str], None]] = None,
     capture_output: bool = False,
@@ -288,10 +290,16 @@ def customize(
     Customize partitioned graph for MLD (Multi-Level Dijkstra) algorithm.
     
     This is the final step for MLD routing (after extract and partition).
+    Optionally accepts segment speed and turn penalty CSV files to override
+    edge weights before recomputing cell metrics.
     
     Args:
         input_path: Base path to .osrm files (output from partition)
         threads: Number of threads to use. If None, uses all available CPU cores.
+        segment_speed_file: Path to CSV with segment speed overrides.
+            Format: ``from_osm_node_id,to_osm_node_id,speed_km_h[,rate]``
+        turn_penalty_file: Path to CSV with turn penalty overrides.
+            Format: ``from_osm_id,via_osm_id,to_osm_id,penalty_seconds[,weight_penalty]``
         verbosity: Log level - one of: "NONE", "ERROR", "WARNING", "INFO", "DEBUG"
         progress_callback: Optional callback function(line: str) for progress updates
         capture_output: If True, capture and return stdout/stderr
@@ -308,6 +316,9 @@ def customize(
         >>> osrm.partition('data.osrm')
         >>> result = osrm.customize('data.osrm')
         >>> 
+        >>> # Customize with traffic speed updates
+        >>> osrm.customize('data.osrm', segment_speed_file='speeds.csv')
+        >>> 
         >>> # Now ready for routing with MLD
         >>> engine = osrm.OSRM('data.osrm', algorithm='MLD')
     """
@@ -320,6 +331,12 @@ def customize(
         # Default to CPU count to avoid TBB issues with 0 threads
         import os
         config.requested_num_threads = os.cpu_count() or 1
+    
+    if segment_speed_file is not None:
+        config.segment_speed_lookup_paths = [str(segment_speed_file)]
+    
+    if turn_penalty_file is not None:
+        config.turn_penalty_lookup_paths = [str(turn_penalty_file)]
     
     for key, value in kwargs.items():
         if hasattr(config, key):
