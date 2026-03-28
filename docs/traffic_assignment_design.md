@@ -263,17 +263,27 @@ For Monaco: ~1.0 MB changes per period vs ~1.4 MB shared (~42% vs ~58%).
 
 **Concept:** Add a `period` dimension parallel to the existing `exclude`
 dimension. Store N × E metric sets (N periods × E exclude classes). Query
-with `departure_period=k` → facade factory selects metric set `k`.
+with `departure_period=k` or `departure_time=T` → facade factory selects
+metric set `k`.
 
-**Patch scope** (~300 lines across ~6 files):
+**Patch scope** (~350 lines across ~7 files):
 
 1. **`include/engine/api/base_parameters.hpp`**
-   - Add `std::optional<unsigned> departure_period`
+   - Add `std::optional<unsigned> departure_period` — explicit period index
+   - Add `std::optional<double> departure_time` — epoch seconds, auto-mapped
 
 2. **`include/engine/datafacade_factory.hpp`**
    - Extend facade vector: `facades[period * num_excludes + exclude_index]`
-   - Selection logic: extract `departure_period` from `BaseParameters`,
-     default to 0
+   - Period resolution logic (in priority order):
+     ```cpp
+     if (params.departure_period)
+         period = *params.departure_period;        // explicit index
+     else if (params.departure_time && period_schedule)
+         period = period_schedule->resolve(*params.departure_time);
+     else
+         period = 0;                               // freeflow default
+     ```
+   - Load period schedule from data index at construction time
 
 3. **`include/customizer/files.hpp`**
    - Extended TAR paths: `/mld/metrics/{name}/period/{P}/exclude/{E}/`
@@ -288,13 +298,33 @@ with `departure_period=k` → facade factory selects metric set `k`.
    - `GetCellMetric()` returns the period-appropriate view (selected by
      the facade factory, not the search algorithm)
 
-6. **`include/engine/routing_algorithms/routing_base_mld.hpp`**
+6. **Period schedule file** (new, small)
+   - Stored alongside OSRM data as `.osrm.period_schedule`
+   - Simple format: list of `(period_index, start_epoch, end_epoch)` tuples
+   - Supports arbitrary period boundaries (hourly, custom, weekday/weekend)
+   - Optional: if absent, only explicit `departure_period` is available
+   - Written by the assignment tool or by hand for production routing
+
+7. **`include/engine/routing_algorithms/routing_base_mld.hpp`**
    - **No changes.** The search algorithm still calls `GetCellMetric()` and
      gets whichever view the facade was initialized with.
 
 **The MLD search algorithm is completely unchanged.** Period selection
 happens at the facade factory level, identically to how exclude classes
 work today.
+
+**Two query modes serve different use cases:**
+
+| Mode | Parameter | Use case |
+|------|-----------|----------|
+| Explicit index | `departure_period=3` | Assignment loop (wrapper controls periods) |
+| Timestamp | `departure_time=1711648200` | Matrix-free ABM, production routing, navigation |
+
+For the matrix-free travel model, an activity-based model feeds individual
+trips with real departure timestamps. OSRM automatically routes each trip
+on the correct period's congestion state — no period mapping in the
+application layer. The same engine instance serves all time periods
+concurrently.
 
 ### 3.4  Bidirectional search correctness and cross-period trips
 
@@ -1324,6 +1354,17 @@ assigner.load_trips(
 ```
 
 The assignment core is identical; only the demand ingestion differs.
+
+With the `departure_time` parameter in the OSRM patch (§3.3), the
+matrix-free adapter becomes especially clean: each trip's real departure
+timestamp is passed directly to OSRM, which automatically selects the
+correct period's congestion state. No period bucketing is needed in the
+application layer — OSRM's period schedule handles the mapping internally.
+
+This is the ultimate target for activity-based models: individual agents
+with continuous departure times, routed on time-appropriate congestion,
+with flow feedback updating congestion for the next iteration. The same
+OSRM engine instance serves all time periods concurrently.
 
 ---
 
