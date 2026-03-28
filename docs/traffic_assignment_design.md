@@ -9,47 +9,50 @@
 ## 1  Executive summary
 
 Traffic assignment requires iterative, demand-responsive network loading where
-link costs change as vehicles are assigned. This document defines an
-**engine-agnostic assignment framework** where the routing engine is a
-pluggable backend, and all assignment logic (VDF, density, smoothing,
-convergence) lives in a shared core.
+link costs change as vehicles are assigned. This document defines a
+**DTA framework built on OSRM** with a targeted core patch that adds
+**multi-period metric storage** — enabling time-dependent routing at full
+OSRM query speed without requiring a second routing engine.
 
 The framework supports **progressive capability milestones**:
 
 1. **OSRM static assignment** — single period, state-scale, fast. Proves the
    VDF/density model. Uses MLD customize to update edge weights between
    iterations.
-2. **OSRM coarse-period DTA** — 4–6 time periods (AM peak, midday, PM peak,
-   etc.), overnight batch. One customize per period per iteration.
-3. **Valhalla full-day DTA** — 96 bins (15-min × 24 hrs) with native
-   time-dependent routing via `date_time` parameter. No customize bottleneck.
+2. **OSRM multi-period DTA** — user-defined time periods (2–96), pre-customized
+   per outer iteration. Queries select the correct metric set via a
+   `departure_period` parameter. Full OSRM routing speed on all periods
+   simultaneously.
 
-### Why two engines?
+### Core innovation: multi-period metric sets in OSRM
 
-| | OSRM (MLD) | Valhalla |
-|---|---|---|
-| Routing QPS/core | 2000–5000 | 100–500 |
-| Time-dependent costs | ❌ Single weight set | ✅ Native `date_time` |
-| Cost update mechanism | Customize (~5 min for CA) | Tile-based, incremental |
-| Best for | Static / single-period | Full-day DTA |
-| State-scale (CA ~10M edges) | ✅ | ✅ (slower per query) |
+OSRM's MLD algorithm already stores **multiple metric sets** internally (one
+per vehicle-class "exclude" profile). The `DataFacadeFactory` holds a
+`vector<Facade>` and selects the right one per query. We extend this pattern
+to add a **period dimension**: N user-defined time periods, each with its own
+pre-customized cell metrics. At query time, `departure_period=k` selects
+metric set `k`. The MLD search algorithm is unchanged.
 
-The assignment core is **engine-independent**: VDF evaluation, density
-smoothing, flow accumulation, convergence control, and demand adapters are
-shared. Only the routing and cost-update interfaces differ.
+This is a surgical C++ patch (~300 lines across ~6 OSRM files) that:
+- Eliminates the need for Valhalla or any second engine
+- Provides full OSRM query speed (2000–5000 QPS) on all periods
+- Supports concurrent queries across different periods (thread-safe)
+- Is potentially PR-able to OSRM upstream as a generally useful
+  "time-of-day routing profiles" feature
 
 ### Architectural decisions locked in
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| **Routing backend** | **Pluggable: OSRM (first) + Valhalla (second)** | OSRM for speed, Valhalla for time-dependent; shared assignment core |
+| **Routing engine** | **OSRM with multi-period patch** | Full query speed; surgical patch extends existing exclude-class mechanism; avoids second engine dependency |
+| **Time periods** | **User-defined, N arbitrary** | Peak/offpeak (N=2), hourly (N=24), 15-min (N=96), custom — memory is the only constraint |
 | First demand interface | **OD-matrix** | Easier to validate; matrix-free adapter comes second on the same core |
 | Timing model | **Discrete time slices** | Frozen costs inside each slice; engine refresh between slices |
 | VDF family | **Bi-parabolic flow-density** (Fournier et al.) | Parameter-light (v_f, k_j); grounded in fundamental diagram; closed-form inverse; avoids BPR |
 | Density model | **Mesoscopic with spatial smoothing** (§6.8) | Neighbor-based smoothing avoids short-link volatility; handles spillover |
 | CSV I/O (OSRM) | **tmpfs (`/dev/shm/`)** for prototype (§2.6) | Zero disk I/O; no OSRM changes needed; future: in-memory bypass |
 | Engine refresh (OSRM) | **Destroy/recreate** (prototype), **shared-memory hot-swap** (production, §2.5) | Hot-swap is zero-downtime but requires `osrm-datastore` integration |
-| Assignment logic location | **Wrapper side** (Python + C++ extension) | Avoid OSRM-core fork; engine-agnostic design enables Valhalla backend |
+| Assignment logic location | **Wrapper side** (Python + C++ extension) | All assignment logic (VDF, density, smoothing, convergence) in py-osrm; OSRM core only gets the multi-metric patch |
 
 ---
 
@@ -206,108 +209,239 @@ upstream PR.
 
 ---
 
-## 3  Routing backend abstraction
+## 3  OSRM multi-period routing
 
-The assignment core communicates with the routing engine through a narrow
-interface. This allows OSRM and Valhalla (and potentially other engines) to
-be used interchangeably.
+The central technical contribution: extending OSRM's MLD algorithm to store
+and select among **N user-defined metric sets** at query time, enabling
+time-dependent routing without a second engine.
 
-### 3.1  Backend interface
+### 3.1  How OSRM already handles multiple metric sets
+
+OSRM's MLD engine already supports multiple metric sets via the "exclude
+class" mechanism (vehicle-class restrictions). The architecture:
+
+```
+DataFacadeFactory
+  └── vector<shared_ptr<const Facade>> facades   // one per exclude class
+  └── Get(BaseParameters) → facades[exclude_index]
+```
+
+Each facade holds its own `CellMetricView` — a set of pre-computed cell
+shortcut weights, durations, and distances. At query time, the factory
+selects a facade based on `BaseParameters::exclude`. The MLD search
+algorithm is oblivious — it just calls `GetCellMetric()` and gets the
+right view.
+
+**Key files in OSRM core:**
+
+| File | What it does |
+|------|--------------|
+| `include/engine/datafacade_factory.hpp` | `DataFacadeFactory` — stores `vector<Facade>`, selects per query |
+| `include/customizer/cell_metric.hpp` | `CellMetric` struct: `{weights[], durations[], distances[]}` |
+| `include/customizer/files.hpp` | Read/write `.osrm.cell_metrics` — TAR with `/mld/metrics/{name}/exclude/{N}/` |
+| `include/engine/datafacade/contiguous_internalmem_datafacade.hpp` | `GetCellMetric()` — returns one `CellMetricView` |
+| `include/engine/routing_algorithms/routing_base_mld.hpp` | MLD search — calls `GetCellMetric()` in `relaxOutgoingEdges()` |
+| `include/engine/api/route_parameters.hpp` | `RouteParameters` — no time fields currently |
+
+### 3.2  What changes with `customize`
+
+Only a subset of OSRM's data files change when edge weights are updated.
+Everything else is structurally static:
+
+| File | Changes? | Content |
+|------|----------|---------|
+| `.osrm.cell_metrics` | ✅ Yes | Cell shortcut weights/durations/distances |
+| `.osrm.mldgr` | ✅ Yes | Multi-level graph with shortcut weights |
+| `.osrm.geometry` | ✅ Yes | Per-edge durations/weights for annotations |
+| `.osrm.turn_*_penalties` | ✅ Yes | Turn penalty weights |
+| `.osrm.ebg`, `.osrm.partition`, `.osrm.cells` | ❌ No | Graph topology, cell structure |
+| Everything else | ❌ No | Names, coordinates, indexes |
+
+For Monaco: ~1.0 MB changes per period vs ~1.4 MB shared (~42% vs ~58%).
+
+### 3.3  The multi-period patch
+
+**Concept:** Add a `period` dimension parallel to the existing `exclude`
+dimension. Store N × E metric sets (N periods × E exclude classes). Query
+with `departure_period=k` → facade factory selects metric set `k`.
+
+**Patch scope** (~300 lines across ~6 files):
+
+1. **`include/engine/api/base_parameters.hpp`**
+   - Add `std::optional<unsigned> departure_period`
+
+2. **`include/engine/datafacade_factory.hpp`**
+   - Extend facade vector: `facades[period * num_excludes + exclude_index]`
+   - Selection logic: extract `departure_period` from `BaseParameters`,
+     default to 0
+
+3. **`include/customizer/files.hpp`**
+   - Extended TAR paths: `/mld/metrics/{name}/period/{P}/exclude/{E}/`
+   - Backward-compatible: if no period entries, treat as single period
+
+4. **`src/customize/customizer.cpp`**
+   - Accept a `period_index` parameter (default 0)
+   - Write metrics under the period-indexed path
+
+5. **`include/engine/datafacade/contiguous_internalmem_datafacade.hpp`**
+   - Load N period metric sets during initialization
+   - `GetCellMetric()` returns the period-appropriate view (selected by
+     the facade factory, not the search algorithm)
+
+6. **`include/engine/routing_algorithms/routing_base_mld.hpp`**
+   - **No changes.** The search algorithm still calls `GetCellMetric()` and
+     gets whichever view the facade was initialized with.
+
+**The MLD search algorithm is completely unchanged.** Period selection
+happens at the facade factory level, identically to how exclude classes
+work today.
+
+### 3.4  Bidirectional search correctness
+
+OSRM's MLD uses true bidirectional Dijkstra (forward + backward heaps).
+For time-dependent routing, backward search is theoretically invalid
+because arrival time is unknown a priori.
+
+**With frozen costs per period, this is not a problem.** Both forward
+and backward search use the same static weights within a given period.
+The approximation is only that a route spanning two periods uses the
+departure period's weights throughout. For trips shorter than the period
+duration, this is exact.
+
+This is the same approximation used by every discrete-time DTA model
+(TRANSIMS, DTALite, etc.) — costs are frozen within each time slice.
+
+### 3.5  User-defined period configurations
+
+OSRM sees only indices `0..N-1`. All temporal semantics — what each period
+represents, how departure times map to period indices — live in the Python
+wrapper:
 
 ```python
-from abc import ABC, abstractmethod
+class PeriodConfig:
+    """Maps wall-clock time to OSRM period indices."""
 
-class RoutingBackend(ABC):
-    """Abstract interface for routing engines used in assignment."""
+    @staticmethod
+    def peak_offpeak():
+        """N=2: AM/PM peak vs everything else."""
+        return PeriodConfig(breaks_h=[6, 9, 15, 19],
+                            labels=["offpeak", "am_peak", "midday",
+                                    "pm_peak", "evening"])
 
-    @abstractmethod
-    def route(self, origins, destinations, departure_time=None):
-        """Route OD pairs. Returns per-route link sequences with durations.
+    @staticmethod
+    def uniform(minutes=15):
+        """N=1440/minutes: uniform bins across 24 hours."""
+        n = 1440 // minutes
+        return PeriodConfig.from_bin_count(n)
 
-        Args:
-            origins: list of (lon, lat)
-            destinations: list of (lon, lat)
-            departure_time: optional, seconds from epoch (used by Valhalla)
+    @staticmethod
+    def custom(specs):
+        """Arbitrary user-defined periods.
 
-        Returns:
-            List of RouteResult, each containing:
-              - node_ids: list of OSM node IDs along the route
-              - link_durations_s: per-link traversal time in seconds
-              - link_distances_m: per-link distance in meters
-              - total_duration_s: total trip time
+        specs: list of (label, time_range) tuples
+        e.g., [("weekday_am", "07:00-09:00"),
+               ("weekend",    "Sat-Sun 00:00-24:00")]
         """
         ...
 
-    @abstractmethod
-    def update_costs(self, edge_speeds_kmh):
-        """Push updated link speeds to the engine for the next routing batch.
-
-        Args:
-            edge_speeds_kmh: dict mapping (from_osm_id, to_osm_id) → speed
-                             or NumPy arrays for vectorized backends.
-        """
-        ...
-
-    @abstractmethod
-    def supports_time_dependent(self) -> bool:
-        """Whether this backend supports departure_time in route queries."""
+    def time_to_period(self, departure_time) -> int:
+        """Map wall-clock time to period index."""
         ...
 ```
 
-### 3.2  OSRM backend
+The same `PeriodConfig` drives both the customize step (which period's
+speed CSV to use) and the query step (which `departure_period` to pass).
 
-- **`route()`**: Calls `OSRM.Route()` with `annotations=["nodes", "duration", "distance"]`.
-  Ignores `departure_time` (OSRM has a single weight set).
-- **`update_costs()`**: Writes segment-speed CSV to `/dev/shm/`, runs
-  `osrm.customize()`, refreshes engine (§2.5).
-- **`supports_time_dependent()`**: Returns `False`.
+### 3.6  Memory and runtime costs
 
-For multi-period assignment (milestone 2), the assignment loop calls
-`update_costs()` once per period per iteration. The cost:
+**Memory per period** (weight-dependent data only):
+
+For a network with E edges and C cell boundary pairs, each period stores:
+- Cell metrics: 3 arrays (weight, duration, distance) × C entries
+- MLD graph weights: proportional to E
+- Geometry durations: proportional to E
+- Turn penalties: proportional to turn count
+
+Rough estimates by network scale:
+
+| Network | Total OSRM data | Per-period overhead (~42%) | Shared (~58%) |
+|---------|-----------------|---------------------------|---------------|
+| Monaco (~5K edges) | ~2.4 MB | ~1.0 MB | ~1.4 MB |
+| Metro (~500K edges) | ~400 MB | ~170 MB | ~230 MB |
+| California (~10M edges) | ~4 GB | ~1.7 GB | ~2.3 GB |
+
+**Memory for N periods:**
+
+| Periods | Use case | Extra memory (CA) | Hardware |
+|---------|----------|-------------------|----------|
+| 2 | Peak/offpeak | ~3.4 GB | Laptop |
+| 4–6 | AM/midday/PM/evening | 7–10 GB | Workstation |
+| 24 | Hourly | ~41 GB | Server (64 GB) |
+| 96 | 15-minute bins | ~163 GB | HPC / cloud |
+
+For most DTA use cases, 4–8 periods captures the essential dynamics.
+96 periods is feasible on server-class hardware.
+
+**Customize cost (pre-computation per outer iteration):**
 
 ```
-periods × iterations × customize_latency
+N periods × customize_latency (once per outer iteration)
 
- 4 periods × 20 iters × 5 min (CA) = 6.7 hours   (overnight batch)
- 6 periods × 20 iters × 5 min (CA) = 10 hours     (aggressive but doable)
- 1 period  × 20 iters × 5 min (CA) = 1.7 hours    (single peak, practical)
+ 2 periods × 5 min (CA) =  10 min/iter → 20 iters = 3.3 hours
+ 6 periods × 5 min (CA) =  30 min/iter → 20 iters = 10 hours
+24 periods × 5 min (CA) = 120 min/iter → 20 iters = 40 hours
+
+Note: period customizations are independent — parallelizable across cores.
+With 6 cores: 6 periods × 5 min = 5 min/iter → 20 iters = 1.7 hours
 ```
 
-### 3.3  Valhalla backend (milestone 3)
+Once customized, **all routing is at full OSRM speed (2000–5000 QPS/core)
+with instant period selection.** Queries for different periods can run
+concurrently — each facade is immutable and thread-safe.
 
-- **`route()`**: Calls Valhalla's `/route` API with `date_time` parameter.
-  Each query gets time-appropriate edge costs automatically.
-- **`update_costs()`**: Writes updated speed profiles to Valhalla's
-  traffic tile format. Valhalla supports incremental tile updates without
-  a full rebuild.
-- **`supports_time_dependent()`**: Returns `True`.
-
-Valhalla's time-dependent routing uses per-edge speed profiles indexed by
-time-of-week. The assignment loop writes updated profiles after each
-iteration; Valhalla applies them on the next query based on `departure_time`.
+### 3.7  Assignment loop with multi-period routing
 
 ```
-# No per-bin customize needed — Valhalla handles time natively
-iterations × tile_update_latency
+for iteration in 1..max_iter:
+    # 1. Pre-customize all periods (parallelizable)
+    for period in 0..N-1:
+        write_speed_csv(period, network_state)
+        osrm_customize(base_path, period_index=period)
 
-20 iters × ~30s tile update (CA) = ~10 min
+    # 2. Reload engine (picks up all N metric sets)
+    engine = reload_engine(base_path)
+
+    # 3. Route ALL trips in one pass — each with its departure_period
+    for trip in demand:
+        period = period_config.time_to_period(trip.departure_time)
+        result = engine.Route(trip.origin, trip.destination,
+                              departure_period=period)
+        accumulate_flow(result, network_state)
+
+    # 4. Update network state (VDF, density smoothing)
+    network_state.update_speeds()
+
+    # 5. Check convergence
+    if converged(network_state):
+        break
 ```
 
-This eliminates the `bins × customize_latency` bottleneck entirely, at the
-cost of ~5–10× slower per-query routing.
+All trips are routed in a single pass regardless of period count. The
+engine handles period selection internally — no sequential
+customize-per-period-per-batch. This is the key performance advantage
+over the original "sequential customize" approach.
 
-### 3.4  Assignment loop implications
+### 3.8  Valhalla as optional alternative
 
-| Mode | Engine | Customize calls per iteration | Per-query time-dep? |
-|------|--------|-------------------------------|---------------------|
-| **Static (1 period)** | OSRM | 1 | No |
-| **Coarse DTA (4–6 periods)** | OSRM | 4–6 | No (one customize per period) |
-| **Full DTA (96 bins)** | Valhalla | 1 (tile update) | Yes (native `date_time`) |
+Valhalla remains an option if OSRM's coarse-period model proves
+insufficient for a specific use case. Valhalla provides native
+`date_time` routing with per-edge speed profiles indexed by time-of-week,
+at the cost of ~5–10× slower per-query routing (100–500 QPS vs 2000–5000).
 
-For OSRM multi-period: the loop routes each period's trips on that period's
-costs sequentially. For Valhalla: all trips are routed in one pass with
-`departure_time` set per trip, and Valhalla internally selects the right
-speed profile.
+The assignment core (VDF, density, smoothing, convergence) is designed to
+be engine-independent, so a `ValhallaBackend` could be added as a future
+extension without restructuring. However, with the multi-period OSRM
+patch, Valhalla is no longer a required dependency for DTA.
 
 ---
 
@@ -316,7 +450,7 @@ speed profile.
 Route annotations are the bridge between OSRM's path output and the assignment
 engine's link-level state.
 
-### 3.1  What OSRM returns with `annotations=["nodes", "distance", "speed"]`
+### 4.1  What OSRM returns with `annotations=["nodes", "distance", "speed"]`
 
 ```python
 result = engine.Route(
@@ -332,7 +466,7 @@ leg = result["routes"][0]["legs"][0]["annotation"]
 # leg["speed"]     = [s01, s12, s23, ...]     ← per-segment m/s (float)
 ```
 
-### 3.2  Edge identity
+### 4.2  Edge identity
 
 An **assignable edge** is defined by a directed pair of consecutive OSM node
 IDs from the `nodes` annotation:
@@ -345,7 +479,7 @@ edges = [(n0, n1), (n1, n2), (n2, n3)]
 These pairs map **directly** to the segment-speed CSV format. This is the
 critical property that makes the entire design work without OSRM-core changes.
 
-### 3.3  Per-edge data available from annotations
+### 4.3  Per-edge data available from annotations
 
 | Annotation | Type | Unit | Per-edge? |
 |------------|------|------|-----------|
@@ -1380,7 +1514,7 @@ test coverage (§10.2).
 - Unit tests for all of the above (§10.2)
 - TNTP-to-OSM bridge utility for test network synthesis (§10.4)
 
-### Phase 3: Assignment loop, Braess, and Monaco
+### Phase 3: Assignment loop, Braess, and Monaco (single period)
 
 **Deliverable**: End-to-end assignment on Monaco with OD-matrix input,
 MSA convergence, and link-flow output. Braess paradox structural validation.
@@ -1405,33 +1539,41 @@ input on the same assignment core.
 - `TripStreamAdapter` for matrix-free demand
 - Nguyen-Dupuis validation (optional)
 
-### Phase 5: Performance optimization and coarse-period DTA
+### Phase 5: OSRM multi-period patch and DTA
 
-**Deliverable**: Profiling-driven optimization. Metro-scale runtime benchmarks.
-Coarse-period DTA (milestone 2) with 4–6 time periods on OSRM.
+**Deliverable**: The OSRM core patch (§3.3) enabling multi-period metric
+storage and `departure_period` query parameter. Multi-period DTA on OSRM.
+
+**Scope**:
+- Implement the ~300-line OSRM core patch (§3.3):
+  - `BaseParameters` → `departure_period`
+  - `DataFacadeFactory` → period × exclude indexing
+  - `customizer/files.hpp` → period-indexed TAR paths
+  - `Customizer::Run()` → `period_index` parameter
+  - `ContiguousInternalMemoryAlgorithmDataFacade` → multi-period load
+- Backward compatibility: existing OSRM data (no period entries) loads as
+  single period (period_index=0)
+- `PeriodConfig` Python class for user-defined period mappings (§3.5)
+- Multi-period assignment loop (§3.7)
+- py-osrm binding updates: expose `departure_period` on Route/Table
+- Integration tests: Monaco with 2–4 periods, verify different routes per
+  period under different congestion states
+- Prepare PR to OSRM upstream (clean commit, tests, documentation)
+
+### Phase 6: Performance optimization and scaling
+
+**Deliverable**: Profiling-driven optimization. Metro-scale and regional
+runtime benchmarks.
 
 **Scope**:
 - Metro-scale benchmark (§10.7 Tier 2) — Geofabrik extract, synthetic demand
 - Benchmark customize latency at scale (tmpfs CSV vs. disk, §2.6)
+- Parallelize period customization across cores
 - C++ flow-accumulation extension if Python is bottleneck
 - Evaluate shared-memory hot-swap (§2.5 Strategy B) — wrap
   `storage::Storage::Run()` or use subprocess `osrm-datastore`
 - Evaluate feasibility of in-memory `LookupTable` bypass (skip CSV entirely)
-- Multi-period assignment loop: sequential customize per period per iteration
-- Region-scale stretch test (§10.7 Tier 3) if metro results are promising
-
-### Phase 6: Valhalla backend for full-day DTA
-
-**Deliverable**: Valhalla routing backend implementing `RoutingBackend` (§3.1).
-Full 24-hour DTA with native time-dependent routing.
-
-**Scope**:
-- `ValhallaBackend` class implementing the routing backend interface
-- Valhalla traffic tile writer for cost updates
-- Integration with existing assignment core (VDF, density, demand adapters)
-- `departure_time` propagation from demand through to Valhalla queries
-- Benchmarking: Valhalla DTA vs. OSRM coarse-period on same network/demand
-- State-scale (California) feasibility test
+- Region-scale stretch test (§10.7 Tier 3) — California or similar
 
 ---
 
@@ -1439,10 +1581,10 @@ Full 24-hour DTA with native time-dependent routing.
 
 | Risk | Severity | Likelihood | Mitigation |
 |------|----------|------------|------------|
-| **Customize latency dominates runtime** at metro scale | High | High | Profile early; use tmpfs CSV (§2.6); coarse periods (4–6) for OSRM; Valhalla backend for full DTA (Phase 6) |
-| **OSRM single weight set limits temporal resolution** | High | Certain | By design: OSRM for static/coarse-period, Valhalla for full-day DTA. Engine-agnostic core means this is a backend choice, not a rewrite |
-| **Valhalla integration adds complexity and dependency** | Medium | Medium | Phase 6 only; OSRM phases 1–5 deliver standalone value; Valhalla backend is additive |
-| **Valhalla per-query latency may limit state-scale DTA** | Medium | Medium | Horizontal scaling; batched queries; compare coarse OSRM vs. Valhalla DTA on same network |
+| **Customize latency dominates runtime** at state scale | High | High | Parallelize N period customizations across cores; use tmpfs CSV (§2.6); for 6 periods on 6 cores → same wall-clock as 1 period |
+| **OSRM multi-period patch rejected upstream** | Medium | Medium | Patch is isolated and maintainable on a pinned fork (v6.0.0); feature is generally useful ("time-of-day profiles") improving acceptance odds |
+| **N-period memory exceeds hardware** for fine-grained DTA | Medium | Low | Memory scales linearly with N; user chooses N based on hardware; 4–8 periods covers most use cases at <10 GB (CA) |
+| **Bidirectional search approximation** for cross-period trips | Low | Medium | Same approximation as all discrete-time DTA models; trips shorter than period duration are exact; document the approximation and its bounds |
 | **OSM lacks lane/capacity data** for many links | Medium | High | Ship sensible defaults by road class; allow user overrides via enrichment CSV |
 | **Engine re-instantiation has hidden side effects** (TBB thread pool, memory leaks) | Medium | Medium | py-osrm already has a TBB cleanup handler; test repeated create/destroy cycles; migrate to shared-memory hot-swap (§2.5 Strategy B) if problematic |
 | **Flow-to-density solver diverges** for edge cases | Low | Medium | Clamp density to [0, k_j]; use robust Newton with bisection fallback |
@@ -1450,7 +1592,6 @@ Full 24-hour DTA with native time-dependent routing.
 | **Bi-parabolic VDF produces unrealistic speeds** on certain link types | Medium | Low | Validate against observed speed-flow data; allow per-link VDF parameter overrides |
 | **OSRM upstream changes break FetchContent build** | Low | Low | Pin to v6.0.0; upgrade deliberately |
 | **Neighbor-based smoothing over-diffuses** on sparse networks | Medium | Medium | Cap passes at 2; expose β as tunable; validate against known congestion patterns |
-| **Shared-memory hot-swap requires external osrm-datastore process** | Low | Medium | Prototype with Strategy A (destroy/recreate); add programmatic `storage::Storage::Run()` binding later |
 | **Short-link density volatility** despite smoothing | Medium | Medium | Minimum link-length filter; merge very short links into preceding link for assignment purposes |
 
 ---
@@ -1481,9 +1622,14 @@ Full 24-hour DTA with native time-dependent routing.
    how many passes? Should multi-pass be the default, or single-pass with
    higher β?
 
-8. **Hot-swap vs. destroy/recreate**: Should the prototype invest in wrapping
-   `storage::Storage::Run()` for programmatic hot-swap, or is subprocess
-   `python -m osrm datastore` sufficient?
+8. **OSRM patch upstream strategy**: Submit the multi-period patch as a PR
+   to Project OSRM, or maintain as a fork? What level of test coverage and
+   documentation would maximize acceptance odds?
+
+9. **Parallel customize implementation**: Use Python `multiprocessing` to
+   run N period customizations concurrently, or a shell-level approach?
+   Need to verify OSRM customize is process-safe for concurrent execution
+   writing to different output paths.
 
 ---
 
@@ -1501,9 +1647,15 @@ Full 24-hour DTA with native time-dependent routing.
 | OSRM `include/updater/source.hpp` | Segment/Turn/SpeedSource/PenaltySource structs |
 | OSRM `include/updater/csv_file_parser.hpp` | CSV parser — uses `mapped_file_source` (§2.6) |
 | OSRM `src/updater/updater.cpp` | CSV read → edge weight update logic |
-| OSRM `src/customize/customizer.cpp` | Customizer::Run() — calls Updater then recomputes metrics |
+| OSRM `src/customize/customizer.cpp` | Customizer::Run() — calls Updater then recomputes metrics (**patch target: period_index**) |
+| OSRM `include/customizer/cell_metric.hpp` | CellMetric struct: `{weights[], durations[], distances[]}` |
+| OSRM `include/customizer/files.hpp` | Read/write `.osrm.cell_metrics` TAR (**patch target: period-indexed paths**) |
+| OSRM `include/engine/api/base_parameters.hpp` | BaseParameters (**patch target: departure_period**) |
+| OSRM `include/engine/datafacade_factory.hpp` | DataFacadeFactory — `vector<Facade>`, per-query selection (**patch target: period × exclude**) |
+| OSRM `include/engine/datafacade/contiguous_internalmem_datafacade.hpp` | MLD facade impl, `GetCellMetric()` (**patch target: multi-period load**) |
+| OSRM `include/engine/routing_algorithms/routing_base_mld.hpp` | MLD search — `relaxOutgoingEdges()` (unchanged by patch) |
 | OSRM `include/engine/data_watchdog.hpp` | DataWatchdog for shared-memory hot-swap (§2.5) |
-| OSRM `include/engine/datafacade_provider.hpp` | WatchingProvider / ImmutableProvider |
+| OSRM `include/engine/datafacade_provider.hpp` | WatchingProvider / ImmutableProvider / ExternalProvider |
 | `docs/Fournier_Ped_Transit_priority_manuscript_v4.pdf` | Bi-parabolic VDF derivation (Eq. 11) |
 
 ## Appendix B: Bi-parabolic VDF reference
