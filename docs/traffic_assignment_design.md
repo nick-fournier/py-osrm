@@ -296,7 +296,7 @@ with `departure_period=k` → facade factory selects metric set `k`.
 happens at the facade factory level, identically to how exclude classes
 work today.
 
-### 3.4  Bidirectional search correctness
+### 3.4  Bidirectional search correctness and cross-period trips
 
 OSRM's MLD uses true bidirectional Dijkstra (forward + backward heaps).
 For time-dependent routing, backward search is theoretically invalid
@@ -310,6 +310,31 @@ duration, this is exact.
 
 This is the same approximation used by every discrete-time DTA model
 (TRANSIMS, DTALite, etc.) — costs are frozen within each time slice.
+
+**Route finding vs. flow accumulation for cross-period trips:**
+
+There are two distinct concerns when a trip spans multiple periods:
+
+1. **Route choice** (which path?): Uses the departure period's weights
+   only. The entire route is computed on one metric set. This is the
+   frozen-cost approximation — the route does not anticipate congestion
+   changes in later periods.
+
+2. **Flow impact** (which periods does the vehicle congest?): Handled
+   correctly by fractional link loading (§7.3). As the vehicle traverses
+   its route, each link's flow is assigned to the period when the vehicle
+   would actually be there, based on cumulative travel time from departure.
+
+Over multiple outer iterations, this self-corrects: if a route was
+suboptimal because a later period had worse congestion than the departure
+period assumed, the next iteration's later-period weights will reflect
+that added flow, and some trips will reroute.
+
+**Approximation quality depends on period width vs. trip duration.** With
+1-hour periods, a typical 30-minute urban commute completes within one
+period (exact). A 90-minute cross-regional trip spans ~2 periods, with
+only the tail portion subject to the approximation. See §7.2 for period
+width calibration guidance.
 
 ### 3.5  User-defined period configurations
 
@@ -1060,13 +1085,37 @@ For each outer iteration:
 
 ### 7.2  Slice width
 
-Recommended starting point: **15 minutes**. This balances:
+Recommended starting point: **1 hour**. This balances:
 
-- Temporal resolution (captures peak spreading).
-- Computational cost (one customize + reload per slice).
-- Statistical stability (enough demand per slice for meaningful flows).
+- **Frozen-cost accuracy**: Most urban trips (< 45 min) complete within one
+  period, making the departure-period route choice exact. Only long
+  cross-regional trips span multiple periods (see §3.4 for implications).
+- **Computational cost**: Fewer periods = fewer customize passes per
+  iteration. 24 hourly periods vs. 96 quarter-hour periods is a 4× savings
+  in customize wall-clock (or cores needed for parallel customize).
+- **Memory**: Per-period overhead scales linearly with N. At 24 hourly
+  periods with sparse cell-delta storage (§3.6), California fits in ~10–12
+  GB vs. ~35–45 GB for 96 bins.
+- **Statistical stability**: Longer bins aggregate more trips, producing
+  smoother flow estimates and better-conditioned density calculations.
 
-Sensitivity analysis on slice width is a key validation task.
+**Calibration guidance:** The period width should cover the majority of trip
+durations in the study area. Key metric: **what fraction of trips complete
+within one period?**
+
+| Period width | Trips within 1 period (typical metro) | N (24h) | Customize cost (CA, 6 cores) |
+|---|---|---|---|
+| 15 min | ~50–60% | 96 | ~80 min/iter |
+| 30 min | ~75–85% | 48 | ~40 min/iter |
+| **1 hour** | **~90–95%** | **24** | **~20 min/iter** |
+| 2 hours | ~98% | 12 | ~10 min/iter |
+| 3 hours | ~99% | 8 | ~7 min/iter |
+
+For most DTA studies, 1-hour bins provide an excellent tradeoff. For
+detailed peak-spreading analysis, 30-minute bins may be warranted. The
+period width is user-configurable via `PeriodConfig` (§3.5).
+
+Sensitivity analysis on period width is a key validation task.
 
 ### 7.3  Multi-bin trips: fractional link loading
 
@@ -1692,8 +1741,9 @@ runtime benchmarks.
 
 ## 13  Open questions
 
-1. **Slice width**: What is the right default? 15 minutes is proposed; should
-   it be configurable per study?
+1. **Slice width calibration**: 1-hour periods are recommended as the default
+   (§7.2). Should we run a sensitivity analysis across 15/30/60 min as part
+   of the Sioux Falls validation?
 
 2. **Inner convergence method**: MSA is proposed for simplicity. Should
    Frank-Wolfe or path-based equilibrium be planned from the start?
