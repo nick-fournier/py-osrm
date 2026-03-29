@@ -258,6 +258,36 @@ Congested:   v_e = q_c · [1 − (k_e − k_c)² / (k_j − k_c)²] / k_e
 
 OSRM internally converts speed to duration: `duration = distance / (speed / 3.6)`
 
+> **Known OSRM limitation: segment-speed customization is irreversible.**
+> When `customize()` ingests a segment-speed CSV, it permanently overwrites
+> the base edge weights in the `.osrm` data files.  Even re-partitioning does
+> not undo it — only a full `extract()` from the original OSM resets to
+> baseline.  This means:
+>
+> - **Single-period assignment** must operate on a clean copy of the OSRM
+>   files per `run()`, or back up the clean files and restore before each run.
+> - **Multi-period DTA** (up to 96 time bins) cannot naively call
+>   `customize()` per period per iteration — that would require 96 file
+>   copies or re-extractions per outer iteration.
+>
+> **Required OSRM core change:** The multi-period metric patch (§4,
+> [OSRM Multi-Period Patch](osrm_multi_period_patch.md)) must store period
+> weights as overlays on an immutable base weight, not as destructive
+> overrides.  Possible approaches:
+>
+> 1. **Separate base vs. overlay weights.**  Store the original
+>    profile-derived weight alongside any CSV override, so `customize` is
+>    reversible and multiple period-specific weight sets can coexist.
+> 2. **"Reset to baseline" mode.**  A lightweight `customize --reset` that
+>    discards all segment-speed overrides and recomputes from the original
+>    extracted geometry.
+> 3. **In-memory weight array.**  Bypass the CSV/file path entirely — hold
+>    N period-specific weight arrays in memory and select at query time via
+>    `departure_period=k` (the multi-metric patch approach).
+>
+> Option 3 is the target architecture for multi-period DTA.  Options 1–2 are
+> useful interim improvements for the single-period prototype.
+
 ### 3.6  From flow to density (closed-form inverse)
 
 The assignment loop produces flows q_e (veh/hr). We need density k_e to
@@ -1117,6 +1147,7 @@ runtime benchmarks.
 | Risk | Severity | Likelihood | Mitigation |
 |------|----------|------------|------------|
 | **Customize latency dominates runtime** at state scale | High | High | Parallelize N period customizations across cores; use tmpfs CSV ([py-osrm Assignment Module](pyosrm_assignment_module.md) §1.6); for 6 periods on 6 cores → same wall-clock as 1 period |
+| **Segment-speed customize is irreversible** — permanently mutates OSRM edge weights | High | Certain | File-copy workaround for single-period; multi-period patch (§3.5) must use in-memory weight overlays, not destructive CSV overrides |
 | **OSRM multi-period patch rejected upstream** | Medium | Medium | Patch is isolated and maintainable on a pinned fork (v6.0.0); feature is generally useful ("time-of-day profiles") improving acceptance odds |
 | **N-period memory exceeds hardware** for fine-grained DTA | Medium | Low | Memory scales linearly with N; user chooses N based on hardware; 4–8 periods covers most use cases at <10 GB (CA) |
 | **Bidirectional search approximation** for cross-period trips | Low | Medium | Same approximation as all discrete-time DTA models; trips shorter than period duration are exact; document the approximation and its bounds |
@@ -1166,6 +1197,21 @@ runtime benchmarks.
    run N period customizations concurrently, or a shell-level approach?
    Need to verify OSRM customize is process-safe for concurrent execution
    writing to different output paths.
+
+10. **Reversible edge weights in OSRM core**: `customize()` with a
+    segment-speed CSV permanently overwrites base edge weights (§3.5).
+    The multi-period patch must store period weights as overlays on an
+    immutable base, not destructive overrides.  Should this be a standalone
+    OSRM PR (general utility: time-of-day profiles, what-if scenarios), or
+    bundled with the multi-metric patch?  For 96 time bins, file-copy
+    workarounds are untenable — in-memory weight arrays selected at query
+    time are the only viable approach.
+
+11. **Lane count from OSRM annotations**: OSRM does not expose lane count
+    per segment in route annotations.  Currently handled by `state_patch`
+    callback with external metadata.  Should we: (a) add an OSM PBF/XML
+    reader in py-osrm, (b) extend OSRM's annotation API to include lanes,
+    or (c) both?  Lanes are needed for jam density and capacity estimation.
 
 
 ## Appendix A: Bi-parabolic VDF reference
