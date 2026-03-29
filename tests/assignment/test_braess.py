@@ -137,6 +137,41 @@ class TestBraessParadox:
                 f"Iter {r.iteration}: step_size={r.step_size} out of [0,1]"
             )
 
+    def test_freeflow_immutable_across_runs(self, tmp_path):
+        """Freeflow speed must not degrade when run() is called twice.
+
+        Regression test: segment-speed customization permanently mutates
+        OSRM edge weights.  A second run() on the same base path used to
+        read congested speeds as freeflow, causing speed collapse.
+        The fix: each run needs a clean copy of the OSRM files.
+        """
+        base1, meta = _prepare_network(tmp_path / "r1", with_shortcut=True)
+        r1 = _run_assignment(base1, meta, demand=1500.0, max_iter=10)
+        s1 = r1.network_state
+
+        # Second run on a fresh copy (correct usage)
+        base2, meta2 = _prepare_network(tmp_path / "r2", with_shortcut=True)
+        r2 = _run_assignment(base2, meta2, demand=1500.0, max_iter=10)
+        s2 = r2.network_state
+
+        # Build freeflow maps keyed by edge
+        ff1 = {
+            (int(s1.edge_ids[i, 0]), int(s1.edge_ids[i, 1])): s1.freeflow_kmh[i]
+            for i in range(s1.n_edges)
+        }
+        ff2 = {
+            (int(s2.edge_ids[i, 0]), int(s2.edge_ids[i, 1])): s2.freeflow_kmh[i]
+            for i in range(s2.n_edges)
+        }
+
+        common = set(ff1) & set(ff2)
+        assert len(common) >= 4, f"Expected ≥4 common edges, got {len(common)}"
+        for key in common:
+            assert abs(ff1[key] - ff2[key]) < 0.5, (
+                f"Freeflow mismatch on {key}: run1={ff1[key]:.1f}, "
+                f"run2={ff2[key]:.1f}"
+            )
+
 
 def generate_braess_report(
     tmp_path: str | Path,

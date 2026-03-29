@@ -167,6 +167,38 @@ class TestSiouxFalls:
         assert np.all(state.speed_kmh >= 0.01 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
 
+    def test_freeflow_immutable_across_runs(self, tmp_path):
+        """Freeflow must be identical whether run at 5% or 20% demand.
+
+        Regression test: segment-speed customization permanently mutates
+        OSRM edge weights.  Running at high demand then low demand used to
+        show degraded freeflow on the second run.
+        """
+        base1, meta = _prepare_sf_network(tmp_path / "r1")
+        r1 = _run_sf_assignment(base1, meta, max_iter=5, demand_scale=0.20)
+        s1 = r1.network_state
+
+        base2, meta2 = _prepare_sf_network(tmp_path / "r2")
+        r2 = _run_sf_assignment(base2, meta2, max_iter=5, demand_scale=0.05)
+        s2 = r2.network_state
+
+        ff1 = {
+            (int(s1.edge_ids[i, 0]), int(s1.edge_ids[i, 1])): s1.freeflow_kmh[i]
+            for i in range(s1.n_edges)
+        }
+        ff2 = {
+            (int(s2.edge_ids[i, 0]), int(s2.edge_ids[i, 1])): s2.freeflow_kmh[i]
+            for i in range(s2.n_edges)
+        }
+
+        common = set(ff1) & set(ff2)
+        assert len(common) >= 20, f"Expected ≥20 common edges, got {len(common)}"
+        for key in common:
+            assert abs(ff1[key] - ff2[key]) < 0.5, (
+                f"Freeflow mismatch on {key}: 20%={ff1[key]:.1f}, "
+                f"5%={ff2[key]:.1f}"
+            )
+
 
 def generate_sioux_falls_report(
     tmp_path: str | Path,
