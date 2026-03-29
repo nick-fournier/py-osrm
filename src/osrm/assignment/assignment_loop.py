@@ -56,7 +56,7 @@ class AssignmentConfig:
         default_factory=DensitySmoothingConfig
     )
     vdf_kc_ratio: float = 1.0 / 3.0
-    default_jam_density_per_lane: float = 130.0
+    default_jam_density_per_lane: float = 200.0
     default_n_lanes: int = 1
     speed_csv_dir: Optional[str] = None
     verbosity: str = "ERROR"
