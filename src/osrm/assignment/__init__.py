@@ -9,6 +9,7 @@ from osrm.assignment.network_state import NetworkState
 from osrm.assignment.density_smoothing import DensitySmoothing, DensitySmoothingConfig
 from osrm.assignment.fractional_loading import FractionalLoader
 from osrm.assignment.segment_speed_writer import SegmentSpeedWriter
+from osrm.assignment import plots
 
 __all__ = [
     "BiParabolicVDF",
@@ -17,4 +18,5 @@ __all__ = [
     "DensitySmoothingConfig",
     "FractionalLoader",
     "SegmentSpeedWriter",
+    "plots",
 ]
