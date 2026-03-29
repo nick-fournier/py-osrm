@@ -557,7 +557,106 @@ def generate_sioux_falls_report(
         + table_html
     )
 
-    # --- 4. V/C scatter across demand levels ---
+    # --- 4. Flow and travel time correlation vs BPR reference ---
+    # BPR reference is at 100% demand (TNTP equilibrium). Our model runs at
+    # 10%.  Flow magnitudes differ, but relative loading patterns (which links
+    # carry more traffic) should correlate.  Travel time comparison shows how
+    # MFD congestion compares to BPR at the same physical demand level.
+    from scipy.stats import spearmanr
+
+    mfd_flows = []
+    bpr_flows = []
+    mfd_tt = []
+    bpr_tt = []
+    link_labels = []
+    for i in range(state.n_edges):
+        key = (int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1]))
+        if key not in ref:
+            continue
+        bpr_flow, bpr_cost = ref[key]
+        la = link_attrs_map.get(key, {})
+        dist_m = la.get("distance_m", 0)
+        vf = state.freeflow_kmh[i]
+        v = state.speed_kmh[i]
+        our_flow = state.flow_vph[i]
+        our_tt = dist_m / 1000 / v * 60 if v > 0.01 else 999
+
+        # BPR cost is in TNTP units (= 0.01 hours for Sioux Falls).
+        # Convert to minutes for comparison.
+        bpr_tt_min = bpr_cost * 60.0
+
+        mfd_flows.append(our_flow)
+        bpr_flows.append(bpr_flow)
+        mfd_tt.append(our_tt)
+        bpr_tt.append(bpr_tt_min)
+        link_labels.append(f"{key[0]}&rarr;{key[1]}")
+
+    # 4a: Flow scatter
+    fig_flow_corr = go.Figure()
+    fig_flow_corr.add_trace(go.Scatter(
+        x=bpr_flows, y=mfd_flows, mode="markers",
+        marker=dict(size=6, color="#1565C0", opacity=0.7),
+        hovertext=link_labels, hoverinfo="text",
+    ))
+    if len(mfd_flows) >= 3:
+        flow_rho, _ = spearmanr(bpr_flows, mfd_flows)
+    else:
+        flow_rho = 0.0
+    fig_flow_corr.update_layout(
+        title=f"Link Flow: MFD (10%) vs BPR (100%) — ρ={flow_rho:.3f}",
+        xaxis_title="BPR Equilibrium Flow (vph, 100% demand)",
+        yaxis_title="MFD Flow (vph, 10% demand)",
+        template="plotly_white",
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+    )
+    figs.append(fig_flow_corr)
+    descriptions.append(
+        "<h2>Flow Correlation: MFD vs BPR</h2>"
+        "<p>Scatter of per-link flow: our density-based MFD assignment "
+        f"(10% demand, {state.n_edges} links) vs published BPR equilibrium "
+        "(100% demand). Magnitudes differ by ~10&times; due to demand scaling, "
+        "but the <b>rank correlation</b> (Spearman &rho;) measures whether "
+        "the same links carry relatively more or less traffic under both models. "
+        f"&rho; = <b>{flow_rho:.3f}</b> ({len(mfd_flows)} matched links).</p>"
+    )
+
+    # 4b: Travel time scatter
+    fig_tt_corr = go.Figure()
+    fig_tt_corr.add_trace(go.Scatter(
+        x=bpr_tt, y=mfd_tt, mode="markers",
+        marker=dict(size=6, color="#D32F2F", opacity=0.7),
+        hovertext=link_labels, hoverinfo="text",
+    ))
+    # Add y=x reference line
+    tt_max = max(max(bpr_tt, default=1), max(mfd_tt, default=1)) * 1.1
+    fig_tt_corr.add_shape(
+        type="line", x0=0, x1=tt_max, y0=0, y1=tt_max,
+        line=dict(color="#999", dash="dash", width=1),
+    )
+    if len(mfd_tt) >= 3:
+        tt_rho, _ = spearmanr(bpr_tt, mfd_tt)
+    else:
+        tt_rho = 0.0
+    fig_tt_corr.update_layout(
+        title=f"Link Travel Time: MFD vs BPR — ρ={tt_rho:.3f}",
+        xaxis_title="BPR Equilibrium Travel Time (min)",
+        yaxis_title="MFD Travel Time (min, 10% demand)",
+        template="plotly_white",
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+    )
+    figs.append(fig_tt_corr)
+    descriptions.append(
+        "<h2>Travel Time Correlation: MFD vs BPR</h2>"
+        "<p>Per-link travel time: MFD at 10% demand vs BPR at 100% demand. "
+        "Dashed line = y&thinsp;=&thinsp;x. MFD at 10% demand is near freeflow, "
+        "so travel times are shorter than BPR&rsquo;s congested equilibrium. "
+        "The pattern should correlate: longer links take longer in both models. "
+        f"Spearman &rho; = <b>{tt_rho:.3f}</b>. "
+        "Note: BPR &lsquo;cost&rsquo; is in TNTP units (minutes), which embeds "
+        "the BPR polynomial &mdash; not a physical road attribute.</p>"
+    )
+
+    # --- 5. V/C scatter across demand levels ---
     fig_vc = go.Figure()
     check_scales = [0.05, 0.10, 0.15, 0.20]
     colors_vc = ["#4CAF50", "#1565C0", "#FF6F00", "#D32F2F"]
