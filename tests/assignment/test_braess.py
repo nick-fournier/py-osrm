@@ -235,13 +235,15 @@ def generate_braess_report(
             '</tr></thead><tbody>'
         )
         for link, vals in pivot.items():
-            fw = vals.get("With", 0)
-            fwo = vals.get("Without", 0)
+            fw = vals.get("With")
+            fwo = vals.get("Without")
+            fw_cell = f'{fw:,.1f}' if fw is not None else '—'
+            fwo_cell = f'{fwo:,.1f}' if fwo is not None else '—'
             html += (
                 f'<tr style="border-bottom:1px solid #e0e0e0;">'
                 f'<td style="padding:6px 8px;font-weight:600;">{link}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">{fw:,.1f}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">{fwo:,.1f}</td>'
+                f'<td style="text-align:right;padding:6px 8px;">{fw_cell}</td>'
+                f'<td style="text-align:right;padding:6px 8px;">{fwo_cell}</td>'
                 f'</tr>'
             )
         html += '</tbody></table>'
@@ -290,19 +292,23 @@ def generate_braess_report(
             return "#4CAF50"
 
         for link, vals in pivot.items():
-            rw, sw, ffw = vals.get("With", (1.0, 0, 0))
-            rwo, swo, ffwo = vals.get("Without", (1.0, 0, 0))
-            ff = ffw or ffwo
+            w = vals.get("With")
+            wo = vals.get("Without")
+            ff = (w[2] if w else None) or (wo[2] if wo else 0)
+
+            def _cell(v):
+                if v is None:
+                    return '<span style="color:#999;">—</span>'
+                r, spd, _ = v
+                return (f'<span style="color:{_color(r)};font-weight:600;">{r:.2f}</span>'
+                        f' ({spd:.1f} km/h)')
+
             html += (
                 f'<tr style="border-bottom:1px solid #e0e0e0;">'
                 f'<td style="padding:6px 8px;font-weight:600;">{link}</td>'
                 f'<td style="padding:6px 8px;">{ff:.0f}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">'
-                f'<span style="color:{_color(rw)};font-weight:600;">{rw:.2f}</span>'
-                f' ({sw:.1f} km/h)</td>'
-                f'<td style="text-align:right;padding:6px 8px;">'
-                f'<span style="color:{_color(rwo)};font-weight:600;">{rwo:.2f}</span>'
-                f' ({swo:.1f} km/h)</td>'
+                f'<td style="text-align:right;padding:6px 8px;">{_cell(w)}</td>'
+                f'<td style="text-align:right;padding:6px 8px;">{_cell(wo)}</td>'
                 f'</tr>'
             )
         html += '</tbody></table>'
