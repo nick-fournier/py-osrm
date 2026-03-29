@@ -79,11 +79,12 @@ def braess_network(
 
     - Links 1→3 and 4→2: narrow (1 lane), congestion-sensitive
     - Links 1→4 and 3→2: wide (4 lanes), effectively constant cost
-    - Shortcut 3→4: short, wide (if enabled)
+    - Shortcut 3→4: ~2 km, fast (80 km/h), 1 lane (if enabled)
 
     Origin = node 1, Destination = node 2.
 
-    Nodes are placed ~500m apart in a diamond at Monaco coordinates.
+    Nodes form a diamond at Monaco coordinates.
+    Arterials are ~4 km; the shortcut is ~2 km.
 
     Parameters
     ----------
@@ -100,8 +101,8 @@ def braess_network(
     # Realistic urban scale: ~4 km arterials, ~0.6 km shortcut
     nodes = {
         1: (7.350, 43.735),    # west (origin)
-        3: (7.400, 43.7375),   # center-north
-        4: (7.400, 43.7325),   # center-south
+        3: (7.400, 43.744),    # center-north
+        4: (7.400, 43.726),    # center-south
         2: (7.450, 43.735),    # east (destination)
     }
 
@@ -141,12 +142,12 @@ def braess_network(
     ]
 
     if with_shortcut:
-        # 3→4: very short (~22m), connecting street — nearly zero cost
+        # 3→4: shortcut connecting street — fast but 1 lane
         ways.append({
             "id": 105, "nodes": [3, 4],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "60", "lanes": "1", "name": "Shortcut 3-4",
+                "maxspeed": "80", "lanes": "1", "name": "Shortcut 3-4",
             },
         })
 

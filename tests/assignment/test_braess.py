@@ -262,7 +262,7 @@ def generate_braess_report(
     <span style="color:#F44336">Red</span> = narrow (1-lane, 60 km/h &mdash; congestion-sensitive).
     <span style="color:#2196F3">Blue</span> = wide (3-lane, 40 km/h &mdash; high capacity).
     <span style="color:#FF9800">Orange</span> = shortcut (1-lane, 60 km/h).
-    Arterials are ~4 km; the shortcut is ~0.6 km.</p>""")
+    Arterials are ~4 km; the shortcut is ~2 km (80 km/h).</p>""")
 
     # --- 1. Link state comparison table ---
     def _state_table(result_w, result_wo):
@@ -506,14 +506,38 @@ def generate_braess_report(
     gap_with = [r.relative_gap for r in result_with.iteration_log]
     gap_without = [r.relative_gap for r in result_without.iteration_log]
 
+    def _moving_max(gaps, window=5):
+        """Rolling max of gap values (envelope of worst-case per window)."""
+        import numpy as np
+        arr = np.array(gaps)
+        out = np.empty_like(arr)
+        for i in range(len(arr)):
+            start = max(0, i - window + 1)
+            out[i] = arr[start:i+1].max()
+        return out.tolist()
+
     fig_gap = go.Figure()
+    # Raw gap as faint markers
     fig_gap.add_trace(go.Scatter(
-        x=iters_w, y=gap_with, mode="lines+markers",
-        name="With shortcut", line=dict(color="#F44336", width=2),
+        x=iters_w, y=[g if g > 0 else None for g in gap_with],
+        mode="markers", name="With shortcut (raw)",
+        marker=dict(color="#F44336", size=4, opacity=0.3),
     ))
     fig_gap.add_trace(go.Scatter(
-        x=iters_wo, y=gap_without, mode="lines+markers",
-        name="Without shortcut", line=dict(color="#2196F3", width=2),
+        x=iters_wo, y=[g if g > 0 else None for g in gap_without],
+        mode="markers", name="Without shortcut (raw)",
+        marker=dict(color="#2196F3", size=4, opacity=0.3),
+    ))
+    # Envelope (rolling max) as solid trend line
+    fig_gap.add_trace(go.Scatter(
+        x=iters_w, y=_moving_max(gap_with, window=5),
+        mode="lines", name="With shortcut (envelope)",
+        line=dict(color="#F44336", width=2),
+    ))
+    fig_gap.add_trace(go.Scatter(
+        x=iters_wo, y=_moving_max(gap_without, window=5),
+        mode="lines", name="Without shortcut (envelope)",
+        line=dict(color="#2196F3", width=2),
     ))
     fig_gap.update_layout(
         title="Wardrop Relative Gap per Iteration",
@@ -525,9 +549,11 @@ def generate_braess_report(
     figs.append(fig_gap)
     descriptions.append("""<h2>Convergence</h2>
     <p>Relative gap measures proximity to Wardrop user equilibrium (gap = 0 means
-    all used paths have equal cost). Log scale. The symmetric "without" scenario
-    converges faster; the asymmetric 3-path "with" scenario is slower but
-    steadily decreasing under MSA (&alpha; = 1/n).</p>""")
+    all used paths have equal cost). Log scale. Faint dots show raw per-iteration gap
+    (AON route-switching causes zero-gap iterations); solid lines show the rolling-max
+    envelope, which reveals the true convergence trend. The symmetric "without" scenario
+    converges faster; the asymmetric 3-path "with" scenario is slower but the envelope
+    is steadily decreasing under MSA (&alpha; = 1/n).</p>""")
 
     # Write report
     demand_fmt = f"{demand:,.0f}"
