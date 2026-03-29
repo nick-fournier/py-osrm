@@ -258,21 +258,108 @@ def generate_braess_report(
     orange 0.8–0.95 (moderate), red < 0.8 (congested). With the shortcut, the congestion-sensitive
     links should show more speed reduction due to concentrated traffic.</p>""")
 
+    # --- 0. Network topology diagram (prepend) ---
+    node_pos = {1: (0, 0.5), 3: (0.5, 1), 4: (0.5, 0), 2: (1, 0.5)}
+    edges_wo = [(1, 3), (1, 4), (3, 2), (4, 2)]
+    edges_w = edges_wo + [(3, 4)]
+    edge_styles = {
+        (1, 3): ("secondary 1-lane 50km/h", "#F44336"),
+        (1, 4): ("primary 4-lane 30km/h", "#2196F3"),
+        (3, 2): ("primary 4-lane 30km/h", "#2196F3"),
+        (4, 2): ("secondary 1-lane 50km/h", "#F44336"),
+        (3, 4): ("shortcut 4-lane 60km/h", "#FF9800"),
+    }
+
+    topo_fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=["Without Shortcut", "With Shortcut"],
+        horizontal_spacing=0.12,
+    )
+
+    for col, edges in enumerate([edges_wo, edges_w], 1):
+        # Draw edges as arrows
+        for u, v in edges:
+            x0, y0 = node_pos[u]
+            x1, y1 = node_pos[v]
+            _, color = edge_styles[(u, v)]
+            # Line for the edge
+            topo_fig.add_trace(go.Scatter(
+                x=[x0, x1], y=[y0, y1], mode="lines",
+                line=dict(color=color, width=3),
+                hoverinfo="text",
+                hovertext=f"{u}→{v}: {edge_styles[(u,v)][0]}",
+                showlegend=False,
+            ), row=1, col=col)
+            # Arrowhead via annotation
+            topo_fig.add_annotation(
+                x=x1, y=y1, ax=x0, ay=y0,
+                xref=f"x{col}" if col > 1 else "x",
+                yref=f"y{col}" if col > 1 else "y",
+                axref=f"x{col}" if col > 1 else "x",
+                ayref=f"y{col}" if col > 1 else "y",
+                showarrow=True, arrowhead=3, arrowsize=1.5,
+                arrowcolor=color, arrowwidth=2,
+            )
+            # Edge label
+            mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+            # Offset label slightly so it doesn't overlap the line
+            dx, dy = y1 - y0, -(x1 - x0)
+            mag = max((dx**2 + dy**2) ** 0.5, 1e-9)
+            ox, oy = 0.06 * dx / mag, 0.06 * dy / mag
+            topo_fig.add_annotation(
+                x=mx + ox, y=my + oy, text=f"{u}→{v}",
+                xref=f"x{col}" if col > 1 else "x",
+                yref=f"y{col}" if col > 1 else "y",
+                showarrow=False, font=dict(size=10, color=color),
+            )
+
+        # Draw nodes
+        xs = [node_pos[n][0] for n in sorted(node_pos)]
+        ys = [node_pos[n][1] for n in sorted(node_pos)]
+        labels = [str(n) for n in sorted(node_pos)]
+        roles = {1: "Origin", 2: "Destination", 3: "Node 3", 4: "Node 4"}
+        hover = [f"Node {n} ({roles[n]})" for n in sorted(node_pos)]
+        colors = ["#4CAF50" if n == 1 else "#F44336" if n == 2 else "#9E9E9E"
+                  for n in sorted(node_pos)]
+        topo_fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="markers+text",
+            marker=dict(size=28, color=colors, line=dict(width=2, color="white")),
+            text=labels, textfont=dict(size=14, color="white"),
+            textposition="middle center",
+            hovertext=hover, hoverinfo="text",
+            showlegend=False,
+        ), row=1, col=col)
+
+    for suffix in ["", "2"]:
+        xref, yref = f"xaxis{suffix}", f"yaxis{suffix}"
+        topo_fig.update_layout(**{
+            xref: dict(showgrid=False, zeroline=False, showticklabels=False,
+                       range=[-0.15, 1.15]),
+            yref: dict(showgrid=False, zeroline=False, showticklabels=False,
+                       range=[-0.15, 1.15], scaleanchor=f"x{suffix}" if suffix else "x"),
+        })
+    topo_fig.update_layout(
+        title="Network Topology",
+        template="plotly_white",
+        height=350,
+    )
+
+    # Prepend topology as first figure
+    figs.insert(0, topo_fig)
+    descriptions.insert(0, """<h2>Network Topology</h2>
+    <p>The Braess diamond network: <span style="color:#4CAF50">●</span> Origin (node 1),
+    <span style="color:#F44336">●</span> Destination (node 2).
+    <span style="color:#F44336">Red</span> links are narrow (1-lane, 50 km/h — congestion-sensitive).
+    <span style="color:#2196F3">Blue</span> links are wide (4-lane, 30 km/h — effectively constant cost).
+    <span style="color:#FF9800">Orange</span> is the shortcut (4-lane, 60 km/h).
+    The paradox: adding the shortcut <i>increases</i> total system travel time.</p>""")
+
     # Write report
     _write_combined_report(
         title="Braess Paradox Validation",
         intro=f"""<p>Structural validation of the traffic assignment using the <b>Braess paradox</b> —
         a 4-node diamond network where adding a shortcut link increases total system travel time.
-        Demand: {demand:.0f} vehicles. {max_iter} MSA iterations per scenario.</p>
-        <pre>
-    Network topology:
-
-        1 ──→ 3          1 ──→ 3
-        │     │           │     ↓
-        ↓     ↓           ↓     ↓
-        4 ──→ 2          4 ──→ 2
-      (without shortcut)  (with 3→4 shortcut)
-        </pre>""",
+        Demand: {demand:.0f} vehicles. {max_iter} MSA iterations per scenario.</p>""",
         figures=figs,
         descriptions=descriptions,
         path=Path(output_path),
