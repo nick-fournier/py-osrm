@@ -7,11 +7,13 @@ Supports:
   - Network files (*.net.tntp): link topology and attributes
   - Trip files (*.trips.tntp): OD demand matrices
   - Node files (*.node.tntp): node coordinates
+  - Node GeoJSON files (*.geojson): node coordinates (Anaheim, etc.)
   - Flow files (*.flow.tntp): reference equilibrium solution
 """
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -207,6 +209,55 @@ def parse_nodes(path: str | Path) -> Dict[int, Tuple[float, float]]:
             continue
 
     return nodes
+
+
+def parse_nodes_geojson(path: str | Path) -> Dict[int, Tuple[float, float]]:
+    """Parse node coordinates from a GeoJSON FeatureCollection.
+
+    Expects Point features with an ``"id"`` property (integer node ID)
+    and ``[longitude, latitude]`` coordinates.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a ``.geojson`` file.
+
+    Returns
+    -------
+    dict
+        Mapping ``{node_id: (longitude, latitude)}``.
+    """
+    path = Path(path)
+    data = json.loads(path.read_text())
+    nodes: Dict[int, Tuple[float, float]] = {}
+    for feat in data["features"]:
+        nid = int(feat["properties"]["id"])
+        lon, lat = feat["geometry"]["coordinates"][:2]
+        nodes[nid] = (float(lon), float(lat))
+    return nodes
+
+
+def load_node_coords(path: str | Path) -> Dict[int, Tuple[float, float]]:
+    """Load node coordinates, auto-detecting file format.
+
+    Supported formats:
+      - ``.geojson`` — GeoJSON FeatureCollection with Point features
+      - ``.tntp`` / anything else — TNTP whitespace-delimited node file
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to node coordinate file.
+
+    Returns
+    -------
+    dict
+        Mapping ``{node_id: (longitude, latitude)}``.
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".geojson":
+        return parse_nodes_geojson(path)
+    return parse_nodes(path)
 
 
 def parse_flow(path: str | Path) -> List[TNTPFlowEntry]:

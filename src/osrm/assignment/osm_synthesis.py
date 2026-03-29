@@ -2,15 +2,67 @@
 
 Generates valid .osm files that can be processed by OSRM extract.
 Used for structural validation on networks with known theoretical properties.
+
+Provides a generic ``tntp_to_osm()`` pipeline that maps TNTP network
+attributes (speed, capacity) to OSM road classification, plus per-network
+wrappers like ``sioux_falls_network()`` that inject geographic overrides.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Road classification from TNTP attributes
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LinkClass:
+    """Road classification for a single TNTP link."""
+
+    highway: str
+    n_lanes: int
+    speed_kmh: float
+
+
+def classify_by_speed(speed_kmh: float, capacity: float, *,
+                      per_lane_capacity: float = 1800.0) -> LinkClass:
+    """Classify a TNTP link using speed and capacity.
+
+    Speed determines highway tier; capacity determines lane count within
+    that tier.  Works well for networks where the TNTP speed column
+    contains real freeflow speeds (e.g. Anaheim).
+
+    Parameters
+    ----------
+    speed_kmh : float
+        Freeflow speed in km/h (derived from TNTP ``speed`` column or
+        computed from distance / free-flow time).
+    capacity : float
+        TNTP link capacity in veh/h.
+    per_lane_capacity : float
+        Assumed per-lane capacity for lane estimation (default 1800 vph).
+    """
+    n_lanes = max(1, round(capacity / per_lane_capacity))
+
+    if speed_kmh >= 100:
+        highway = "motorway"
+    elif speed_kmh >= 80:
+        highway = "trunk"
+    elif speed_kmh >= 60:
+        highway = "primary"
+    elif speed_kmh >= 40:
+        highway = "secondary"
+    else:
+        highway = "tertiary"
+
+    return LinkClass(highway=highway, n_lanes=n_lanes, speed_kmh=speed_kmh)
 
 
 def write_osm(
@@ -64,6 +116,204 @@ def write_osm(
     path.parent.mkdir(parents=True, exist_ok=True)
     tree.write(str(path), xml_declaration=True, encoding="UTF-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# Generic TNTP → OSM pipeline
+# ---------------------------------------------------------------------------
+
+#: Type for a per-link classification override callback.
+#: ``(link, distance_m, default_class) -> LinkClass | None``.
+#: Return a ``LinkClass`` to override, or ``None`` to keep the default.
+ClassifyOverride = Callable[
+    ["TNTPLink", float, LinkClass],
+    Optional[LinkClass],
+]
+
+
+def tntp_to_osm(
+    net: "TNTPNetwork",
+    node_coords: Dict[int, Tuple[float, float]],
+    od_matrix: np.ndarray,
+    path: str | Path,
+    *,
+    ref_flows: Optional[List] = None,
+    osrm_speed_factor: float = 0.8,
+    jam_density_per_lane: float = 200.0,
+    per_lane_capacity: float = 1800.0,
+    speed_units: str = "auto",
+    classify_override: Optional[ClassifyOverride] = None,
+) -> Tuple[Path, Dict]:
+    """Convert a TNTP network to OSM XML using attribute-based classification.
+
+    Infers highway type, lane count, and freeflow speed from each link's
+    TNTP ``speed`` and ``capacity`` columns via :func:`classify_by_speed`.
+    An optional *classify_override* callback can modify any link's
+    classification for networks requiring geographic knowledge (e.g. Sioux
+    Falls interstate corridors).
+
+    Parameters
+    ----------
+    net : TNTPNetwork
+        Parsed TNTP network.
+    node_coords : dict
+        ``{node_id: (lon, lat)}`` in WGS84.
+    od_matrix : np.ndarray
+        OD demand matrix of shape ``(n_zones, n_zones)``.
+    path : str or Path
+        Output ``.osm`` file path.
+    ref_flows : list of TNTPFlowEntry, optional
+        Published equilibrium flows for validation.
+    osrm_speed_factor : float
+        OSRM car profile speed factor (default 0.8).  ``maxspeed`` tags
+        are inflated by ``1/factor`` so OSRM's profile-reduced speed
+        matches the intended freeflow speed.
+    jam_density_per_lane : float
+        Default jam density per lane in veh/km (default 200).
+    per_lane_capacity : float
+        Assumed per-lane capacity for lane estimation (default 1800 vph).
+    speed_units : str
+        How to interpret the TNTP ``speed`` column:
+        ``"ft/min"`` (Anaheim), ``"km/h"``, or ``"auto"`` (detect from
+        magnitude: values > 500 are assumed ft/min).
+    classify_override : callable, optional
+        ``(link, distance_m, default_class) -> LinkClass | None``.
+        Called per link after default classification.  Return a
+        ``LinkClass`` to override, or ``None`` to keep the default.
+
+    Returns
+    -------
+    (osm_path, metadata)
+        ``metadata`` contains ``nodes``, ``zone_centroids``, ``n_zones``,
+        ``n_links``, ``od_matrix``, ``lane_map``, ``link_attrs``,
+        ``ref_flows``, ``jam_density_per_lane``.
+    """
+    from osrm.assignment.tntp import haversine_m
+
+    ways = []
+    lane_map: Dict[Tuple[int, int], int] = {}
+    link_attrs: Dict[Tuple[int, int], Dict] = {}
+
+    for i, link in enumerate(net.links):
+        if link.init_node not in node_coords or link.term_node not in node_coords:
+            continue
+        lon1, lat1 = node_coords[link.init_node]
+        lon2, lat2 = node_coords[link.term_node]
+        dist_m = haversine_m(lon1, lat1, lon2, lat2)
+
+        # Derive freeflow speed
+        speed_kmh = _tntp_speed_to_kmh(link, dist_m, speed_units)
+
+        # Default classification from speed + capacity
+        default_cls = classify_by_speed(speed_kmh, link.capacity,
+                                        per_lane_capacity=per_lane_capacity)
+
+        # Allow per-network overrides
+        cls = default_cls
+        if classify_override is not None:
+            override = classify_override(link, dist_m, default_cls)
+            if override is not None:
+                cls = override
+
+        # Compensate for OSRM car profile speed reduction
+        maxspeed = max(10, round(cls.speed_kmh / osrm_speed_factor))
+
+        key = (link.init_node, link.term_node)
+        way_id = 1000 + i
+        ways.append({
+            "id": way_id,
+            "nodes": [link.init_node, link.term_node],
+            "tags": {
+                "highway": cls.highway,
+                "oneway": "yes",
+                "maxspeed": str(maxspeed),
+                "lanes": str(cls.n_lanes),
+                "name": f"Link {link.init_node}-{link.term_node}",
+            },
+        })
+
+        lane_map[key] = cls.n_lanes
+        link_attrs[key] = {
+            "capacity": link.capacity,
+            "freeflow_time_min": link.free_flow_time,
+            "distance_m": dist_m,
+            "ff_speed_kmh": cls.speed_kmh,
+            "n_lanes": cls.n_lanes,
+            "b": link.b,
+            "power": link.power,
+        }
+
+    osm_path = write_osm(node_coords, ways, path)
+
+    n_zones = net.n_zones
+    zone_centroids = {z: node_coords[z] for z in range(1, n_zones + 1)
+                      if z in node_coords}
+
+    ref_flow_map = {}
+    if ref_flows:
+        ref_flow_map = {
+            (e.init_node, e.term_node): (e.volume, e.cost) for e in ref_flows
+        }
+
+    metadata = {
+        "nodes": node_coords,
+        "zone_centroids": zone_centroids,
+        "n_zones": n_zones,
+        "n_links": len(net.links),
+        "od_matrix": od_matrix,
+        "lane_map": lane_map,
+        "link_attrs": link_attrs,
+        "ref_flows": ref_flow_map,
+        "jam_density_per_lane": jam_density_per_lane,
+    }
+
+    return osm_path, metadata
+
+
+def _tntp_speed_to_kmh(link: "TNTPLink", dist_m: float,
+                        speed_units: str) -> float:
+    """Convert TNTP link speed to km/h.
+
+    Falls back to distance/FFT when the TNTP speed column is zero or
+    missing.
+    """
+    FT_PER_MIN_TO_KMH = 0.018288
+
+    raw = link.speed
+    if raw > 0:
+        if speed_units == "ft/min" or (speed_units == "auto" and raw > 500):
+            return raw * FT_PER_MIN_TO_KMH
+        elif speed_units == "km/h":
+            return raw
+        else:
+            # auto: small values assumed km/h
+            return raw
+
+    # Fallback: derive from distance and free-flow time
+    if link.free_flow_time > 0 and dist_m > 0:
+        return (dist_m / 1000.0) / (link.free_flow_time / 60.0)
+
+    return 50.0  # last resort default
+
+
+def patch_lanes(
+    state,
+    meta: dict,
+    jam_density_per_lane: float | None = None,
+) -> None:
+    """Patch NetworkState with lane counts and jam density from metadata.
+
+    Works for any network whose ``meta["lane_map"]`` maps
+    ``(from_node, to_node) -> n_lanes``.
+    """
+    kj_lane = jam_density_per_lane or meta.get("jam_density_per_lane", 200.0)
+    lane_map = meta["lane_map"]
+    for i in range(state.n_edges):
+        key = (int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1]))
+        if key in lane_map:
+            lanes = lane_map[key]
+            state.n_lanes[i] = lanes
+            state.jam_density[i] = kj_lane * lanes
 
 
 def braess_network(
@@ -204,17 +454,12 @@ def sioux_falls_network(
 ) -> Tuple[Path, Dict]:
     """Generate the Sioux Falls 24-node network as OSM XML.
 
-    Reads TNTP fixture files, computes real-world link distances from
-    GPS coordinates, derives freeflow speeds, and maps TNTP links to
-    realistic lane counts.
+    Reads TNTP fixture files and delegates to :func:`tntp_to_osm` with
+    geographic overrides for I-29 and I-229 corridors.
 
-    Lane counts are assigned by capacity tier (TNTP capacities are BPR
-    math artifacts, not physical):
-    - capacity >= 10000: 3 lanes (major corridors / interstate)
-    - capacity < 10000:  2 lanes (arterials / collectors)
-
-    Jam density defaults to 200 veh/km/lane (5 m bumper-to-bumper
-    spacing), which gives MFD capacity of ~2000 vph/lane at 60 km/h.
+    TNTP speed/FFT columns for Sioux Falls are arbitrary (README: "Link
+    lengths are set equal to free flow travel times"), so classification
+    is entirely from geographic knowledge rather than TNTP attributes.
 
     Parameters
     ----------
@@ -233,7 +478,7 @@ def sioux_falls_network(
     zone centroids, OD matrix, and reference flows.
     """
     from osrm.assignment.tntp import (
-        parse_net, parse_trips, parse_nodes, parse_flow, haversine_m,
+        parse_net, parse_trips, load_node_coords, parse_flow,
     )
 
     if fixture_dir is None:
@@ -245,94 +490,33 @@ def sioux_falls_network(
 
     net = parse_net(fixture_dir / "SiouxFalls_net.tntp")
     n_zones, od_matrix = parse_trips(fixture_dir / "SiouxFalls_trips.tntp")
-    node_coords = parse_nodes(fixture_dir / "SiouxFalls_node.tntp")
+    node_coords = load_node_coords(fixture_dir / "SiouxFalls_node.tntp")
     ref_flows = parse_flow(fixture_dir / "SiouxFalls_flow.tntp")
 
-    ways = []
-    lane_map = {}
-    link_attrs = {}
-
-    # Road classification based on real Sioux Falls geography.
-    # Nodes 1,3,12,13 lie along the I-29 corridor (west side).
-    # Nodes 7,18 lie along I-229 (eastern bypass).
-    # TNTP "capacity" values are BPR math artifacts — ignored for lanes.
+    # Sioux Falls geographic overrides: I-29 and I-229 corridors.
+    # TNTP attributes are meaningless for this network, so we override
+    # every link with known road classification.
     i29_links = {
         (1, 3), (3, 1), (3, 12), (12, 3), (12, 13), (13, 12),
     }
     i229_links = {(7, 18), (18, 7)}
 
-    for i, link in enumerate(net.links):
-        lon1, lat1 = node_coords[link.init_node]
-        lon2, lat2 = node_coords[link.term_node]
-        dist_m = haversine_m(lon1, lat1, lon2, lat2)
-        dist_km = dist_m / 1000.0
-
+    def sf_override(link, dist_m, default_cls):
         key = (link.init_node, link.term_node)
-
         if key in i29_links:
-            n_lanes = 3
-            speed_kmh = 105.0
-            highway = "motorway"
+            return LinkClass("motorway", 3, 105.0)
         elif key in i229_links:
-            n_lanes = 2
-            speed_kmh = 105.0
-            highway = "motorway"
+            return LinkClass("motorway", 2, 105.0)
         else:
-            n_lanes = 2
-            # TNTP lengths and FFTs are arbitrary (README: "Link lengths are
-            # set equal to free flow travel times").  Use a fixed arterial
-            # speed consistent with Sioux Falls urban arterials (40-45 mph).
-            speed_kmh = 65.0
-            highway = "primary"
+            return LinkClass("primary", 2, 65.0)
 
-        # Compensate for OSRM car profile speed reduction
-        maxspeed = max(10, round(speed_kmh / osrm_speed_factor))
-
-        way_id = 1000 + i
-        ways.append({
-            "id": way_id,
-            "nodes": [link.init_node, link.term_node],
-            "tags": {
-                "highway": highway,
-                "oneway": "yes",
-                "maxspeed": str(maxspeed),
-                "lanes": str(n_lanes),
-                "name": f"Link {link.init_node}-{link.term_node}",
-            },
-        })
-
-        lane_map[key] = n_lanes
-        link_attrs[key] = {
-            "capacity": link.capacity,
-            "freeflow_time_min": link.free_flow_time,
-            "distance_m": dist_m,
-            "ff_speed_kmh": speed_kmh,
-            "n_lanes": n_lanes,
-            "b": link.b,
-            "power": link.power,
-        }
-
-    osm_path = write_osm(node_coords, ways, path)
-
-    zone_centroids = {z: node_coords[z] for z in range(1, n_zones + 1)}
-
-    ref_flow_map = {
-        (e.init_node, e.term_node): (e.volume, e.cost) for e in ref_flows
-    }
-
-    metadata = {
-        "nodes": node_coords,
-        "zone_centroids": zone_centroids,
-        "n_zones": n_zones,
-        "n_links": len(net.links),
-        "od_matrix": od_matrix,
-        "lane_map": lane_map,
-        "link_attrs": link_attrs,
-        "ref_flows": ref_flow_map,
-        "jam_density_per_lane": jam_density_per_lane,
-    }
-
-    return osm_path, metadata
+    return tntp_to_osm(
+        net, node_coords, od_matrix, path,
+        ref_flows=ref_flows,
+        osrm_speed_factor=osrm_speed_factor,
+        jam_density_per_lane=jam_density_per_lane,
+        classify_override=sf_override,
+    )
 
 
 def patch_sioux_falls_lanes(
@@ -340,12 +524,8 @@ def patch_sioux_falls_lanes(
     meta: dict,
     jam_density_per_lane: float | None = None,
 ) -> None:
-    """Patch NetworkState with lane counts for Sioux Falls network."""
-    kj_lane = jam_density_per_lane or meta.get("jam_density_per_lane", 200.0)
-    lane_map = meta["lane_map"]
-    for i in range(state.n_edges):
-        key = (int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1]))
-        if key in lane_map:
-            lanes = lane_map[key]
-            state.n_lanes[i] = lanes
-            state.jam_density[i] = kj_lane * lanes
+    """Patch NetworkState with lane counts for Sioux Falls network.
+
+    Thin wrapper around :func:`patch_lanes` for backward compatibility.
+    """
+    patch_lanes(state, meta, jam_density_per_lane=jam_density_per_lane)
