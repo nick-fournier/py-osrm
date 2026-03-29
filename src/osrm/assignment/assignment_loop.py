@@ -270,8 +270,12 @@ class AssignmentLoop:
                     new_volume[idx] += trip.volume
 
                     # Density contribution: k = volume / (v × T)
-                    seg_speed_kmh = (speeds[i] * 3.6) if i < len(speeds) else 1.0
-                    seg_speed_kmh = max(seg_speed_kmh, self.config.min_speed_kmh)
+                    # OSRM can return speed=0 on phantom segments at snap
+                    # points.  Fall back to freeflow for density calculation
+                    # to avoid artificial jam density from a routing artifact.
+                    seg_speed_kmh = (speeds[i] * 3.6) if i < len(speeds) else 0.0
+                    if seg_speed_kmh < self.config.min_speed_kmh:
+                        seg_speed_kmh = state.freeflow_kmh[idx]
                     new_density[idx] += trip.volume / (seg_speed_kmh * bin_width_hr)
 
         return new_density, new_volume, tstt
