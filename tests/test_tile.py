@@ -7,8 +7,9 @@ mld_data_path = constants.mld_data_path
 test_tile = constants.test_tile
 
 class TestTile:
-    def setup_method(self):
-        self.py_osrm = osrm.OSRM(
+    @classmethod
+    def setup_class(cls):
+        cls.py_osrm = osrm.OSRM(
             storage_config = ch_data_path, 
             use_shared_memory = False
         )

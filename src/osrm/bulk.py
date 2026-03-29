@@ -1,5 +1,6 @@
 """Bulk processing functions for py-osrm using concurrent execution."""
 
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, TypeVar, Union, overload
@@ -191,43 +192,57 @@ def bulk_route(
         
         return result
     
-    # Process routes in parallel
+    def process_chunk(chunk: List[tuple]) -> List[Dict[str, Any]]:
+        """Process a chunk of (index, row) pairs sequentially within one thread."""
+        chunk_results = []
+        for index, row in chunk:
+            chunk_results.append((index, process_single_route(row, index)))
+        return chunk_results
+
+    # Split rows into chunks (one per worker) to minimize task submission overhead
+    chunk_size = max(1, math.ceil(len(rows) / max_workers))
+    indexed_rows = list(enumerate(rows))
+    chunks = [indexed_rows[i:i + chunk_size] for i in range(0, len(indexed_rows), chunk_size)]
+
+    # Process route chunks in parallel
+    results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_index = {
-            executor.submit(process_single_route, row, i): i 
-            for i, row in enumerate(rows)
+        future_to_chunk = {
+            executor.submit(process_chunk, chunk): chunk
+            for chunk in chunks
         }
-        
-        # Collect results as they complete
-        results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
-        
+
         try:
-            for future in as_completed(future_to_index, timeout=timeout):
-                index = future_to_index[future]
+            for future in as_completed(future_to_chunk, timeout=timeout):
                 try:
-                    result = future.result()
-                    results[index] = result
-                    if not result.get('success', False):
-                        error_count += 1
+                    chunk_results = future.result()
+                    for index, result in chunk_results:
+                        results[index] = result
+                        if not result.get('success', False):
+                            error_count += 1
+                        if progress_bar:
+                            progress_bar.set_postfix({"errors": error_count})
+                            progress_bar.update(1)
                 except Exception as e:
-                    error_count += 1
                     if fail_fast:
                         raise
-                    # Store error result
-                    results[index] = rows[index].copy()
-                    results[index].update({
-                        'distance': None,
-                        'duration': None,
-                        'geometry': None,
-                        'success': False,
-                        'error': str(e)
-                    })
-                
-                if progress_bar:
-                    progress_bar.set_postfix({"errors": error_count})
-                    progress_bar.update(1)
-                    
+                    # Mark all routes in the failed chunk as errors
+                    failed_chunk = future_to_chunk[future]
+                    for index, row in failed_chunk:
+                        error_count += 1
+                        results[index] = row.copy()
+                        results[index].update({
+                            'distance': None,
+                            'duration': None,
+                            'geometry': None,
+                            'success': False,
+                            'error': str(e)
+                        })
+                        if progress_bar:
+                            progress_bar.set_postfix({"errors": error_count})
+                            progress_bar.update(1)
+
         finally:
             if progress_bar:
                 progress_bar.close()
@@ -417,41 +432,54 @@ def bulk_nearest(
         
         return result
     
-    # Process nearest requests in parallel
+    def process_chunk(chunk: List[tuple]) -> List[tuple]:
+        """Process a chunk of (index, row) pairs sequentially within one thread."""
+        return [(index, process_single_nearest(row, index)) for index, row in chunk]
+
+    # Split rows into chunks (one per worker) to minimize task submission overhead
+    chunk_size = max(1, math.ceil(len(rows) / max_workers))
+    indexed_rows = list(enumerate(rows))
+    chunks = [indexed_rows[i:i + chunk_size] for i in range(0, len(indexed_rows), chunk_size)]
+
+    # Process nearest request chunks in parallel
+    results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {
-            executor.submit(process_single_nearest, row, i): i 
-            for i, row in enumerate(rows)
+        future_to_chunk = {
+            executor.submit(process_chunk, chunk): chunk
+            for chunk in chunks
         }
-        
-        results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
-        
+
         try:
-            for future in as_completed(future_to_index, timeout=timeout):
-                index = future_to_index[future]
+            for future in as_completed(future_to_chunk, timeout=timeout):
                 try:
-                    result = future.result()
-                    results[index] = result
-                    if not result.get('success', False):
-                        error_count += 1
+                    chunk_results = future.result()
+                    for index, result in chunk_results:
+                        results[index] = result
+                        if not result.get('success', False):
+                            error_count += 1
+                        if progress_bar:
+                            progress_bar.set_postfix({"errors": error_count})
+                            progress_bar.update(1)
                 except Exception as e:
-                    error_count += 1
                     if fail_fast:
                         raise
-                    results[index] = rows[index].copy()
-                    results[index].update({
-                        'waypoint_lon': None,
-                        'waypoint_lat': None,
-                        'waypoint_name': None,
-                        'distance': None,
-                        'success': False,
-                        'error': str(e)
-                    })
-                
-                if progress_bar:
-                    progress_bar.set_postfix({"errors": error_count})
-                    progress_bar.update(1)
-                    
+                    failed_chunk = future_to_chunk[future]
+                    for index, row in failed_chunk:
+                        error_count += 1
+                        results[index] = row.copy()
+                        results[index].update({
+                            'waypoint_lon': None,
+                            'waypoint_lat': None,
+                            'waypoint_name': None,
+                            'distance': None,
+                            'success': False,
+                            'error': str(e)
+                        })
+                        if progress_bar:
+                            progress_bar.set_postfix({"errors": error_count})
+                            progress_bar.update(1)
+
         finally:
             if progress_bar:
                 progress_bar.close()
@@ -644,41 +672,54 @@ def bulk_match(
         
         return result
     
-    # Process match requests in parallel
+    def process_chunk(chunk: List[tuple]) -> List[tuple]:
+        """Process a chunk of (index, row) pairs sequentially within one thread."""
+        return [(index, process_single_match(row, index)) for index, row in chunk]
+
+    # Split rows into chunks (one per worker) to minimize task submission overhead
+    chunk_size = max(1, math.ceil(len(rows) / max_workers))
+    indexed_rows = list(enumerate(rows))
+    chunks = [indexed_rows[i:i + chunk_size] for i in range(0, len(indexed_rows), chunk_size)]
+
+    # Process match request chunks in parallel
+    results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {
-            executor.submit(process_single_match, row, i): i 
-            for i, row in enumerate(rows)
+        future_to_chunk = {
+            executor.submit(process_chunk, chunk): chunk
+            for chunk in chunks
         }
-        
-        results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
-        
+
         try:
-            for future in as_completed(future_to_index, timeout=timeout):
-                index = future_to_index[future]
+            for future in as_completed(future_to_chunk, timeout=timeout):
                 try:
-                    result = future.result()
-                    results[index] = result
-                    if not result.get('success', False):
-                        error_count += 1
+                    chunk_results = future.result()
+                    for index, result in chunk_results:
+                        results[index] = result
+                        if not result.get('success', False):
+                            error_count += 1
+                        if progress_bar:
+                            progress_bar.set_postfix({"errors": error_count})
+                            progress_bar.update(1)
                 except Exception as e:
-                    error_count += 1
                     if fail_fast:
                         raise
-                    results[index] = rows[index].copy()
-                    results[index].update({
-                        'distance': None,
-                        'duration': None,
-                        'confidence': None,
-                        'geometry': None,
-                        'success': False,
-                        'error': str(e)
-                    })
-                
-                if progress_bar:
-                    progress_bar.set_postfix({"errors": error_count})
-                    progress_bar.update(1)
-                    
+                    failed_chunk = future_to_chunk[future]
+                    for index, row in failed_chunk:
+                        error_count += 1
+                        results[index] = row.copy()
+                        results[index].update({
+                            'distance': None,
+                            'duration': None,
+                            'confidence': None,
+                            'geometry': None,
+                            'success': False,
+                            'error': str(e)
+                        })
+                        if progress_bar:
+                            progress_bar.set_postfix({"errors": error_count})
+                            progress_bar.update(1)
+
         finally:
             if progress_bar:
                 progress_bar.close()
