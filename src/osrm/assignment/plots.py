@@ -197,7 +197,7 @@ def vdf_inverse_accuracy(
     fig.update_xaxes(title_text="q_in (veh/hr)", row=1, col=1)
     fig.update_yaxes(title_text="q_out (veh/hr)", row=1, col=1)
     fig.update_xaxes(title_text="q_in (veh/hr)", row=1, col=2)
-    fig.update_yaxes(title_text="|q_out - q_in|", row=1, col=2)
+    fig.update_yaxes(title_text="|q_out - q_in|", exponentformat="e", row=1, col=2)
 
     fig.update_layout(
         title=f"VDF Inverse Round-Trip Accuracy (max err: {error.max():.2e})",
