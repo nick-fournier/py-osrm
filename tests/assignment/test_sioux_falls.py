@@ -247,7 +247,12 @@ def generate_sioux_falls_report(
         "Original paper values &times; 100 = 0.1 &times; daily &asymp; hourly. "
         "TNTP &lsquo;capacity&rsquo; column is a BPR math artifact "
         "(back-computed from polynomial coefficients), <b>not</b> physical "
-        "road capacity.</p>"
+        "road capacity. BPR &lsquo;capacities&rsquo; reach 25,900 vph per link "
+        "&mdash; implying 13+ lanes per direction for a city of 200,000. "
+        "The original 1975 model used <code>t&nbsp;=&nbsp;a&nbsp;+&nbsp;b&middot;flow<sup>4</sup></code> "
+        "with no capacity concept at all; the capacity column was reverse-engineered "
+        "later to fit BPR&rsquo;s <code>t&nbsp;=&nbsp;fft&middot;(1&nbsp;+&nbsp;0.15&middot;(V/C)<sup>4</sup>)</code> "
+        "convention.</p>"
     )
 
     # --- 1. Demand scaling sweep ---
@@ -429,23 +434,35 @@ def generate_sioux_falls_report(
             bpr_flows.append(ref[key][0])
             link_labels.append(f"{key[0]}&rarr;{key[1]}")
 
+    # Normalize to flow shares so different demand levels are comparable
+    assigned_arr = np.array(assigned_flows)
+    bpr_arr = np.array(bpr_flows)
+    a_total = assigned_arr.sum() or 1.0
+    b_total = bpr_arr.sum() or 1.0
+    assigned_share = assigned_arr / a_total * 100
+    bpr_share = bpr_arr / b_total * 100
+
     fig_corr = go.Figure()
     fig_corr.add_trace(go.Scatter(
-        x=bpr_flows, y=assigned_flows, mode="markers",
+        x=bpr_share.tolist(), y=assigned_share.tolist(), mode="markers",
         marker=dict(size=6, color="#2196F3", opacity=0.7),
-        hovertext=link_labels, hoverinfo="text+x+y",
+        hovertext=[
+            f"{lbl}: MFD={a:.1f}%, BPR={b:.1f}%"
+            for lbl, a, b in zip(link_labels, assigned_share, bpr_share)
+        ],
+        hoverinfo="text",
         name="Links",
     ))
-    max_flow = max(max(bpr_flows, default=1), max(assigned_flows, default=1))
+    max_share = max(assigned_share.max(), bpr_share.max())
     fig_corr.add_trace(go.Scatter(
-        x=[0, max_flow], y=[0, max_flow], mode="lines",
+        x=[0, max_share], y=[0, max_share], mode="lines",
         line=dict(color="#999", dash="dash", width=1),
         name="1:1 line", showlegend=True,
     ))
     fig_corr.update_layout(
-        title=f"Link Flow: MFD vs BPR Reference (Spearman r={corr_fw:.3f})",
-        xaxis_title="BPR Reference Flow (vph)",
-        yaxis_title="MFD Assigned Flow (vph)",
+        title=f"Link Flow Share: MFD vs BPR (Spearman r={corr_fw:.3f})",
+        xaxis_title="BPR Reference (% of total flow)",
+        yaxis_title="MFD Assigned (% of total flow)",
         template="plotly_white",
         xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
@@ -454,9 +471,9 @@ def generate_sioux_falls_report(
         "<h2>Flow Correlation (10% Demand)</h2>"
         f"<p>Spearman rank correlation: <b>r = {corr_fw:.3f}</b> "
         f"({n_matched} links). "
-        "MFD flows are at 10% of TNTP demand while BPR reference is at 100%, "
-        "so magnitudes differ by ~10&times;. The rank ordering tests whether "
-        "both VDFs load the same links heavily.</p>"
+        "Both axes show flow as percentage of total network flow, "
+        "making the comparison scale-invariant. Points near the 1:1 line "
+        "mean both VDFs allocate the same share of traffic to that link.</p>"
     )
 
     # --- 4. Demand scaling correlation trend ---
