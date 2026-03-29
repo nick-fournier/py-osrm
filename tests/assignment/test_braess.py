@@ -263,24 +263,26 @@ def generate_braess_report(
                     state.flow_vph[i],
                     state.jam_density[i],
                     state.n_lanes[i],
+                    state.length_m[i],
                 ))
 
         pivot: dict[str, dict[str, tuple]] = OrderedDict()
-        for label, scenario, k, v, vf, q, kj, lanes in rows:
-            pivot.setdefault(label, {"lanes": lanes, "kj": kj, "vf": vf})[scenario] = (k, v, q)
+        for label, scenario, k, v, vf, q, kj, lanes, length in rows:
+            pivot.setdefault(label, {"lanes": lanes, "kj": kj, "vf": vf, "length": length})[scenario] = (k, v, q)
 
         html = (
-            '<table style="border-collapse:collapse; width:100%; max-width:900px; '
+            '<table style="border-collapse:collapse; width:100%; max-width:1000px; '
             'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.9em;">'
             '<thead><tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:8px;">Link</th>'
+            '<th style="padding:8px;">Length</th>'
             '<th style="padding:8px;">Lanes</th>'
             '<th style="padding:8px;">k<sub>j</sub></th>'
             '<th style="padding:8px;">v<sub>f</sub></th>'
             '<th colspan="3" style="text-align:center;padding:8px;border-left:2px solid #ccc;">With Shortcut</th>'
             '<th colspan="3" style="text-align:center;padding:8px;border-left:2px solid #ccc;">Without Shortcut</th>'
             '</tr><tr style="border-bottom:1px solid #999;">'
-            '<th></th><th></th><th></th><th></th>'
+            '<th></th><th></th><th></th><th></th><th></th>'
             '<th style="padding:4px 8px;border-left:2px solid #ccc;">k</th>'
             '<th style="padding:4px 8px;">v</th>'
             '<th style="padding:4px 8px;">q</th>'
@@ -310,6 +312,7 @@ def generate_braess_report(
             lanes = info["lanes"]
             kj = info["kj"]
             vf = info["vf"]
+            length_km = info["length"] / 1000.0
             w = info.get("With")
             wo = info.get("Without")
 
@@ -328,6 +331,7 @@ def generate_braess_report(
             html += (
                 f'<tr style="border-bottom:1px solid #e0e0e0;">'
                 f'<td style="padding:4px 8px;font-weight:600;">{link}</td>'
+                f'<td style="text-align:center;padding:4px 8px;">{length_km:.1f} km</td>'
                 f'<td style="text-align:center;padding:4px 8px;">{lanes}</td>'
                 f'<td style="text-align:center;padding:4px 8px;">{kj:.0f}</td>'
                 f'<td style="text-align:center;padding:4px 8px;">{vf:.0f}</td>'
