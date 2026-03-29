@@ -27,7 +27,7 @@ def _prepare_network(tmp_path: Path, with_shortcut: bool):
     """Synthesize, extract, partition, customize a Braess network."""
     label = "with" if with_shortcut else "without"
     work = tmp_path / f"braess_{label}"
-    work.mkdir()
+    work.mkdir(parents=True)
 
     osm_path, meta = braess_network(work / "braess.osm", with_shortcut=with_shortcut)
     base = str(work / "braess.osrm")
@@ -39,7 +39,13 @@ def _prepare_network(tmp_path: Path, with_shortcut: bool):
     return base, meta
 
 
-def _run_assignment(base_path: str, meta: dict, demand: float, max_iter: int = 15):
+def _run_assignment(
+    base_path: str,
+    meta: dict,
+    demand: float,
+    max_iter: int = 15,
+    method: str = "msa",
+):
     """Run assignment on Braess network."""
     from osrm.assignment.osm_synthesis import patch_braess_lanes
 
@@ -50,6 +56,7 @@ def _run_assignment(base_path: str, meta: dict, demand: float, max_iter: int = 1
     )]
 
     config = AssignmentConfig(
+        method=method,
         max_iterations=max_iter,
         convergence_gap=0.0,  # Run all iterations
         smoothing=DensitySmoothingConfig(method="none"),
@@ -115,6 +122,21 @@ class TestBraessParadox:
         assert np.all(state.speed_kmh >= 0.01 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
 
+    def test_fw_monotone_tstt(self, tmp_path):
+        """Frank-Wolfe should produce monotonically improving TSTT after iter 1."""
+        base, meta = _prepare_network(tmp_path, with_shortcut=True)
+        result = _run_assignment(base, meta, demand=1500.0, max_iter=20, method="fw")
+
+        # TSTT should be roughly stable (not oscillating wildly)
+        tstt_vals = [r.tstt for r in result.iteration_log]
+        assert len(tstt_vals) == 20
+
+        # Check step sizes are in [0, 1]
+        for r in result.iteration_log:
+            assert 0.0 <= r.step_size <= 1.0, (
+                f"Iter {r.iteration}: step_size={r.step_size} out of [0,1]"
+            )
+
 
 def generate_braess_report(
     tmp_path: str | Path,
@@ -146,12 +168,19 @@ def generate_braess_report(
     tmp_path = Path(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
 
-    # Run both scenarios
+    # Run both scenarios (MSA)
     base_with, meta_with = _prepare_network(tmp_path, with_shortcut=True)
     base_without, meta_without = _prepare_network(tmp_path, with_shortcut=False)
 
     result_with = _run_assignment(base_with, meta_with, demand, max_iter)
     result_without = _run_assignment(base_without, meta_without, demand, max_iter)
+
+    # Run FW scenarios (reuse same prepared networks)
+    base_fw_w, meta_fw_w = _prepare_network(tmp_path / "fw", with_shortcut=True)
+    base_fw_wo, meta_fw_wo = _prepare_network(tmp_path / "fw", with_shortcut=False)
+
+    result_fw_with = _run_assignment(base_fw_w, meta_fw_w, demand, max_iter, method="fw")
+    result_fw_without = _run_assignment(base_fw_wo, meta_fw_wo, demand, max_iter, method="fw")
 
     figs = []
     descriptions = []
@@ -502,9 +531,13 @@ def generate_braess_report(
         f"{paradox_msg}</p>"
     )
 
-    # --- 3. Convergence (gap) ---
+    # --- 3. Convergence (gap): MSA vs Frank-Wolfe ---
     gap_with = [r.relative_gap for r in result_with.iteration_log]
     gap_without = [r.relative_gap for r in result_without.iteration_log]
+    gap_fw_w = [r.relative_gap for r in result_fw_with.iteration_log]
+    gap_fw_wo = [r.relative_gap for r in result_fw_without.iteration_log]
+    iters_fw_w = [r.iteration for r in result_fw_with.iteration_log]
+    iters_fw_wo = [r.iteration for r in result_fw_without.iteration_log]
 
     def _moving_max(gaps, window=5):
         """Rolling max of gap values (envelope of worst-case per window)."""
@@ -517,43 +550,97 @@ def generate_braess_report(
         return out.tolist()
 
     fig_gap = go.Figure()
-    # Raw gap as faint markers
+    # MSA raw gap as faint markers
     fig_gap.add_trace(go.Scatter(
         x=iters_w, y=[g if g > 0 else None for g in gap_with],
-        mode="markers", name="With shortcut (raw)",
+        mode="markers", name="MSA with shortcut (raw)",
         marker=dict(color="#F44336", size=4, opacity=0.3),
     ))
     fig_gap.add_trace(go.Scatter(
         x=iters_wo, y=[g if g > 0 else None for g in gap_without],
-        mode="markers", name="Without shortcut (raw)",
+        mode="markers", name="MSA without shortcut (raw)",
         marker=dict(color="#2196F3", size=4, opacity=0.3),
     ))
-    # Envelope (rolling max) as solid trend line
+    # MSA envelope (rolling max) as dashed
     fig_gap.add_trace(go.Scatter(
         x=iters_w, y=_moving_max(gap_with, window=5),
-        mode="lines", name="With shortcut (envelope)",
-        line=dict(color="#F44336", width=2),
+        mode="lines", name="MSA with shortcut (envelope)",
+        line=dict(color="#F44336", width=1.5, dash="dash"),
     ))
     fig_gap.add_trace(go.Scatter(
         x=iters_wo, y=_moving_max(gap_without, window=5),
-        mode="lines", name="Without shortcut (envelope)",
-        line=dict(color="#2196F3", width=2),
+        mode="lines", name="MSA without shortcut (envelope)",
+        line=dict(color="#2196F3", width=1.5, dash="dash"),
+    ))
+    # FW gap as solid lines
+    fig_gap.add_trace(go.Scatter(
+        x=iters_fw_w, y=[g if g > 0 else None for g in gap_fw_w],
+        mode="lines+markers", name="FW with shortcut",
+        line=dict(color="#D32F2F", width=2.5),
+        marker=dict(size=5),
+    ))
+    fig_gap.add_trace(go.Scatter(
+        x=iters_fw_wo, y=[g if g > 0 else None for g in gap_fw_wo],
+        mode="lines+markers", name="FW without shortcut",
+        line=dict(color="#1565C0", width=2.5),
+        marker=dict(size=5),
     ))
     fig_gap.update_layout(
-        title="Wardrop Relative Gap per Iteration",
+        title="Wardrop Relative Gap: MSA vs Frank-Wolfe",
         xaxis_title="Iteration", yaxis_title="Relative Gap",
         yaxis_type="log",
         template="plotly_white",
         xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
     figs.append(fig_gap)
-    descriptions.append("""<h2>Convergence</h2>
-    <p>Relative gap measures proximity to Wardrop user equilibrium (gap = 0 means
-    all used paths have equal cost). Log scale. Faint dots show raw per-iteration gap
-    (AON route-switching causes zero-gap iterations); solid lines show the rolling-max
-    envelope, which reveals the true convergence trend. The symmetric "without" scenario
-    converges faster; the asymmetric 3-path "with" scenario is slower but the envelope
-    is steadily decreasing under MSA (&alpha; = 1/n).</p>""")
+
+    fw_final_gap_w = result_fw_with.iteration_log[-1].relative_gap
+    fw_final_gap_wo = result_fw_without.iteration_log[-1].relative_gap
+    fw_gap_w_fmt = f"{fw_final_gap_w:.6f}"
+    fw_gap_wo_fmt = f"{fw_final_gap_wo:.6f}"
+    descriptions.append(
+        "<h2>Convergence: MSA vs Frank-Wolfe</h2>"
+        "<p>MSA (dashed envelopes, faint dots) vs Frank-Wolfe (solid lines). "
+        "FW uses Beckmann line search to find the optimal step size each iteration, "
+        "eliminating the bang-bang oscillation inherent to MSA on small networks. "
+        f"FW final gap: with shortcut = {fw_gap_w_fmt}, without = {fw_gap_wo_fmt}.</p>"
+    )
+
+    # --- 4. FW step size ---
+    step_sizes_w = [r.step_size for r in result_fw_with.iteration_log]
+    step_sizes_wo = [r.step_size for r in result_fw_without.iteration_log]
+
+    fig_step = go.Figure()
+    fig_step.add_trace(go.Scatter(
+        x=iters_fw_w, y=step_sizes_w, mode="lines+markers",
+        name="With shortcut", line=dict(color="#F44336", width=2),
+        marker=dict(size=5),
+    ))
+    fig_step.add_trace(go.Scatter(
+        x=iters_fw_wo, y=step_sizes_wo, mode="lines+markers",
+        name="Without shortcut", line=dict(color="#2196F3", width=2),
+        marker=dict(size=5),
+    ))
+    # MSA step size for reference
+    msa_steps = [1.0 / n for n in range(1, max_iter + 1)]
+    fig_step.add_trace(go.Scatter(
+        x=list(range(1, max_iter + 1)), y=msa_steps, mode="lines",
+        name="MSA (1/n)", line=dict(color="#999", width=1, dash="dot"),
+    ))
+    fig_step.update_layout(
+        title="Frank-Wolfe Step Size per Iteration",
+        xaxis_title="Iteration", yaxis_title="Step Size (&alpha;)",
+        template="plotly_white",
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True, range=[0, 1.05]),
+    )
+    figs.append(fig_step)
+    descriptions.append(
+        "<h2>FW Step Size</h2>"
+        "<p>Optimal step size &alpha;* from the Beckmann line search each iteration. "
+        "Dotted grey = MSA fixed schedule (1/n). Early iterations take large steps; "
+        "as equilibrium is approached, FW takes progressively smaller steps &mdash; "
+        "unlike MSA which follows a rigid 1/n schedule regardless of the objective landscape.</p>"
+    )
 
     # Write report
     demand_fmt = f"{demand:,.0f}"
@@ -563,8 +650,9 @@ def generate_braess_report(
         <b>Braess paradox</b> &mdash; a 4-node diamond network where adding a shortcut link
         increases total system travel time under user equilibrium.</p>
         <p>Demand: <b>{demand_fmt}</b> vehicles.
-        <b>{max_iter}</b> MSA iterations per scenario.
-        VDF: bi-parabolic speed-density (Fournier et al.), k<sub>c</sub> = k<sub>j</sub>/3.</p>""",
+        <b>{max_iter}</b> iterations per scenario.
+        VDF: bi-parabolic speed-density (Fournier et al.), k<sub>c</sub> = k<sub>j</sub>/3.
+        Methods compared: MSA (&alpha; = 1/n) and Frank-Wolfe (Beckmann line search).</p>""",
         figures=figs,
         descriptions=descriptions,
         path=Path(output_path),

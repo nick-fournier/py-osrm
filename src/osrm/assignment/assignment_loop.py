@@ -32,8 +32,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AssignmentConfig:
-    """Configuration for the assignment loop."""
+    """Configuration for the assignment loop.
 
+    Parameters
+    ----------
+    method : str
+        Convergence method: ``"msa"`` (Method of Successive Averages,
+        fixed step 1/n) or ``"fw"`` (Frank-Wolfe with Beckmann line
+        search for optimal step size). Default ``"msa"``.
+    fw_bisections : int
+        Maximum bisection iterations for the FW line search.
+    fw_line_search_tol : float
+        Convergence tolerance for the FW line search bracket width.
+    """
+
+    method: str = "msa"
     max_iterations: int = 50
     convergence_gap: float = 0.01
     bin_width_s: float = 3600.0
@@ -47,6 +60,8 @@ class AssignmentConfig:
     default_n_lanes: int = 1
     speed_csv_dir: Optional[str] = None
     verbosity: str = "ERROR"
+    fw_bisections: int = 20
+    fw_line_search_tol: float = 1e-6
 
 
 @dataclass
@@ -60,6 +75,7 @@ class IterationResult:
     n_oversaturated: int
     route_time_s: float
     customize_time_s: float
+    step_size: float = 0.0
 
 
 @dataclass
@@ -80,6 +96,7 @@ class AssignmentResult:
             "relative_gap": [r.relative_gap for r in self.iteration_log],
             "tstt": [r.tstt for r in self.iteration_log],
             "max_density_delta": [r.max_density_delta for r in self.iteration_log],
+            "step_size": [r.step_size for r in self.iteration_log],
         }
 
 
@@ -289,6 +306,65 @@ class AssignmentLoop:
 
         return max(0.0, numerator / denominator - 1.0)
 
+    def _fw_line_search(
+        self,
+        k_current: np.ndarray,
+        k_aon: np.ndarray,
+        v_current: np.ndarray,
+        v_aon: np.ndarray,
+        state: NetworkState,
+    ) -> float:
+        """Find optimal step size via bisection on the Beckmann gradient.
+
+        The Beckmann objective in volume space is:
+            Z = sum_a V_a * c_a(k_a)
+
+        The directional derivative uses the volume direction (dV) for
+        the gradient (since AON minimizes volume-weighted cost), but
+        density direction (dk) for evaluating costs:
+            g(alpha) = sum_a c_a(k(alpha)) * dV_a
+
+        At alpha=0, g(0) = sum_a c(k_current) * (V_aon - V_current) <= 0
+        because AON routes on shortest paths, guaranteeing the improving
+        direction property of Frank-Wolfe.
+        """
+        dk = k_aon - k_current
+        dv = v_aon - v_current
+        v_f = state.freeflow_kmh
+        k_j = state.jam_density
+        length_m = state.length_m
+
+        def gradient(alpha: float) -> float:
+            k_trial = k_current + alpha * dk
+            k_trial = np.minimum(k_trial, k_j)
+            k_trial = np.maximum(k_trial, 0.0)
+            speed = self.vdf.density_to_speed(k_trial, v_f, k_j)
+            cost = length_m * 3.6 / np.maximum(speed, self.config.vdf_min_speed_kmh)
+            return float(np.dot(cost, dv))
+
+        g_lo = gradient(0.0)
+        g_hi = gradient(1.0)
+
+        # If AON direction doesn't reduce cost, don't step
+        if g_lo >= 0.0:
+            return 0.0
+
+        # If full step still reduces cost, take it
+        if g_hi <= 0.0:
+            return 1.0
+
+        lo, hi = 0.0, 1.0
+        for _ in range(self.config.fw_bisections):
+            if hi - lo < self.config.fw_line_search_tol:
+                break
+            mid = (lo + hi) / 2.0
+            if gradient(mid) < 0:
+                lo = mid
+            else:
+                hi = mid
+
+        return (lo + hi) / 2.0
+
     def _update_state(self, state: NetworkState) -> None:
         """Update speed and flow from current density using VDF.
 
@@ -366,10 +442,19 @@ class AssignmentLoop:
                     state_patch(state)
                 self.smoother.build_adjacency(state.edge_ids, state.length_m)
 
-            # 3. MSA blending on density and demand volume
+            # 3. Blending: MSA (fixed 1/n) or Frank-Wolfe (optimal step)
             if n == 1:
+                alpha = 1.0
                 state.density_vpkm = aon_density.copy()
                 blended_volume = aon_volume.copy()
+            elif self.config.method == "fw":
+                alpha = self._fw_line_search(
+                    prev_density, aon_density,
+                    prev_volume, aon_volume,
+                    state,
+                )
+                state.density_vpkm = prev_density + alpha * (aon_density - prev_density)
+                blended_volume = prev_volume + alpha * (aon_volume - prev_volume)
             else:
                 alpha = 1.0 / n
                 state.density_vpkm = prev_density + alpha * (aon_density - prev_density)
@@ -423,13 +508,15 @@ class AssignmentLoop:
                 n_oversaturated=n_oversat,
                 route_time_s=route_time,
                 customize_time_s=customize_time,
+                step_size=alpha,
             )
             log.append(iter_result)
 
             logger.info(
-                "Iter %d: gap=%.4f, TSTT=%.0f, max_Δk=%.1f, oversat=%d, "
-                "route=%.1fs, customize=%.1fs",
-                n, gap, tstt, max_delta, n_oversat, route_time, customize_time,
+                "Iter %d: gap=%.4f, TSTT=%.0f, alpha=%.4f, max_dk=%.1f, "
+                "oversat=%d, route=%.1fs, customize=%.1fs",
+                n, gap, tstt, alpha, max_delta, n_oversat,
+                route_time, customize_time,
             )
 
             if progress_callback:
