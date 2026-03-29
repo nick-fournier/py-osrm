@@ -77,8 +77,8 @@ class TestBraessParadox:
         base_with, meta_with = _prepare_network(tmp_path, with_shortcut=True)
         base_without, meta_without = _prepare_network(tmp_path, with_shortcut=False)
 
-        result_with = _run_assignment(base_with, meta_with, demand=3000.0)
-        result_without = _run_assignment(base_without, meta_without, demand=3000.0)
+        result_with = _run_assignment(base_with, meta_with, demand=1500.0)
+        result_without = _run_assignment(base_without, meta_without, demand=1500.0)
 
         tstt_with = result_with.iteration_log[-1].tstt
         tstt_without = result_without.iteration_log[-1].tstt
@@ -104,13 +104,13 @@ class TestBraessParadox:
     def test_flow_nonnegativity(self, tmp_path):
         """All link flows must be non-negative."""
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
-        result = _run_assignment(base, meta, demand=3000.0)
+        result = _run_assignment(base, meta, demand=1500.0)
         assert np.all(result.network_state.flow_vph >= 0)
 
     def test_speeds_within_bounds(self, tmp_path):
         """Speeds must be between VDF min_speed and freeflow."""
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
-        result = _run_assignment(base, meta, demand=3000.0)
+        result = _run_assignment(base, meta, demand=1500.0)
         state = result.network_state
         assert np.all(state.speed_kmh >= 0.01 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
@@ -119,7 +119,7 @@ class TestBraessParadox:
 def generate_braess_report(
     tmp_path: str | Path,
     output_path: str = "docs/plots/braess_validation.html",
-    demand: float = 3000.0,
+    demand: float = 1500.0,
     max_iter: int = 100,
 ) -> Path:
     """Run Braess validation and generate an interactive HTML report.
@@ -156,8 +156,18 @@ def generate_braess_report(
     figs = []
     descriptions = []
 
-    # --- 0. Network topology diagram ---
-    node_pos = {1: (0, 0.5), 3: (0.5, 1), 4: (0.5, 0), 2: (1, 0.5)}
+    # --- 0. Network topology diagram (to-scale) ---
+    # Convert synthesis coords to km from origin node
+    meta_nodes = meta_with["nodes"]
+    cos_lat = np.cos(np.radians(43.735))
+    node_km = {}
+    ref_lon, ref_lat = meta_nodes[1]
+    for nid, (lon, lat) in meta_nodes.items():
+        node_km[nid] = (
+            (lon - ref_lon) * 111.32 * cos_lat,
+            (lat - ref_lat) * 111.32,
+        )
+
     edges_wo = [(1, 3), (1, 4), (3, 2), (4, 2)]
     edges_w = edges_wo + [(3, 4)]
     edge_styles = {
@@ -176,14 +186,14 @@ def generate_braess_report(
 
     for col, edges in enumerate([edges_wo, edges_w], 1):
         for u, v in edges:
-            x0, y0 = node_pos[u]
-            x1, y1 = node_pos[v]
+            x0, y0 = node_km[u]
+            x1, y1 = node_km[v]
             _, color = edge_styles[(u, v)]
             topo_fig.add_trace(go.Scatter(
                 x=[x0, x1], y=[y0, y1], mode="lines",
                 line=dict(color=color, width=3),
                 hoverinfo="text",
-                hovertext=f"{u}→{v}: {edge_styles[(u,v)][0]}",
+                hovertext=f"{u}&rarr;{v}: {edge_styles[(u,v)][0]}",
                 showlegend=False,
             ), row=1, col=col)
             topo_fig.add_annotation(
@@ -198,21 +208,21 @@ def generate_braess_report(
             mx, my = (x0 + x1) / 2, (y0 + y1) / 2
             dx, dy = y1 - y0, -(x1 - x0)
             mag = max((dx**2 + dy**2) ** 0.5, 1e-9)
-            ox, oy = 0.06 * dx / mag, 0.06 * dy / mag
+            ox, oy = 0.12 * dx / mag, 0.12 * dy / mag
             topo_fig.add_annotation(
-                x=mx + ox, y=my + oy, text=f"{u}→{v}",
+                x=mx + ox, y=my + oy, text=f"{u}&rarr;{v}",
                 xref=f"x{col}" if col > 1 else "x",
                 yref=f"y{col}" if col > 1 else "y",
                 showarrow=False, font=dict(size=10, color=color),
             )
 
-        xs = [node_pos[n][0] for n in sorted(node_pos)]
-        ys = [node_pos[n][1] for n in sorted(node_pos)]
-        labels = [str(n) for n in sorted(node_pos)]
+        xs = [node_km[n][0] for n in sorted(node_km)]
+        ys = [node_km[n][1] for n in sorted(node_km)]
+        labels = [str(n) for n in sorted(node_km)]
         roles = {1: "Origin", 2: "Destination", 3: "Node 3", 4: "Node 4"}
-        hover = [f"Node {n} ({roles[n]})" for n in sorted(node_pos)]
+        hover = [f"Node {n} ({roles[n]})" for n in sorted(node_km)]
         colors = ["#4CAF50" if n == 1 else "#F44336" if n == 2 else "#9E9E9E"
-                  for n in sorted(node_pos)]
+                  for n in sorted(node_km)]
         topo_fig.add_trace(go.Scatter(
             x=xs, y=ys, mode="markers+text",
             marker=dict(size=28, color=colors, line=dict(width=2, color="white")),
@@ -222,39 +232,49 @@ def generate_braess_report(
             showlegend=False,
         ), row=1, col=col)
 
+    # Compute axis ranges from node positions
+    all_x = [v[0] for v in node_km.values()]
+    all_y = [v[1] for v in node_km.values()]
+    x_pad = (max(all_x) - min(all_x)) * 0.08
+    y_pad = max((max(all_y) - min(all_y)) * 0.3, 0.15)
     for suffix in ["", "2"]:
         xref, yref = f"xaxis{suffix}", f"yaxis{suffix}"
         topo_fig.update_layout(**{
-            xref: dict(showgrid=False, zeroline=False, showticklabels=False,
-                       range=[-0.15, 1.15], fixedrange=True),
-            yref: dict(showgrid=False, zeroline=False, showticklabels=False,
-                       range=[-0.15, 1.15], scaleanchor=f"x{suffix}" if suffix else "x",
+            xref: dict(showgrid=False, zeroline=False, showticklabels=True,
+                       title="km", range=[min(all_x) - x_pad, max(all_x) + x_pad],
+                       fixedrange=True),
+            yref: dict(showgrid=False, zeroline=False, showticklabels=True,
+                       title="km",
+                       range=[min(all_y) - y_pad, max(all_y) + y_pad],
+                       scaleanchor=f"x{suffix}" if suffix else "x",
                        fixedrange=True),
         })
     topo_fig.update_layout(
-        title="Network Topology",
+        title="Network Topology (to scale)",
         template="plotly_white",
-        height=350,
+        height=400,
     )
 
     figs.append(topo_fig)
     descriptions.append("""<h2>Network Topology</h2>
-    <p>The Braess diamond network: <span style="color:#4CAF50">●</span> Origin (node 1),
+    <p>The Braess diamond network (to scale): <span style="color:#4CAF50">●</span> Origin (node 1),
     <span style="color:#F44336">●</span> Destination (node 2).
-    <span style="color:#F44336">Red</span> = narrow (1-lane, 60 km/h — congestion-sensitive).
-    <span style="color:#2196F3">Blue</span> = wide (3-lane, 40 km/h — high capacity).
+    <span style="color:#F44336">Red</span> = narrow (1-lane, 60 km/h &mdash; congestion-sensitive).
+    <span style="color:#2196F3">Blue</span> = wide (3-lane, 40 km/h &mdash; high capacity).
     <span style="color:#FF9800">Orange</span> = shortcut (1-lane, 60 km/h).
-    All arterials are ~4 km; the shortcut is ~0.6 km.</p>""")
+    Arterials are ~4 km; the shortcut is ~0.6 km.</p>""")
 
     # --- 1. Link state comparison table ---
     def _state_table(result_w, result_wo):
-        """Build an HTML table comparing link density, speed, and flow."""
+        """Build an HTML table comparing link state between scenarios."""
         from collections import OrderedDict
         rows = []
         for result, scenario in [(result_w, "With"), (result_wo, "Without")]:
             state = result.network_state
             for i in range(state.n_edges):
-                label = f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+                label = f"{int(state.edge_ids[i,0])}&rarr;{int(state.edge_ids[i,1])}"
+                v = max(state.speed_kmh[i], 0.01)
+                travel_time_s = state.length_m[i] / (v / 3.6)
                 rows.append((
                     label, scenario,
                     state.density_vpkm[i],
@@ -264,31 +284,36 @@ def generate_braess_report(
                     state.jam_density[i],
                     state.n_lanes[i],
                     state.length_m[i],
+                    travel_time_s,
                 ))
 
         pivot: dict[str, dict[str, tuple]] = OrderedDict()
-        for label, scenario, k, v, vf, q, kj, lanes, length in rows:
-            pivot.setdefault(label, {"lanes": lanes, "kj": kj, "vf": vf, "length": length})[scenario] = (k, v, q)
+        for label, scenario, k, v, vf, q, kj, lanes, length, tt in rows:
+            pivot.setdefault(label, {
+                "lanes": lanes, "kj": kj, "vf": vf, "length": length,
+            })[scenario] = (k, v, q, tt)
 
         html = (
-            '<table style="border-collapse:collapse; width:100%; max-width:1000px; '
-            'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.9em;">'
+            '<table style="border-collapse:collapse; width:100%; max-width:1100px; '
+            'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.85em;">'
             '<thead><tr style="border-bottom:2px solid #333;">'
             '<th style="text-align:left;padding:8px;">Link</th>'
             '<th style="padding:8px;">Length</th>'
             '<th style="padding:8px;">Lanes</th>'
             '<th style="padding:8px;">k<sub>j</sub></th>'
             '<th style="padding:8px;">v<sub>f</sub></th>'
-            '<th colspan="3" style="text-align:center;padding:8px;border-left:2px solid #ccc;">With Shortcut</th>'
-            '<th colspan="3" style="text-align:center;padding:8px;border-left:2px solid #ccc;">Without Shortcut</th>'
+            '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">With Shortcut</th>'
+            '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">Without Shortcut</th>'
             '</tr><tr style="border-bottom:1px solid #999;">'
             '<th></th><th></th><th></th><th></th><th></th>'
-            '<th style="padding:4px 8px;border-left:2px solid #ccc;">k</th>'
-            '<th style="padding:4px 8px;">v</th>'
-            '<th style="padding:4px 8px;">q</th>'
-            '<th style="padding:4px 8px;border-left:2px solid #ccc;">k</th>'
-            '<th style="padding:4px 8px;">v</th>'
-            '<th style="padding:4px 8px;">q</th>'
+            '<th style="padding:4px 6px;border-left:2px solid #ccc;">k</th>'
+            '<th style="padding:4px 6px;">v</th>'
+            '<th style="padding:4px 6px;">q</th>'
+            '<th style="padding:4px 6px;">t</th>'
+            '<th style="padding:4px 6px;border-left:2px solid #ccc;">k</th>'
+            '<th style="padding:4px 6px;">v</th>'
+            '<th style="padding:4px 6px;">q</th>'
+            '<th style="padding:4px 6px;">t</th>'
             '</tr></thead><tbody>'
         )
 
@@ -308,33 +333,43 @@ def generate_braess_report(
                 return "color:#FF9800;"
             return ""
 
+        def _fmt_time(s):
+            if s >= 3600:
+                return f"{s/3600:.1f}h"
+            return f"{s:.0f}s"
+
         for link, info in pivot.items():
             lanes = info["lanes"]
             kj = info["kj"]
             vf = info["vf"]
             length_km = info["length"] / 1000.0
+            ff_time_s = info["length"] / (vf / 3.6)
             w = info.get("With")
             wo = info.get("Without")
 
             def _cells(vals):
                 if vals is None:
-                    return '<td style="text-align:right;padding:4px 8px;border-left:2px solid #ccc;">—</td>' \
-                           '<td style="text-align:right;padding:4px 8px;">—</td>' \
-                           '<td style="text-align:right;padding:4px 8px;">—</td>'
-                k, v, q = vals
+                    return ('<td style="text-align:right;padding:4px 6px;border-left:2px solid #ccc;">&mdash;</td>'
+                            '<td style="text-align:right;padding:4px 6px;">&mdash;</td>'
+                            '<td style="text-align:right;padding:4px 6px;">&mdash;</td>'
+                            '<td style="text-align:right;padding:4px 6px;">&mdash;</td>')
+                k, v, q, tt = vals
+                tt_ratio = tt / ff_time_s if ff_time_s > 0 else 1
+                tt_color = "#F44336" if tt_ratio > 2 else "#FF9800" if tt_ratio > 1.3 else "#4CAF50"
                 return (
-                    f'<td style="text-align:right;padding:4px 8px;border-left:2px solid #ccc;{_k_style(k, kj)}">{k:.1f}</td>'
-                    f'<td style="text-align:right;padding:4px 8px;color:{_v_color(v, vf)};">{v:.2f}</td>'
-                    f'<td style="text-align:right;padding:4px 8px;">{q:.0f}</td>'
+                    f'<td style="text-align:right;padding:4px 6px;border-left:2px solid #ccc;{_k_style(k, kj)}">{k:.1f}</td>'
+                    f'<td style="text-align:right;padding:4px 6px;color:{_v_color(v, vf)};">{v:.1f}</td>'
+                    f'<td style="text-align:right;padding:4px 6px;">{q:.0f}</td>'
+                    f'<td style="text-align:right;padding:4px 6px;color:{tt_color};">{_fmt_time(tt)}</td>'
                 )
 
             html += (
                 f'<tr style="border-bottom:1px solid #e0e0e0;">'
-                f'<td style="padding:4px 8px;font-weight:600;">{link}</td>'
-                f'<td style="text-align:center;padding:4px 8px;">{length_km:.1f} km</td>'
-                f'<td style="text-align:center;padding:4px 8px;">{lanes}</td>'
-                f'<td style="text-align:center;padding:4px 8px;">{kj:.0f}</td>'
-                f'<td style="text-align:center;padding:4px 8px;">{vf:.0f}</td>'
+                f'<td style="padding:4px 6px;font-weight:600;">{link}</td>'
+                f'<td style="text-align:center;padding:4px 6px;">{length_km:.1f} km</td>'
+                f'<td style="text-align:center;padding:4px 6px;">{lanes}</td>'
+                f'<td style="text-align:center;padding:4px 6px;">{kj:.0f}</td>'
+                f'<td style="text-align:center;padding:4px 6px;">{vf:.0f}</td>'
                 f'{_cells(w)}{_cells(wo)}'
                 f'</tr>'
             )
@@ -344,10 +379,12 @@ def generate_braess_report(
     figs.append(None)
     descriptions.append(
         """<h2>Link State at Equilibrium</h2>
-        <p>Density (k, veh/km), speed (v, km/h), and flow (q = k×v, veh/hr) at the
-        final iteration. <span style="color:#F44336;font-weight:600;">Red density</span>
+        <p>Density (k, veh/km), speed (v, km/h), flow (q = k&times;v, veh/hr), and travel
+        time (t = L/v) at the final iteration.
+        <span style="color:#F44336;font-weight:600;">Red density</span>
         = near jam (k/k<sub>j</sub> &gt; 0.9).
         <span style="color:#F44336">Red speed</span> = severe congestion (v/v<sub>f</sub> &lt; 0.1).
+        <span style="color:#F44336">Red time</span> = &gt;2x freeflow.
         <span style="color:#FF9800">Orange</span> = moderate.
         <span style="color:#4CAF50">Green</span> = uncongested.</p>"""
         + _state_table(result_with, result_without)
@@ -370,7 +407,7 @@ def generate_braess_report(
     ))
     fig_tstt.update_layout(
         title="Total System Travel Time (TSTT) per Iteration",
-        xaxis_title="Iteration", yaxis_title="TSTT (veh·seconds)",
+        xaxis_title="Iteration", yaxis_title="TSTT (veh&middot;seconds)",
         template="plotly_white",
         xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
@@ -380,13 +417,24 @@ def generate_braess_report(
     pct = delta / tstt_without[-1] * 100 if tstt_without[-1] > 0 else 0
     gap_w = result_with.iteration_log[-1].relative_gap
     gap_wo = result_without.iteration_log[-1].relative_gap
-    descriptions.append(f"""<h2>TSTT Convergence</h2>
-    <p>Red = network WITH shortcut, blue = WITHOUT.
-    TSTT with shortcut = <b>{tstt_with[-1]:,.0f}</b> veh·s (gap={gap_w:.6f}),
-    without = <b>{tstt_without[-1]:,.0f}</b> veh·s (gap={gap_wo:.6f}).
-    Δ = <b>{delta:+,.0f}</b> ({pct:+.1f}%).
-    {"✅ <b>Braess paradox confirmed</b>: adding the shortcut <i>increases</i> total travel time."
-     if delta > 0 else "⚠️ Paradox not observed at this demand level."}</p>""")
+    tstt_w_fmt = f"{tstt_with[-1]:,.0f}"
+    tstt_wo_fmt = f"{tstt_without[-1]:,.0f}"
+    delta_fmt = f"{delta:+,.0f}"
+    paradox_msg = (
+        " <b>Braess paradox confirmed</b>: adding the shortcut <i>increases</i> total travel time."
+        if delta > 0 else " Paradox not observed at this demand level."
+    )
+    gap_w_fmt = f"{gap_w:.6f}"
+    gap_wo_fmt = f"{gap_wo:.6f}"
+    pct_fmt = f"{pct:+.1f}"
+    descriptions.append(
+        "<h2>TSTT Convergence</h2>"
+        "<p>Red = network WITH shortcut, blue = WITHOUT. "
+        f"TSTT with shortcut = <b>{tstt_w_fmt}</b> veh&middot;s (gap={gap_w_fmt}), "
+        f"without = <b>{tstt_wo_fmt}</b> veh&middot;s (gap={gap_wo_fmt}). "
+        f"&Delta; = <b>{delta_fmt}</b> ({pct_fmt}%). "
+        f"{paradox_msg}</p>"
+    )
 
     # --- 3. Convergence (gap) ---
     gap_with = [r.relative_gap for r in result_with.iteration_log]
@@ -413,15 +461,16 @@ def generate_braess_report(
     <p>Relative gap measures proximity to Wardrop user equilibrium (gap = 0 means
     all used paths have equal cost). Log scale. The symmetric "without" scenario
     converges faster; the asymmetric 3-path "with" scenario is slower but
-    steadily decreasing under MSA (α = 1/n).</p>""")
+    steadily decreasing under MSA (&alpha; = 1/n).</p>""")
 
     # Write report
+    demand_fmt = f"{demand:,.0f}"
     _write_combined_report(
         title="Braess Paradox Validation",
         intro=f"""<p>Structural validation of the density-based traffic assignment using the
-        <b>Braess paradox</b> — a 4-node diamond network where adding a shortcut link
+        <b>Braess paradox</b> &mdash; a 4-node diamond network where adding a shortcut link
         increases total system travel time under user equilibrium.</p>
-        <p>Demand: <b>{demand:,.0f}</b> vehicles.
+        <p>Demand: <b>{demand_fmt}</b> vehicles.
         <b>{max_iter}</b> MSA iterations per scenario.
         VDF: bi-parabolic speed-density (Fournier et al.), k<sub>c</sub> = k<sub>j</sub>/3.</p>""",
         figures=figs,
