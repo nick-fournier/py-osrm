@@ -247,24 +247,227 @@ def vdf_multi_class(
     return _save_or_show(fig, path)
 
 
-def vdf_theory(output_dir: str = "docs/plots") -> list[Path]:
-    """Generate all VDF theory validation plots.
+def vdf_theory(output_dir: str = "docs/plots") -> Path:
+    """Generate a single combined VDF theory validation report.
 
-    Returns list of saved HTML file paths.
+    Returns path to the saved HTML file.
     """
     d = Path(output_dir)
-    paths = [
-        vdf_speed_density(path=str(d / "vdf_speed_density.html")),
-        vdf_flow_density(path=str(d / "vdf_flow_density.html")),
-        vdf_inverse_accuracy(path=str(d / "vdf_inverse_accuracy.html")),
-        vdf_multi_class(path=str(d / "vdf_multi_class.html")),
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "vdf_theory_report.html"
+
+    vdf = BiParabolicVDF()
+    v_f, k_j = 60.0, 150.0
+    k_c = vdf.kc_ratio * k_j
+
+    figs = [
+        vdf_speed_density(v_f=v_f, k_j=k_j, vdf=vdf),
+        vdf_flow_density(v_f=v_f, k_j=k_j, vdf=vdf),
+        vdf_inverse_accuracy(v_f=v_f, k_j=k_j, vdf=vdf),
+        vdf_multi_class(vdf=vdf),
     ]
-    return [Path(str(d / f)) for f in [
-        "vdf_speed_density.html",
-        "vdf_flow_density.html",
-        "vdf_inverse_accuracy.html",
-        "vdf_multi_class.html",
-    ]]
+
+    descriptions = [
+        f"""<h2>1. Speed–Density Relationship</h2>
+        <p>The bi-parabolic model (Fournier) defines speed as a function of density using
+        two branches joined at critical density k<sub>c</sub> = k<sub>j</sub>/3 = {k_c:.0f} veh/km.
+        The <b>uncongested branch</b> (blue) is linear in v-k space:
+        v(k) = q<sub>c</sub>(2k<sub>c</sub> − k) / k<sub>c</sub>². The <b>congested branch</b> (red) is
+        parabolic in q-k space, yielding a nonlinear speed drop. At k = 0, v = v<sub>f</sub> = {v_f:.0f} km/h.
+        At k = k<sub>c</sub>, v = v<sub>f</sub>/2 = {v_f/2:.0f} km/h. The junction is C¹-continuous
+        (matching value and slope). A floor of {vdf.min_speed_kmh} km/h prevents zero speeds.</p>""",
+
+        f"""<h2>2. Flow–Density Fundamental Diagram (MFD)</h2>
+        <p>This IS the macroscopic fundamental diagram. Both branches are downward-opening
+        parabolas in q-k space with vertex at (k<sub>c</sub>, q<sub>c</sub>). Capacity flow
+        q<sub>c</sub> = v<sub>f</sub> · k<sub>c</sub> / 2 = {v_f * k_c / 2:.0f} veh/hr occurs at critical
+        density. The uncongested branch (left of k<sub>c</sub>) is the operating regime for
+        equilibrium assignment — the congested branch represents breakdown conditions
+        where adding vehicles reduces throughput.</p>""",
+
+        """<h2>3. Inverse Round-Trip Accuracy</h2>
+        <p>A key advantage of this VDF over BPR: the flow-to-density inversion has a
+        <b>closed-form solution</b> via the quadratic formula — no Newton solver needed.
+        Left panel: q<sub>in</sub> vs q<sub>out</sub> after q → k(q) → q(k) round-trip
+        (should fall exactly on the diagonal). Right panel: absolute error, which should
+        be near machine epsilon (~10<sup>-10</sup>). This confirms the vectorized NumPy
+        implementation is numerically exact.</p>""",
+
+        """<h2>4. Speed–Density by Road Class</h2>
+        <p>The bi-parabolic model is "parameter-light" — only v<sub>f</sub> (free-flow speed)
+        and k<sub>j</sub> (jam density) are needed per link. k<sub>c</sub> = k<sub>j</sub>/3 is derived,
+        not calibrated. This overlay shows how different road classes produce different
+        curves from just those two inputs. Motorways have higher v<sub>f</sub> and k<sub>j</sub>
+        (more lanes × higher jam density per lane), while residential streets have lower
+        values of both. The shape is consistent across classes — only the scale changes.</p>""",
+    ]
+
+    _write_combined_report(
+        title="Bi-Parabolic VDF Theory Validation",
+        intro="""<p>These plots validate the bi-parabolic flow-density Volume Delay Function
+        (Fournier) implemented in <code>osrm.assignment.vdf.BiParabolicVDF</code>.
+        The model uses two parabolic branches in q-k space, requiring only free-flow speed
+        (v<sub>f</sub>) and jam density (k<sub>j</sub>) as inputs. All plots use default parameters:
+        v<sub>f</sub> = 60 km/h, k<sub>j</sub> = 150 veh/km, k<sub>c</sub> = k<sub>j</sub>/3 = 50 veh/km.</p>""",
+        figures=figs,
+        descriptions=descriptions,
+        path=path,
+    )
+    return path
+
+
+def _write_combined_report(
+    title: str,
+    intro: str,
+    figures: list[go.Figure],
+    descriptions: list[str],
+    path: Path,
+) -> None:
+    """Write multiple Plotly figures into a single HTML report with descriptions."""
+    fig_htmls = []
+    for i, fig in enumerate(figures):
+        fig.update_layout(margin=dict(l=60, r=40, t=50, b=50))
+        fig_htmls.append(
+            fig.to_html(full_html=False, include_plotlyjs=False, div_id=f"fig-{i}")
+        )
+
+    sections = []
+    for desc, fig_html in zip(descriptions, fig_htmls):
+        sections.append(f"""
+        <section style="margin-bottom: 40px;">
+            {desc}
+            <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px; margin-top: 12px;">
+                {fig_html}
+            </div>
+        </section>
+        """)
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{title}</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 20px 40px;
+            color: #333;
+            line-height: 1.6;
+        }}
+        h1 {{
+            border-bottom: 2px solid #2196F3;
+            padding-bottom: 10px;
+            color: #1565C0;
+        }}
+        h2 {{
+            color: #1976D2;
+            margin-top: 0;
+        }}
+        p {{
+            font-size: 15px;
+            max-width: 900px;
+        }}
+        code {{
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 14px;
+        }}
+        section {{
+            border-left: 3px solid #e3f2fd;
+            padding-left: 20px;
+        }}
+        .meta {{
+            color: #777;
+            font-size: 13px;
+        }}
+    </style>
+</head>
+<body>
+    <h1>{title}</h1>
+    <div class="meta">Generated by py-osrm traffic assignment module</div>
+    {intro}
+    {"".join(sections)}
+</body>
+</html>"""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html)
+
+
+def convergence_report(
+    iteration_log: dict,
+    network_state=None,
+    vdf: BiParabolicVDF | None = None,
+    path: str = "docs/plots/assignment_report.html",
+) -> Path:
+    """Generate a combined convergence + network diagnostics report.
+
+    Parameters
+    ----------
+    iteration_log : dict
+        Keys: "iteration", "relative_gap", "tstt", optionally "max_flow_delta".
+    network_state : NetworkState, optional
+        If provided, adds network diagnostic plots.
+    vdf : BiParabolicVDF, optional
+    path : str
+        Output HTML path.
+    """
+    vdf = vdf or BiParabolicVDF()
+    figs = []
+    descriptions = []
+
+    # Convergence plot
+    figs.append(convergence(iteration_log))
+    descriptions.append("""<h2>1. Convergence Diagnostics</h2>
+    <p>Top: <b>Relative gap</b> — the standard convergence measure for equilibrium
+    assignment. Should decrease monotonically toward zero. The dotted green line at
+    0.01 is the conventional "converged" threshold. Middle: <b>Total system travel
+    time (TSTT)</b> — should stabilize as equilibrium is reached. If TSTT oscillates,
+    the step size (MSA weight) may be too aggressive.</p>""")
+
+    if network_state is not None:
+        q_c = vdf.capacity_flow(network_state.freeflow_kmh, network_state.jam_density)
+
+        figs.append(flow_vs_capacity(network_state.flow_vph, q_c))
+        descriptions.append("""<h2>2. Flow vs Capacity</h2>
+        <p>Each point is one directed link. Points above the diagonal (V/C > 1.0) are
+        <b>oversaturated</b> — assigned flow exceeds theoretical capacity. Blue = uncongested
+        (V/C < 0.8), orange = near-capacity (0.8–1.0), red = oversaturated. A healthy
+        assignment should have most points below the diagonal, with a few near-capacity
+        links on major corridors.</p>""")
+
+        figs.append(speed_reduction(network_state.speed_kmh, network_state.freeflow_kmh))
+        descriptions.append("""<h2>3. Speed Reduction Distribution</h2>
+        <p>Histogram of v/v<sub>f</sub> ratio across all links. At v/v<sub>f</sub> = 1.0,
+        links are at free-flow speed (no congestion). The dashed line at 0.5 marks
+        v<sub>c</sub> — the critical speed at capacity. A well-loaded network should show
+        a peak near 1.0 (most links uncongested) with a tail toward lower ratios on
+        congested corridors.</p>""")
+
+        figs.append(observed_vs_mfd(
+            network_state.flow_vph, network_state.density_vpkm,
+            vdf=vdf,
+        ))
+        descriptions.append("""<h2>4. Assigned Points vs Theoretical MFD</h2>
+        <p>Red scatter points are (density, flow) pairs from the assignment overlaid
+        on the theoretical bi-parabolic fundamental diagram (blue curve). In a consistent
+        assignment, all points should fall on or near the uncongested branch of the MFD.
+        Points above the curve indicate inconsistency between the VDF and the assigned state
+        (possible numerical issue). Points to the right of k<sub>c</sub> indicate links
+        operating in the congested regime.</p>""")
+
+    _write_combined_report(
+        title="Traffic Assignment Report",
+        intro="<p>Post-assignment diagnostics from py-osrm traffic assignment.</p>",
+        figures=figs,
+        descriptions=descriptions,
+        path=Path(path),
+    )
+    return Path(path)
 
 
 # ---------------------------------------------------------------------------
