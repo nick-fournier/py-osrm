@@ -5,7 +5,7 @@ benchmark (24 nodes, 76 links, 528 OD pairs).
 
 The TNTP demand (360,600 total) represents a BPR-calibrated hourly volume
 that exceeds the physical capacity of realistic 2–3 lane roads.  We scale
-demand to 10% (36,060 vph) which is representative of an actual peak hour
+demand to 15% (54,090 vph) which is representative of an actual peak hour
 for a ~200k population city.
 
 Structural (VDF-independent) checks:
@@ -87,14 +87,14 @@ def _run_sf_assignment(
     meta: dict,
     max_iter: int = 30,
     method: str = "fw",
-    demand_scale: float = 0.10,
+    demand_scale: float = 0.15,
 ):
     """Run assignment on Sioux Falls network.
 
     Parameters
     ----------
     demand_scale : float
-        Fraction of TNTP demand to use.  Default 0.10 (36,060 vph)
+        Fraction of TNTP demand to use.  Default 0.15 (54,090 vph)
         which is realistic for a ~200k city peak hour on 2–3 lane roads.
     """
     meta_scaled = dict(meta)
@@ -228,6 +228,10 @@ def generate_sioux_falls_report(
 
     tmp_path = Path(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
+
+    # Primary demand level for detailed analysis.  15% of TNTP gives
+    # realistic peak-hour congestion on 2–3 lane roads (~54k vph).
+    detail_scale = 0.15
 
     base, meta = _prepare_sf_network(tmp_path)
     total_demand = float(meta["od_matrix"].sum())
@@ -421,14 +425,14 @@ def generate_sioux_falls_report(
         "physical capacity, then explodes as links jam.</p>"
     )
 
-    # --- 2. Detailed 10% run: FW vs MSA convergence ---
+    # --- 2. Detailed run: FW vs MSA convergence ---
     base_fw = _copy_clean_osrm(base, tmp_path / "fw_detail")
     result_fw = _run_sf_assignment(
-        base_fw, meta, max_iter=max_iter, method="fw", demand_scale=0.10,
+        base_fw, meta, max_iter=max_iter, method="fw", demand_scale=detail_scale,
     )
     base_msa, meta_msa = _prepare_sf_network(tmp_path / "msa")
     result_msa = _run_sf_assignment(
-        base_msa, meta_msa, max_iter=max_iter, method="msa", demand_scale=0.10,
+        base_msa, meta_msa, max_iter=max_iter, method="msa", demand_scale=detail_scale,
     )
 
     iters_fw = [r.iteration for r in result_fw.iteration_log]
@@ -448,7 +452,7 @@ def generate_sioux_falls_report(
         line=dict(color="#1565C0", width=1.5, dash="dash"), marker=dict(size=3),
     ))
     fig_gap.update_layout(
-        title="Wardrop Gap: FW vs MSA (10% Demand)",
+        title=f"Wardrop Gap: FW vs MSA ({detail_scale:.0%} Demand)",
         xaxis_title="Iteration", yaxis_title="Relative Gap",
         yaxis_type="log",
         template="plotly_white",
@@ -459,13 +463,13 @@ def generate_sioux_falls_report(
     fw_final = result_fw.iteration_log[-1]
     msa_final = result_msa.iteration_log[-1]
     descriptions.append(
-        "<h2>Convergence at 10% Demand</h2>"
+        f"<h2>Convergence at {detail_scale:.0%} Demand</h2>"
         f"<p>FW gap: {fw_final.relative_gap:.4f}, "
         f"MSA gap: {msa_final.relative_gap:.4f} ({max_iter} iterations). "
-        f"Demand: {total_demand * 0.10:,.0f} vph (10% of TNTP).</p>"
+        f"Demand: {total_demand * detail_scale:,.0f} vph ({detail_scale:.0%} of TNTP).</p>"
     )
 
-    # --- 3. Link state table (Braess-style) at 10% demand ---
+    # --- 3. Link state table (Braess-style) at detail_scale demand ---
     state = result_fw.network_state
     ref = meta["ref_flows"]
     link_attrs_map = meta["link_attrs"]
@@ -545,8 +549,8 @@ def generate_sioux_falls_report(
 
     figs.append(None)  # placeholder — table goes in description
     descriptions.append(
-        "<h2>Link State at 10% Demand</h2>"
-        f"<p>36,060 vph ({state.n_edges} links). "
+        f"<h2>Link State at {detail_scale:.0%} Demand</h2>"
+        f"<p>{total_demand * detail_scale:,.0f} vph ({state.n_edges} links). "
         f"Mean V/C: <b>{np.mean(all_vc):.2f}</b>, "
         f"max V/C: {max(all_vc):.2f}. "
         f"Mean speed: <b>{np.mean(all_speeds):.0f} km/h</b>. "
@@ -561,9 +565,8 @@ def generate_sioux_falls_report(
 
     # --- 4. Flow and travel time correlation vs BPR reference ---
     # BPR reference is at 100% demand (TNTP equilibrium). Our model runs at
-    # 10%.  Flow magnitudes differ, but relative loading patterns (which links
-    # carry more traffic) should correlate.  Travel time comparison shows how
-    # MFD congestion compares to BPR at the same physical demand level.
+    # detail_scale.  Flow magnitudes differ, but relative loading patterns
+    # (which links carry more traffic) should correlate.
     from scipy.stats import spearmanr
 
     mfd_flows = []
@@ -605,9 +608,9 @@ def generate_sioux_falls_report(
     else:
         flow_rho = 0.0
     fig_flow_corr.update_layout(
-        title=f"Link Flow: MFD (10%) vs BPR (100%) — ρ={flow_rho:.3f}",
+        title=f"Link Flow: MFD ({detail_scale:.0%}) vs BPR (100%) — ρ={flow_rho:.3f}",
         xaxis_title="BPR Equilibrium Flow (vph, 100% demand)",
-        yaxis_title="MFD Flow (vph, 10% demand)",
+        yaxis_title=f"MFD Flow (vph, {detail_scale:.0%} demand)",
         template="plotly_white",
         xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
@@ -615,8 +618,8 @@ def generate_sioux_falls_report(
     descriptions.append(
         "<h2>Flow Correlation: MFD vs BPR</h2>"
         "<p>Scatter of per-link flow: our density-based MFD assignment "
-        f"(10% demand, {state.n_edges} links) vs published BPR equilibrium "
-        "(100% demand). Magnitudes differ by ~10&times; due to demand scaling, "
+        f"({detail_scale:.0%} demand, {state.n_edges} links) vs published BPR equilibrium "
+        "(100% demand). Magnitudes differ due to demand scaling, "
         "but the <b>rank correlation</b> (Spearman &rho;) measures whether "
         "the same links carry relatively more or less traffic under both models. "
         f"&rho; = <b>{flow_rho:.3f}</b> ({len(mfd_flows)} matched links).</p>"
@@ -648,7 +651,7 @@ def generate_sioux_falls_report(
     fig_tt_corr.update_layout(
         title=f"Link Travel Time: MFD vs BPR — ρ={tt_rho:.3f}",
         xaxis_title="BPR Equilibrium Travel Time (min)",
-        yaxis_title="MFD Travel Time (min, 10% demand)",
+        yaxis_title=f"MFD Travel Time (min, {detail_scale:.0%} demand)",
         template="plotly_white",
         xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
@@ -659,10 +662,10 @@ def generate_sioux_falls_report(
     )
     descriptions.append(
         "<h2>Travel Time Correlation: MFD vs BPR</h2>"
-        f"<p>Per-link travel time (minutes): MFD at 10% demand ({len(tt_mfd_f)} "
+        f"<p>Per-link travel time (minutes): MFD at {detail_scale:.0%} demand ({len(tt_mfd_f)} "
         "links) vs BPR at 100% demand equilibrium. "
         "Dashed line = y&thinsp;=&thinsp;x. "
-        "MFD at 10% demand is near freeflow, so travel times cluster near "
+        f"MFD at {detail_scale:.0%} demand is near freeflow, so travel times cluster near "
         "freeflow values. BPR at 100% shows heavy congestion on some links "
         "(cost &gt;&gt; freeflow time). "
         f"Spearman &rho; = <b>{tt_rho:.3f}</b>.{gridlock_note}</p>"
