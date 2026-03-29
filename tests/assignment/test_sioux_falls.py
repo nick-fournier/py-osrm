@@ -162,6 +162,9 @@ def generate_sioux_falls_report(
 ) -> Path:
     """Run Sioux Falls validation and generate HTML report.
 
+    Includes demand scaling sweep showing how the network responds as
+    demand increases from 5% to 100% of TNTP values.
+
     Parameters
     ----------
     tmp_path : str or Path
@@ -182,11 +185,7 @@ def generate_sioux_falls_report(
     tmp_path.mkdir(parents=True, exist_ok=True)
 
     base, meta = _prepare_sf_network(tmp_path)
-    result_fw = _run_sf_assignment(base, meta, max_iter=max_iter, method="fw")
-
-    # Also run MSA for comparison
-    base_msa, meta_msa = _prepare_sf_network(tmp_path / "msa")
-    result_msa = _run_sf_assignment(base_msa, meta_msa, max_iter=max_iter, method="msa")
+    total_demand = float(meta["od_matrix"].sum())
 
     figs = []
     descriptions = []
@@ -195,22 +194,23 @@ def generate_sioux_falls_report(
     nodes = meta["nodes"]
     fig_topo = go.Figure()
 
-    # Draw links
     link_attrs = meta["link_attrs"]
     for (u, v), attrs in link_attrs.items():
         x0, y0 = nodes[u]
         x1, y1 = nodes[v]
         lanes = attrs["n_lanes"]
-        color = "#2196F3" if lanes >= 3 else "#FF9800" if lanes >= 2 else "#9E9E9E"
+        color = "#D32F2F" if lanes >= 3 else "#2196F3"
         fig_topo.add_trace(go.Scatter(
             x=[x0, x1], y=[y0, y1], mode="lines",
-            line=dict(color=color, width=max(1, lanes * 0.7)),
+            line=dict(color=color, width=max(1, lanes * 1.2)),
             hoverinfo="text",
-            hovertext=f"{u}&rarr;{v}: {attrs['n_lanes']}L, {attrs['ff_speed_kmh']:.0f}km/h, cap={attrs['capacity']:.0f}",
+            hovertext=(
+                f"{u}&rarr;{v}: {attrs['n_lanes']}L, "
+                f"{attrs['ff_speed_kmh']:.0f} km/h"
+            ),
             showlegend=False,
         ))
 
-    # Draw nodes
     xs = [nodes[n][0] for n in sorted(nodes)]
     ys = [nodes[n][1] for n in sorted(nodes)]
     labels = [str(n) for n in sorted(nodes)]
@@ -232,16 +232,154 @@ def generate_sioux_falls_report(
         height=500,
     )
     figs.append(fig_topo)
+
+    n_i29 = sum(1 for _, a in link_attrs.items() if a["n_lanes"] >= 3)
+    n_art = sum(1 for _, a in link_attrs.items() if a["n_lanes"] == 2)
     descriptions.append(
         "<h2>Network Topology</h2>"
-        "<p>Sioux Falls benchmark: 24 nodes, 76 directed links, 528 OD pairs, "
-        "360,600 total demand. Link color by lane count: "
-        '<span style="color:#2196F3">blue</span> = 3+ lanes, '
-        '<span style="color:#FF9800">orange</span> = 2 lanes, '
-        '<span style="color:#9E9E9E">grey</span> = 1 lane.</p>'
+        "<p>Sioux Falls benchmark: 24 nodes, 76 directed links, 528 OD pairs. "
+        "Road classification from actual city geography: "
+        f'<span style="color:#D32F2F"><b>{n_i29} interstate links</b></span> '
+        f"(I-29/I-229, 3 or 2 lanes, 105 km/h) and "
+        f'<span style="color:#2196F3"><b>{n_art} arterial links</b></span> '
+        f"(2 lanes, 30&ndash;70 km/h).</p>"
+        f"<p>TNTP total demand: {total_demand:,.0f}. "
+        "Original paper values &times; 100 = 0.1 &times; daily &asymp; hourly. "
+        "TNTP &lsquo;capacity&rsquo; column is a BPR math artifact "
+        "(back-computed from polynomial coefficients), <b>not</b> physical "
+        "road capacity.</p>"
     )
 
-    # --- 1. Gap convergence: FW vs MSA ---
+    # --- 1. Demand scaling sweep ---
+    scales = [0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50, 0.75, 1.00]
+    sweep_demand = []
+    sweep_gap = []
+    sweep_oversat = []
+    sweep_mean_speed = []
+    sweep_tstt = []
+    sweep_corr = []
+
+    for scale in scales:
+        result = _run_sf_assignment(
+            base, meta, max_iter=max_iter, method="fw", demand_scale=scale,
+        )
+        state = result.network_state
+        last = result.iteration_log[-1]
+        corr, _ = _link_flow_correlation(result, meta)
+        speeds = state.speed_kmh[:state.n_edges]
+        ff = state.freeflow_kmh[:state.n_edges]
+
+        sweep_demand.append(total_demand * scale)
+        sweep_gap.append(last.relative_gap)
+        sweep_oversat.append(last.n_oversaturated)
+        sweep_mean_speed.append(float(np.mean(speeds / ff)))
+        sweep_tstt.append(last.tstt)
+        sweep_corr.append(corr)
+
+    demand_labels = [f"{s:.0%}" for s in scales]
+
+    # 1a: Oversaturated links vs demand
+    fig_oversat = go.Figure()
+    fig_oversat.add_trace(go.Bar(
+        x=demand_labels, y=sweep_oversat,
+        marker_color=[
+            "#4CAF50" if o < 5 else "#FF9800" if o < 40 else "#D32F2F"
+            for o in sweep_oversat
+        ],
+        hovertext=[
+            f"{d:,.0f} vph &rarr; {o}/76 links oversat"
+            for d, o in zip(sweep_demand, sweep_oversat)
+        ],
+        hoverinfo="text",
+    ))
+    fig_oversat.update_layout(
+        title="Oversaturated Links vs Demand Scale",
+        xaxis_title="Demand Scale (% of TNTP)",
+        yaxis_title="Links at Jam Density",
+        template="plotly_white",
+        yaxis=dict(range=[0, 80], fixedrange=True),
+        xaxis=dict(fixedrange=True),
+        showlegend=False,
+    )
+    figs.append(fig_oversat)
+    descriptions.append(
+        "<h2>Demand Scaling: Oversaturation</h2>"
+        "<p>Number of links reaching jam density as demand increases. "
+        "With realistic 2&ndash;3 lane roads, the network handles up to "
+        "~10% of TNTP demand before widespread congestion. At 100%, "
+        "nearly all links gridlock &mdash; the TNTP benchmark was designed "
+        "for BPR&rsquo;s infinite-capacity math, not physical roads.</p>"
+    )
+
+    # 1b: Mean speed ratio vs demand
+    fig_speed = go.Figure()
+    fig_speed.add_trace(go.Scatter(
+        x=[total_demand * s for s in scales],
+        y=[r * 100 for r in sweep_mean_speed],
+        mode="lines+markers",
+        line=dict(color="#1565C0", width=2.5),
+        marker=dict(size=8),
+        hovertext=[
+            f"{s:.0%}: {r*100:.0f}% of free-flow"
+            for s, r in zip(scales, sweep_mean_speed)
+        ],
+        hoverinfo="text",
+    ))
+    fig_speed.update_layout(
+        title="Network Mean Speed vs Demand",
+        xaxis_title="Total Demand (vph)",
+        yaxis_title="Mean Speed (% of Free-Flow)",
+        template="plotly_white",
+        yaxis=dict(range=[0, 105], fixedrange=True),
+        xaxis=dict(fixedrange=True),
+    )
+    figs.append(fig_speed)
+    descriptions.append(
+        "<h2>Demand Scaling: Speed</h2>"
+        "<p>Network-average speed as fraction of free-flow. The MFD-based VDF "
+        "imposes a physical capacity ceiling: once demand exceeds it, speed "
+        "drops to the minimum (jam). Unlike BPR which degrades gracefully "
+        "at V/C &gt; 1, the bi-parabolic model correctly models gridlock.</p>"
+    )
+
+    # 1c: TSTT vs demand
+    fig_tstt_scale = go.Figure()
+    fig_tstt_scale.add_trace(go.Scatter(
+        x=[total_demand * s for s in scales],
+        y=sweep_tstt,
+        mode="lines+markers",
+        line=dict(color="#D32F2F", width=2.5),
+        marker=dict(size=8),
+        hovertext=[
+            f"{s:.0%}: TSTT={t:,.0f}"
+            for s, t in zip(scales, sweep_tstt)
+        ],
+        hoverinfo="text",
+    ))
+    fig_tstt_scale.update_layout(
+        title="Total System Travel Time vs Demand",
+        xaxis_title="Total Demand (vph)",
+        yaxis_title="TSTT (veh-seconds)",
+        yaxis_type="log",
+        template="plotly_white",
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+    )
+    figs.append(fig_tstt_scale)
+    descriptions.append(
+        "<h2>Demand Scaling: TSTT</h2>"
+        "<p>Total system travel time rises exponentially as demand approaches "
+        "physical capacity, then explodes as links jam.</p>"
+    )
+
+    # --- 2. Detailed 10% run: FW vs MSA convergence ---
+    result_fw = _run_sf_assignment(
+        base, meta, max_iter=max_iter, method="fw", demand_scale=0.10,
+    )
+    base_msa, meta_msa = _prepare_sf_network(tmp_path / "msa")
+    result_msa = _run_sf_assignment(
+        base_msa, meta_msa, max_iter=max_iter, method="msa", demand_scale=0.10,
+    )
+
     iters_fw = [r.iteration for r in result_fw.iteration_log]
     gap_fw = [r.relative_gap for r in result_fw.iteration_log]
     iters_msa = [r.iteration for r in result_msa.iteration_log]
@@ -259,7 +397,7 @@ def generate_sioux_falls_report(
         line=dict(color="#1565C0", width=1.5, dash="dash"), marker=dict(size=3),
     ))
     fig_gap.update_layout(
-        title="Wardrop Relative Gap: FW vs MSA",
+        title="Wardrop Gap: FW vs MSA (10% Demand)",
         xaxis_title="Iteration", yaxis_title="Relative Gap",
         yaxis_type="log",
         template="plotly_white",
@@ -270,44 +408,15 @@ def generate_sioux_falls_report(
     fw_final = result_fw.iteration_log[-1]
     msa_final = result_msa.iteration_log[-1]
     descriptions.append(
-        "<h2>Convergence</h2>"
-        f"<p>FW final gap: {fw_final.relative_gap:.6f} ({max_iter} iterations). "
-        f"MSA final gap: {msa_final.relative_gap:.6f}. "
-        "Frank-Wolfe uses Beckmann line search for optimal step size, "
-        "converging faster and more smoothly than MSA.</p>"
-    )
-
-    # --- 2. FW step sizes ---
-    step_fw = [r.step_size for r in result_fw.iteration_log]
-    fig_step = go.Figure()
-    fig_step.add_trace(go.Scatter(
-        x=iters_fw, y=step_fw, mode="lines+markers",
-        name="FW step size", line=dict(color="#D32F2F", width=2),
-        marker=dict(size=4),
-    ))
-    msa_steps = [1.0 / n for n in range(1, max_iter + 1)]
-    fig_step.add_trace(go.Scatter(
-        x=list(range(1, max_iter + 1)), y=msa_steps, mode="lines",
-        name="MSA (1/n)", line=dict(color="#999", width=1, dash="dot"),
-    ))
-    fig_step.update_layout(
-        title="FW Step Size per Iteration",
-        xaxis_title="Iteration", yaxis_title="Step Size",
-        template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True, range=[0, 1.05]),
-    )
-    figs.append(fig_step)
-    descriptions.append(
-        "<h2>Step Size</h2>"
-        "<p>FW optimal step size (solid red) vs MSA fixed schedule (dotted grey). "
-        "FW adapts to the objective landscape, taking larger steps early and "
-        "smaller steps as equilibrium is approached.</p>"
+        "<h2>Convergence at 10% Demand</h2>"
+        f"<p>FW gap: {fw_final.relative_gap:.4f}, "
+        f"MSA gap: {msa_final.relative_gap:.4f} ({max_iter} iterations). "
+        f"Demand: {total_demand * 0.10:,.0f} vph (10% of TNTP).</p>"
     )
 
     # --- 3. Flow correlation with BPR reference ---
     corr_fw, n_matched = _link_flow_correlation(result_fw, meta)
 
-    # Build scatter data
     state = result_fw.network_state
     ref = meta["ref_flows"]
     assigned_flows = []
@@ -327,7 +436,6 @@ def generate_sioux_falls_report(
         hovertext=link_labels, hoverinfo="text+x+y",
         name="Links",
     ))
-    # 1:1 reference line
     max_flow = max(max(bpr_flows, default=1), max(assigned_flows, default=1))
     fig_corr.add_trace(go.Scatter(
         x=[0, max_flow], y=[0, max_flow], mode="lines",
@@ -335,59 +443,64 @@ def generate_sioux_falls_report(
         name="1:1 line", showlegend=True,
     ))
     fig_corr.update_layout(
-        title=f"Link Flow: Density-Based vs BPR Reference (r={corr_fw:.3f})",
+        title=f"Link Flow: MFD vs BPR Reference (Spearman r={corr_fw:.3f})",
         xaxis_title="BPR Reference Flow (vph)",
-        yaxis_title="Density-Based Assigned Flow (vph)",
+        yaxis_title="MFD Assigned Flow (vph)",
         template="plotly_white",
         xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
     figs.append(fig_corr)
     descriptions.append(
-        "<h2>Flow Correlation with BPR</h2>"
+        "<h2>Flow Correlation (10% Demand)</h2>"
         f"<p>Spearman rank correlation: <b>r = {corr_fw:.3f}</b> "
-        f"({n_matched} links matched). "
-        "The density-based bi-parabolic VDF produces a different equilibrium "
-        "than BPR (different functional form), but the rank ordering of link "
-        "flows should be similar since both respond to the same demand pattern. "
-        "Points near the 1:1 line indicate similar absolute flows; deviations "
-        "reflect the VDF difference.</p>"
+        f"({n_matched} links). "
+        "MFD flows are at 10% of TNTP demand while BPR reference is at 100%, "
+        "so magnitudes differ by ~10&times;. The rank ordering tests whether "
+        "both VDFs load the same links heavily.</p>"
     )
 
-    # --- 4. TSTT convergence ---
-    tstt_fw = [r.tstt for r in result_fw.iteration_log]
-    tstt_msa = [r.tstt for r in result_msa.iteration_log]
-    fig_tstt = go.Figure()
-    fig_tstt.add_trace(go.Scatter(
-        x=iters_fw, y=tstt_fw, mode="lines+markers",
-        name="Frank-Wolfe", line=dict(color="#D32F2F", width=2),
-        marker=dict(size=4),
+    # --- 4. Demand scaling correlation trend ---
+    fig_corr_trend = go.Figure()
+    fig_corr_trend.add_trace(go.Scatter(
+        x=[total_demand * s for s in scales],
+        y=sweep_corr,
+        mode="lines+markers",
+        line=dict(color="#7B1FA2", width=2.5),
+        marker=dict(size=8),
+        hovertext=[
+            f"{s:.0%}: r={c:.3f}" for s, c in zip(scales, sweep_corr)
+        ],
+        hoverinfo="text",
     ))
-    fig_tstt.add_trace(go.Scatter(
-        x=iters_msa, y=tstt_msa, mode="lines+markers",
-        name="MSA", line=dict(color="#1565C0", width=1.5, dash="dash"),
-        marker=dict(size=3),
-    ))
-    fig_tstt.update_layout(
-        title="Total System Travel Time (TSTT)",
-        xaxis_title="Iteration", yaxis_title="TSTT (veh-seconds)",
+    fig_corr_trend.update_layout(
+        title="BPR Flow Correlation vs Demand Scale",
+        xaxis_title="Total Demand (vph)",
+        yaxis_title="Spearman r",
         template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+        yaxis=dict(range=[-0.2, 1.0], fixedrange=True),
+        xaxis=dict(fixedrange=True),
     )
-    figs.append(fig_tstt)
+    figs.append(fig_corr_trend)
     descriptions.append(
-        "<h2>TSTT Convergence</h2>"
-        f"<p>FW final TSTT: {tstt_fw[-1]:,.0f} veh-s. "
-        f"MSA final TSTT: {tstt_msa[-1]:,.0f} veh-s.</p>"
+        "<h2>Correlation vs Demand</h2>"
+        "<p>Spearman rank correlation with BPR reference at each demand level. "
+        "Correlation is moderate at low demand (similar routing), then degrades "
+        "as MFD gridlock diverges from BPR&rsquo;s graceful degradation.</p>"
     )
 
     # Write report
     _write_combined_report(
         title="Sioux Falls Validation",
         intro=(
-            "<p>Validation of the density-based traffic assignment on the canonical "
-            "<b>Sioux Falls</b> benchmark network (24 nodes, 76 links, 528 OD pairs, "
-            "360,600 total demand). Methods compared: Frank-Wolfe (Beckmann line search) "
-            "and MSA. VDF: bi-parabolic speed-density (Fournier et al.).</p>"
+            "<p>Validation of density-based traffic assignment on the canonical "
+            "<b>Sioux Falls</b> benchmark (24 nodes, 76 links, 528 OD pairs). "
+            f"TNTP total demand: {total_demand:,.0f} (hourly). "
+            "Road classification from real Sioux Falls geography: "
+            "I-29 (3 lanes, 105 km/h), I-229 (2 lanes, 105 km/h), "
+            "arterials (2 lanes, 30&ndash;70 km/h). "
+            "VDF: bi-parabolic MFD (k<sub>j</sub>=200 veh/km/lane). "
+            "Key finding: TNTP demand exceeds physical road capacity by ~10&times;, "
+            "requiring demand scaling for non-gridlocked equilibrium.</p>"
         ),
         figures=figs,
         descriptions=descriptions,
