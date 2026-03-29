@@ -169,6 +169,7 @@ def generate_braess_report(
         title="Total System Travel Time (TSTT) per Iteration",
         xaxis_title="Iteration", yaxis_title="TSTT (veh·seconds)",
         template="plotly_white",
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
     figs.append(fig1)
 
@@ -200,63 +201,122 @@ def generate_braess_report(
         title="Relative Gap per Iteration",
         xaxis_title="Iteration", yaxis_title="Relative Gap",
         template="plotly_white",
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
     figs.append(fig2)
     descriptions.append("""<h2>2. Convergence</h2>
     <p>Relative gap measures distance from Wardrop user equilibrium. A gap of 0
     means all used paths have equal cost. Both scenarios should converge toward zero.</p>""")
 
-    # --- 3. Link Flow Comparison ---
-    fig3 = make_subplots(rows=1, cols=2,
-                         subplot_titles=["With Shortcut", "Without Shortcut"])
+    # --- 3. Link Flow Comparison (table) ---
+    def _flow_table(result_w, result_wo):
+        """Build an HTML table comparing link flows between scenarios."""
+        rows = []
+        # Collect all edge labels from both scenarios
+        for result, scenario in [(result_w, "With"), (result_wo, "Without")]:
+            state = result.network_state
+            for i in range(state.n_edges):
+                label = f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+                rows.append((label, scenario, state.flow_vph[i]))
 
-    for col, (result, label) in enumerate([
-        (result_with, "With"), (result_without, "Without")
-    ], 1):
-        state = result.network_state
-        labels = [f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
-                  for i in range(state.n_edges)]
-        fig3.add_trace(go.Bar(
-            x=labels, y=state.flow_vph,
-            marker_color="#F44336" if col == 1 else "#2196F3",
-            name=label,
-        ), row=1, col=col)
+        # Pivot into {link: {With: flow, Without: flow}}
+        from collections import OrderedDict
+        pivot: dict[str, dict[str, float]] = OrderedDict()
+        for label, scenario, flow in rows:
+            pivot.setdefault(label, {})[scenario] = flow
 
-    fig3.update_layout(
-        title="Link Flows at Equilibrium",
-        template="plotly_white", showlegend=False,
+        html = (
+            '<table style="border-collapse:collapse; width:100%; max-width:600px; '
+            'margin:12px auto; font-family:system-ui,sans-serif;">'
+            '<thead><tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:8px;">Link</th>'
+            '<th style="text-align:right;padding:8px;">With Shortcut (veh/hr)</th>'
+            '<th style="text-align:right;padding:8px;">Without Shortcut (veh/hr)</th>'
+            '</tr></thead><tbody>'
+        )
+        for link, vals in pivot.items():
+            fw = vals.get("With", 0)
+            fwo = vals.get("Without", 0)
+            html += (
+                f'<tr style="border-bottom:1px solid #e0e0e0;">'
+                f'<td style="padding:6px 8px;font-weight:600;">{link}</td>'
+                f'<td style="text-align:right;padding:6px 8px;">{fw:,.1f}</td>'
+                f'<td style="text-align:right;padding:6px 8px;">{fwo:,.1f}</td>'
+                f'</tr>'
+            )
+        html += '</tbody></table>'
+        return html
+
+    figs.append(None)
+    descriptions.append(
+        """<h2>3. Link Flows at Equilibrium</h2>
+        <p>Per-link flow at the final iteration. In the classic Braess network, the shortcut
+        causes traffic to concentrate on fewer links, overloading them.</p>"""
+        + _flow_table(result_with, result_without)
     )
-    fig3.update_yaxes(title_text="Flow (veh/hr)", row=1, col=1)
-    figs.append(fig3)
-    descriptions.append("""<h2>3. Link Flows at Equilibrium</h2>
-    <p>Bar charts showing per-link flow at the final iteration. In the classic Braess
-    network, the shortcut causes traffic to concentrate on fewer links, overloading them.
-    Compare the flow distribution between the two scenarios.</p>""")
 
-    # --- 4. Speed Reduction ---
-    fig4 = make_subplots(rows=1, cols=2,
-                         subplot_titles=["With Shortcut", "Without Shortcut"])
+    # --- 4. Speed Reduction (table) ---
+    def _speed_table(result_w, result_wo):
+        """Build an HTML table comparing speed ratios between scenarios."""
+        rows = []
+        for result, scenario in [(result_w, "With"), (result_wo, "Without")]:
+            state = result.network_state
+            ratio = state.speed_kmh / np.maximum(state.freeflow_kmh, 1.0)
+            for i in range(state.n_edges):
+                label = f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+                rows.append((label, scenario, ratio[i], state.speed_kmh[i], state.freeflow_kmh[i]))
 
-    for col, result in enumerate([result_with, result_without], 1):
-        state = result.network_state
-        labels = [f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
-                  for i in range(state.n_edges)]
-        ratio = state.speed_kmh / np.maximum(state.freeflow_kmh, 1.0)
-        fig4.add_trace(go.Bar(
-            x=labels, y=ratio,
-            marker_color=["#F44336" if r < 0.8 else "#FF9800" if r < 0.95 else "#4CAF50"
-                          for r in ratio],
-            showlegend=False,
-        ), row=1, col=col)
+        from collections import OrderedDict
+        pivot: dict[str, dict[str, tuple]] = OrderedDict()
+        for label, scenario, r, spd, ff in rows:
+            pivot.setdefault(label, {})[scenario] = (r, spd, ff)
 
-    fig4.update_layout(title="Speed Reduction (v / v_f)", template="plotly_white")
-    fig4.update_yaxes(title_text="v / v_f", range=[0, 1.1], row=1, col=1)
-    fig4.update_yaxes(range=[0, 1.1], row=1, col=2)
-    figs.append(fig4)
-    descriptions.append("""<h2>4. Speed Reduction by Link</h2>
-    <p>Ratio of equilibrium speed to free-flow speed per link. Green ≥ 0.95 (uncongested),
-    orange 0.8–0.95 (moderate), red < 0.8 (congested). With the shortcut, the congestion-sensitive
-    links should show more speed reduction due to concentrated traffic.</p>""")
+        html = (
+            '<table style="border-collapse:collapse; width:100%; max-width:700px; '
+            'margin:12px auto; font-family:system-ui,sans-serif;">'
+            '<thead><tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:8px;">Link</th>'
+            '<th style="text-align:left;padding:8px;">v<sub>f</sub> (km/h)</th>'
+            '<th style="text-align:right;padding:8px;">With Shortcut</th>'
+            '<th style="text-align:right;padding:8px;">Without Shortcut</th>'
+            '</tr></thead><tbody>'
+        )
+
+        def _color(r):
+            if r < 0.8:
+                return "#F44336"
+            elif r < 0.95:
+                return "#FF9800"
+            return "#4CAF50"
+
+        for link, vals in pivot.items():
+            rw, sw, ffw = vals.get("With", (1.0, 0, 0))
+            rwo, swo, ffwo = vals.get("Without", (1.0, 0, 0))
+            ff = ffw or ffwo
+            html += (
+                f'<tr style="border-bottom:1px solid #e0e0e0;">'
+                f'<td style="padding:6px 8px;font-weight:600;">{link}</td>'
+                f'<td style="padding:6px 8px;">{ff:.0f}</td>'
+                f'<td style="text-align:right;padding:6px 8px;">'
+                f'<span style="color:{_color(rw)};font-weight:600;">{rw:.2f}</span>'
+                f' ({sw:.1f} km/h)</td>'
+                f'<td style="text-align:right;padding:6px 8px;">'
+                f'<span style="color:{_color(rwo)};font-weight:600;">{rwo:.2f}</span>'
+                f' ({swo:.1f} km/h)</td>'
+                f'</tr>'
+            )
+        html += '</tbody></table>'
+        return html
+
+    figs.append(None)
+    descriptions.append(
+        """<h2>4. Speed Reduction by Link</h2>
+        <p>Ratio of equilibrium speed to free-flow speed (v/v<sub>f</sub>).
+        <span style="color:#4CAF50;font-weight:600;">Green</span> ≥ 0.95 (uncongested),
+        <span style="color:#FF9800;font-weight:600;">orange</span> 0.8–0.95 (moderate),
+        <span style="color:#F44336;font-weight:600;">red</span> &lt; 0.8 (congested).</p>"""
+        + _speed_table(result_with, result_without)
+    )
 
     # --- 0. Network topology diagram (prepend) ---
     node_pos = {1: (0, 0.5), 3: (0.5, 1), 4: (0.5, 0), 2: (1, 0.5)}
@@ -334,9 +394,10 @@ def generate_braess_report(
         xref, yref = f"xaxis{suffix}", f"yaxis{suffix}"
         topo_fig.update_layout(**{
             xref: dict(showgrid=False, zeroline=False, showticklabels=False,
-                       range=[-0.15, 1.15]),
+                       range=[-0.15, 1.15], fixedrange=True),
             yref: dict(showgrid=False, zeroline=False, showticklabels=False,
-                       range=[-0.15, 1.15], scaleanchor=f"x{suffix}" if suffix else "x"),
+                       range=[-0.15, 1.15], scaleanchor=f"x{suffix}" if suffix else "x",
+                       fixedrange=True),
         })
     topo_fig.update_layout(
         title="Network Topology",

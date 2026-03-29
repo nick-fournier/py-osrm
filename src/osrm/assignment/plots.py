@@ -332,19 +332,25 @@ def _write_combined_report(
     """Write multiple Plotly figures into a single HTML report with descriptions."""
     fig_htmls = []
     for i, fig in enumerate(figures):
-        fig.update_layout(margin=dict(l=60, r=40, t=50, b=50))
-        fig_htmls.append(
-            fig.to_html(full_html=False, include_plotlyjs=False, div_id=f"fig-{i}")
-        )
+        if fig is not None:
+            fig.update_layout(margin=dict(l=60, r=40, t=50, b=50))
+            fig_htmls.append(
+                fig.to_html(full_html=False, include_plotlyjs=False, div_id=f"fig-{i}")
+            )
+        else:
+            fig_htmls.append("")
 
     sections = []
     for desc, fig_html in zip(descriptions, fig_htmls):
-        sections.append(f"""
-        <section style="margin-bottom: 40px;">
-            {desc}
+        inner = ""
+        if fig_html:
+            inner = f"""
             <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px; margin-top: 12px;">
                 {fig_html}
-            </div>
+            </div>"""
+        sections.append(f"""
+        <section style="margin-bottom: 40px;">
+            {desc}{inner}
         </section>
         """)
 
