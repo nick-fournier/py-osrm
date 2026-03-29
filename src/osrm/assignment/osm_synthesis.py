@@ -279,10 +279,10 @@ def sioux_falls_network(
             highway = "motorway"
         else:
             n_lanes = 2
-            # Derive speed from distance and TNTP free-flow time
-            fft_hr = link.free_flow_time / 60.0
-            geo_speed = dist_km / fft_hr if fft_hr > 0 else 55.0
-            speed_kmh = min(max(geo_speed, 30.0), 70.0)
+            # TNTP lengths and FFTs are arbitrary (README: "Link lengths are
+            # set equal to free flow travel times").  Use a fixed arterial
+            # speed consistent with Sioux Falls urban arterials (40-45 mph).
+            speed_kmh = 65.0
             highway = "primary"
 
         # Compensate for OSRM car profile speed reduction

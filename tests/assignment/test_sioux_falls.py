@@ -262,7 +262,6 @@ def generate_sioux_falls_report(
     sweep_oversat = []
     sweep_mean_speed = []
     sweep_tstt = []
-    sweep_corr = []
 
     for scale in scales:
         result = _run_sf_assignment(
@@ -270,7 +269,6 @@ def generate_sioux_falls_report(
         )
         state = result.network_state
         last = result.iteration_log[-1]
-        corr, _ = _link_flow_correlation(result, meta)
         speeds = state.speed_kmh[:state.n_edges]
         ff = state.freeflow_kmh[:state.n_edges]
 
@@ -279,7 +277,6 @@ def generate_sioux_falls_report(
         sweep_oversat.append(last.n_oversaturated)
         sweep_mean_speed.append(float(np.mean(speeds / ff)))
         sweep_tstt.append(last.tstt)
-        sweep_corr.append(corr)
 
     demand_labels = [f"{s:.0%}" for s in scales]
 
@@ -419,90 +416,143 @@ def generate_sioux_falls_report(
         f"Demand: {total_demand * 0.10:,.0f} vph (10% of TNTP).</p>"
     )
 
-    # --- 3. Flow correlation with BPR reference ---
-    corr_fw, n_matched = _link_flow_correlation(result_fw, meta)
-
+    # --- 3. Link state table (Braess-style) at 10% demand ---
     state = result_fw.network_state
     ref = meta["ref_flows"]
-    assigned_flows = []
-    bpr_flows = []
-    link_labels = []
+    link_attrs_map = meta["link_attrs"]
+
+    # Build table rows sorted by link
+    rows = []
     for i in range(state.n_edges):
         key = (int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1]))
-        if key in ref:
-            assigned_flows.append(state.flow_vph[i])
-            bpr_flows.append(ref[key][0])
-            link_labels.append(f"{key[0]}&rarr;{key[1]}")
+        la = link_attrs_map.get(key, {})
+        dist_m = la.get("distance_m", 0)
+        vf = state.freeflow_kmh[i]
+        v = state.speed_kmh[i]
+        flow = state.flow_vph[i]
+        ln = int(state.n_lanes[i])
+        kj = state.jam_density[i]
+        qc = vf * kj / 6
+        tt = dist_m / 1000 / v * 60 if v > 0.01 else 999
+        ff_tt = dist_m / 1000 / vf * 60 if vf > 0.01 else 999
+        vc = flow / qc if qc > 0 else 0
+        rows.append((key, ln, dist_m, vf, v, flow, qc, ff_tt, tt, vc))
 
-    # Normalize to flow shares so different demand levels are comparable
-    assigned_arr = np.array(assigned_flows)
-    bpr_arr = np.array(bpr_flows)
-    a_total = assigned_arr.sum() or 1.0
-    b_total = bpr_arr.sum() or 1.0
-    assigned_share = assigned_arr / a_total * 100
-    bpr_share = bpr_arr / b_total * 100
+    rows.sort(key=lambda r: r[0])
 
-    fig_corr = go.Figure()
-    fig_corr.add_trace(go.Scatter(
-        x=bpr_share.tolist(), y=assigned_share.tolist(), mode="markers",
-        marker=dict(size=6, color="#2196F3", opacity=0.7),
-        hovertext=[
-            f"{lbl}: MFD={a:.1f}%, BPR={b:.1f}%"
-            for lbl, a, b in zip(link_labels, assigned_share, bpr_share)
-        ],
-        hoverinfo="text",
-        name="Links",
-    ))
-    max_share = max(assigned_share.max(), bpr_share.max())
-    fig_corr.add_trace(go.Scatter(
-        x=[0, max_share], y=[0, max_share], mode="lines",
-        line=dict(color="#999", dash="dash", width=1),
-        name="1:1 line", showlegend=True,
-    ))
-    fig_corr.update_layout(
-        title=f"Link Flow Share: MFD vs BPR (Spearman r={corr_fw:.3f})",
-        xaxis_title="BPR Reference (% of total flow)",
-        yaxis_title="MFD Assigned (% of total flow)",
-        template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+    def _vc_color(vc):
+        if vc > 0.85:
+            return "color:#D32F2F;font-weight:bold;"
+        if vc > 0.6:
+            return "color:#FF6F00;"
+        return ""
+
+    table_html = (
+        '<table style="border-collapse:collapse; width:100%; font-size:13px; '
+        'font-family:monospace;">\n'
+        '<thead><tr style="border-bottom:2px solid #333;">'
+        '<th style="text-align:left;padding:6px;">Link</th>'
+        '<th style="padding:6px;">Lanes</th>'
+        '<th style="padding:6px;">Dist (m)</th>'
+        '<th style="padding:6px;">v<sub>f</sub></th>'
+        '<th style="padding:6px;">q<sub>c</sub></th>'
+        '<th style="padding:6px;border-left:2px solid #ccc;">Flow</th>'
+        '<th style="padding:6px;">V/C</th>'
+        '<th style="padding:6px;">Speed</th>'
+        '<th style="padding:6px;">FF TT</th>'
+        '<th style="padding:6px;">TT</th>'
+        '<th style="padding:6px;">TT/FF</th>'
+        '</tr></thead>\n<tbody>\n'
     )
-    figs.append(fig_corr)
+
+    for key, ln, dist_m, vf, v, flow, qc, ff_tt, tt, vc in rows:
+        ratio = tt / ff_tt if ff_tt > 0.01 and ff_tt < 900 else 1.0
+        vc_style = _vc_color(vc)
+        table_html += (
+            f'<tr style="border-bottom:1px solid #eee;">'
+            f'<td style="padding:4px 6px;">{key[0]}&rarr;{key[1]}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{ln}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{dist_m:.0f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{vf:.0f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{qc:.0f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;border-left:2px solid #ccc;">{flow:.0f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;{vc_style}">{vc:.2f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{v:.1f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{ff_tt:.2f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{tt:.2f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{ratio:.2f}</td>'
+            f'</tr>\n'
+        )
+
+    table_html += '</tbody></table>'
+
+    # Summary stats
+    all_vc = [r[9] for r in rows]
+    all_speeds = [r[4] for r in rows]
+    all_ratios = [r[8] / r[7] if r[7] > 0.01 else 1.0 for r in rows]
+    n_congested = sum(1 for vc in all_vc if vc > 0.6)
+
+    figs.append(None)  # placeholder — table goes in description
     descriptions.append(
-        "<h2>Flow Correlation (10% Demand)</h2>"
-        f"<p>Spearman rank correlation: <b>r = {corr_fw:.3f}</b> "
-        f"({n_matched} links). "
-        "Both axes show flow as percentage of total network flow, "
-        "making the comparison scale-invariant. Points near the 1:1 line "
-        "mean both VDFs allocate the same share of traffic to that link.</p>"
+        "<h2>Link State at 10% Demand</h2>"
+        f"<p>36,060 vph ({state.n_edges} links). "
+        f"Mean V/C: <b>{np.mean(all_vc):.2f}</b>, "
+        f"max V/C: {max(all_vc):.2f}. "
+        f"Mean speed: <b>{np.mean(all_speeds):.0f} km/h</b>. "
+        f"Mean TT/FF: {np.mean(all_ratios):.2f}. "
+        f"Links with V/C &gt; 0.6: {n_congested}/{state.n_edges}. "
+        "Units: v<sub>f</sub> and Speed in km/h, q<sub>c</sub> and Flow in vph, "
+        "TT in minutes. "
+        '<span style="color:#FF6F00">Orange</span>: V/C &gt; 0.6, '
+        '<span style="color:#D32F2F"><b>Red</b></span>: V/C &gt; 0.85.</p>'
+        + table_html
     )
 
-    # --- 4. Demand scaling correlation trend ---
-    fig_corr_trend = go.Figure()
-    fig_corr_trend.add_trace(go.Scatter(
-        x=[total_demand * s for s in scales],
-        y=sweep_corr,
-        mode="lines+markers",
-        line=dict(color="#7B1FA2", width=2.5),
-        marker=dict(size=8),
-        hovertext=[
-            f"{s:.0%}: r={c:.3f}" for s, c in zip(scales, sweep_corr)
-        ],
-        hoverinfo="text",
-    ))
-    fig_corr_trend.update_layout(
-        title="BPR Flow Correlation vs Demand Scale",
-        xaxis_title="Total Demand (vph)",
-        yaxis_title="Spearman r",
+    # --- 4. V/C scatter across demand levels ---
+    fig_vc = go.Figure()
+    check_scales = [0.05, 0.10, 0.15, 0.20]
+    colors_vc = ["#4CAF50", "#1565C0", "#FF6F00", "#D32F2F"]
+    for sc, col in zip(check_scales, colors_vc):
+        res = _run_sf_assignment(base, meta, max_iter=max_iter, method="fw", demand_scale=sc)
+        st = res.network_state
+        vc_list = []
+        flow_list = []
+        hover_list = []
+        for i in range(st.n_edges):
+            k = (int(st.edge_ids[i, 0]), int(st.edge_ids[i, 1]))
+            la_i = link_attrs_map.get(k, {})
+            vf_i = st.freeflow_kmh[i]
+            kj_i = st.jam_density[i]
+            qc_i = vf_i * kj_i / 6
+            vc_i = st.flow_vph[i] / qc_i if qc_i > 0 else 0
+            vc_list.append(vc_i)
+            flow_list.append(st.flow_vph[i])
+            hover_list.append(f"{k[0]}&rarr;{k[1]}: V/C={vc_i:.2f}")
+        fig_vc.add_trace(go.Scatter(
+            x=flow_list, y=vc_list, mode="markers",
+            marker=dict(size=5, color=col, opacity=0.6),
+            name=f"{sc:.0%} demand",
+            hovertext=hover_list, hoverinfo="text",
+        ))
+    fig_vc.add_shape(
+        type="line", x0=0, x1=max(flow_list) * 1.1,
+        y0=1, y1=1, line=dict(color="#D32F2F", dash="dash", width=1),
+    )
+    fig_vc.update_layout(
+        title="Link V/C Ratio at Different Demand Levels",
+        xaxis_title="Link Flow (vph)",
+        yaxis_title="Volume / Capacity",
         template="plotly_white",
-        yaxis=dict(range=[-0.2, 1.0], fixedrange=True),
         xaxis=dict(fixedrange=True),
+        yaxis=dict(fixedrange=True, range=[0, 1.5]),
     )
-    figs.append(fig_corr_trend)
+    figs.append(fig_vc)
     descriptions.append(
-        "<h2>Correlation vs Demand</h2>"
-        "<p>Spearman rank correlation with BPR reference at each demand level. "
-        "Correlation is moderate at low demand (similar routing), then degrades "
-        "as MFD gridlock diverges from BPR&rsquo;s graceful degradation.</p>"
+        "<h2>V/C by Demand Level</h2>"
+        "<p>Each point is one link. V/C = 1.0 is the MFD physical capacity "
+        "ceiling. At 5% demand all links are well below capacity. At 20% "
+        "demand central links approach or exceed capacity, triggering "
+        "the MFD&rsquo;s jam branch.</p>"
     )
 
     # Write report
@@ -514,7 +564,7 @@ def generate_sioux_falls_report(
             f"TNTP total demand: {total_demand:,.0f} (hourly). "
             "Road classification from real Sioux Falls geography: "
             "I-29 (3 lanes, 105 km/h), I-229 (2 lanes, 105 km/h), "
-            "arterials (2 lanes, 30&ndash;70 km/h). "
+            "arterials (2 lanes, 65 km/h). "
             "VDF: bi-parabolic MFD (k<sub>j</sub>=200 veh/km/lane). "
             "Key finding: TNTP demand exceeds physical road capacity by ~10&times;, "
             "requiring demand scaling for non-gridlocked equilibrium.</p>"
