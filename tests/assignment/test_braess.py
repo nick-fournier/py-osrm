@@ -1,0 +1,280 @@
+"""Braess paradox structural validation.
+
+Validates that the assignment correctly produces the Braess paradox:
+adding a shortcut link increases total system travel time (TSTT)
+under user equilibrium, because selfish routing overloads it.
+
+See docs/traffic_assignment_design.md §6.3.
+"""
+
+import shutil
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+import osrm
+from osrm.assignment import (
+    AssignmentConfig,
+    AssignmentLoop,
+    DensitySmoothingConfig,
+)
+from osrm.assignment.od_matrix import DemandTrip
+from osrm.assignment.osm_synthesis import braess_network
+
+
+def _prepare_network(tmp_path: Path, with_shortcut: bool):
+    """Synthesize, extract, partition, customize a Braess network."""
+    label = "with" if with_shortcut else "without"
+    work = tmp_path / f"braess_{label}"
+    work.mkdir()
+
+    osm_path, meta = braess_network(work / "braess.osm", with_shortcut=with_shortcut)
+    base = str(work / "braess.osrm")
+
+    osrm.extract(str(osm_path), profile="car", output_path=base, verbosity="ERROR")
+    osrm.partition(base, verbosity="ERROR")
+    osrm.customize(base, verbosity="ERROR")
+
+    return base, meta
+
+
+def _run_assignment(base_path: str, meta: dict, demand: float, max_iter: int = 15):
+    """Run assignment on Braess network."""
+    trips = [DemandTrip(
+        origin=meta["origin"],
+        destination=meta["destination"],
+        volume=demand,
+    )]
+
+    config = AssignmentConfig(
+        max_iterations=max_iter,
+        convergence_gap=0.0,  # Run all iterations
+        smoothing=DensitySmoothingConfig(method="none"),
+        verbosity="ERROR",
+        speed_csv_dir=str(Path(base_path).parent),
+    )
+
+    loop = AssignmentLoop(base_path, config)
+    return loop.run(trips)
+
+
+class TestBraessParadox:
+    """Structural validation: Braess paradox.
+
+    The paradox: adding a zero-cost shortcut to a 4-node network
+    INCREASES total system travel time under user equilibrium.
+    """
+
+    def test_tstt_increases_with_shortcut(self, tmp_path):
+        """Core Braess test: TSTT should be higher with the shortcut."""
+        base_with, meta_with = _prepare_network(tmp_path, with_shortcut=True)
+        base_without, meta_without = _prepare_network(tmp_path, with_shortcut=False)
+
+        result_with = _run_assignment(base_with, meta_with, demand=3000.0)
+        result_without = _run_assignment(base_without, meta_without, demand=3000.0)
+
+        tstt_with = result_with.iteration_log[-1].tstt
+        tstt_without = result_without.iteration_log[-1].tstt
+
+        assert tstt_with > tstt_without, (
+            f"Braess paradox not observed: TSTT with shortcut ({tstt_with:.0f}) "
+            f"should exceed TSTT without ({tstt_without:.0f})"
+        )
+
+    def test_both_complete_without_error(self, tmp_path):
+        """Both networks should complete assignment without error."""
+        base_with, meta_with = _prepare_network(tmp_path, with_shortcut=True)
+        base_without, meta_without = _prepare_network(tmp_path, with_shortcut=False)
+
+        result_with = _run_assignment(base_with, meta_with, demand=2000.0, max_iter=5)
+        result_without = _run_assignment(base_without, meta_without, demand=2000.0, max_iter=5)
+
+        assert result_with.iterations == 5
+        assert result_without.iterations == 5
+        assert result_with.network_state.n_edges > 0
+        assert result_without.network_state.n_edges > 0
+
+    def test_flow_nonnegativity(self, tmp_path):
+        """All link flows must be non-negative."""
+        base, meta = _prepare_network(tmp_path, with_shortcut=True)
+        result = _run_assignment(base, meta, demand=3000.0)
+        assert np.all(result.network_state.flow_vph >= 0)
+
+    def test_speeds_within_bounds(self, tmp_path):
+        """Speeds must be between min_speed and freeflow."""
+        base, meta = _prepare_network(tmp_path, with_shortcut=True)
+        result = _run_assignment(base, meta, demand=3000.0)
+        state = result.network_state
+        assert np.all(state.speed_kmh >= 5.0 - 1e-6)
+        assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
+
+
+def generate_braess_report(
+    tmp_path: str | Path,
+    output_path: str = "docs/plots/braess_validation.html",
+    demand: float = 3000.0,
+    max_iter: int = 15,
+) -> Path:
+    """Run Braess validation and generate an interactive HTML report.
+
+    Parameters
+    ----------
+    tmp_path : str or Path
+        Working directory for temporary OSRM files.
+    output_path : str
+        Where to write the HTML report.
+    demand : float
+        Demand volume (vehicles per period).
+    max_iter : int
+        Assignment iterations.
+
+    Returns
+    -------
+    Path to the generated report.
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from osrm.assignment.plots import _write_combined_report
+
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    # Run both scenarios
+    base_with, meta_with = _prepare_network(tmp_path, with_shortcut=True)
+    base_without, meta_without = _prepare_network(tmp_path, with_shortcut=False)
+
+    result_with = _run_assignment(base_with, meta_with, demand, max_iter)
+    result_without = _run_assignment(base_without, meta_without, demand, max_iter)
+
+    figs = []
+    descriptions = []
+
+    # --- 1. TSTT Comparison ---
+    tstt_with = [r.tstt for r in result_with.iteration_log]
+    tstt_without = [r.tstt for r in result_without.iteration_log]
+    iters_w = [r.iteration for r in result_with.iteration_log]
+    iters_wo = [r.iteration for r in result_without.iteration_log]
+
+    fig1 = go.Figure()
+    fig1.add_trace(go.Scatter(
+        x=iters_w, y=tstt_with, mode="lines+markers",
+        name="With shortcut", line=dict(color="#F44336", width=2),
+    ))
+    fig1.add_trace(go.Scatter(
+        x=iters_wo, y=tstt_without, mode="lines+markers",
+        name="Without shortcut", line=dict(color="#2196F3", width=2),
+    ))
+    fig1.update_layout(
+        title="Total System Travel Time (TSTT) per Iteration",
+        xaxis_title="Iteration", yaxis_title="TSTT (veh·seconds)",
+        template="plotly_white",
+    )
+    figs.append(fig1)
+
+    delta = tstt_with[-1] - tstt_without[-1]
+    pct = delta / tstt_without[-1] * 100 if tstt_without[-1] > 0 else 0
+    descriptions.append(f"""<h2>1. Braess Paradox: TSTT Comparison</h2>
+    <p>The <b>Braess paradox</b> states that adding a link to a network can <i>increase</i>
+    total system travel time under user equilibrium. Red = network WITH shortcut,
+    blue = WITHOUT.</p>
+    <p><b>Result</b>: TSTT with shortcut = <b>{tstt_with[-1]:,.0f}</b> veh·s,
+    without = <b>{tstt_without[-1]:,.0f}</b> veh·s.
+    Δ = <b>{delta:+,.0f}</b> ({pct:+.1f}%).
+    {"✅ Paradox confirmed!" if delta > 0 else "⚠️ Paradox NOT observed."}</p>""")
+
+    # --- 2. Convergence Comparison ---
+    gap_with = [r.relative_gap for r in result_with.iteration_log]
+    gap_without = [r.relative_gap for r in result_without.iteration_log]
+
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(
+        x=iters_w, y=gap_with, mode="lines+markers",
+        name="With shortcut", line=dict(color="#F44336", width=2),
+    ))
+    fig2.add_trace(go.Scatter(
+        x=iters_wo, y=gap_without, mode="lines+markers",
+        name="Without shortcut", line=dict(color="#2196F3", width=2),
+    ))
+    fig2.update_layout(
+        title="Relative Gap per Iteration",
+        xaxis_title="Iteration", yaxis_title="Relative Gap",
+        template="plotly_white",
+    )
+    figs.append(fig2)
+    descriptions.append("""<h2>2. Convergence</h2>
+    <p>Relative gap measures distance from Wardrop user equilibrium. A gap of 0
+    means all used paths have equal cost. Both scenarios should converge toward zero.</p>""")
+
+    # --- 3. Link Flow Comparison ---
+    fig3 = make_subplots(rows=1, cols=2,
+                         subplot_titles=["With Shortcut", "Without Shortcut"])
+
+    for col, (result, label) in enumerate([
+        (result_with, "With"), (result_without, "Without")
+    ], 1):
+        state = result.network_state
+        labels = [f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+                  for i in range(state.n_edges)]
+        fig3.add_trace(go.Bar(
+            x=labels, y=state.flow_vph,
+            marker_color="#F44336" if col == 1 else "#2196F3",
+            name=label,
+        ), row=1, col=col)
+
+    fig3.update_layout(
+        title="Link Flows at Equilibrium",
+        template="plotly_white", showlegend=False,
+    )
+    fig3.update_yaxes(title_text="Flow (veh/hr)", row=1, col=1)
+    figs.append(fig3)
+    descriptions.append("""<h2>3. Link Flows at Equilibrium</h2>
+    <p>Bar charts showing per-link flow at the final iteration. In the classic Braess
+    network, the shortcut causes traffic to concentrate on fewer links, overloading them.
+    Compare the flow distribution between the two scenarios.</p>""")
+
+    # --- 4. Speed Reduction ---
+    fig4 = make_subplots(rows=1, cols=2,
+                         subplot_titles=["With Shortcut", "Without Shortcut"])
+
+    for col, result in enumerate([result_with, result_without], 1):
+        state = result.network_state
+        labels = [f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+                  for i in range(state.n_edges)]
+        ratio = state.speed_kmh / np.maximum(state.freeflow_kmh, 1.0)
+        fig4.add_trace(go.Bar(
+            x=labels, y=ratio,
+            marker_color=["#F44336" if r < 0.8 else "#FF9800" if r < 0.95 else "#4CAF50"
+                          for r in ratio],
+            showlegend=False,
+        ), row=1, col=col)
+
+    fig4.update_layout(title="Speed Reduction (v / v_f)", template="plotly_white")
+    fig4.update_yaxes(title_text="v / v_f", range=[0, 1.1], row=1, col=1)
+    fig4.update_yaxes(range=[0, 1.1], row=1, col=2)
+    figs.append(fig4)
+    descriptions.append("""<h2>4. Speed Reduction by Link</h2>
+    <p>Ratio of equilibrium speed to free-flow speed per link. Green ≥ 0.95 (uncongested),
+    orange 0.8–0.95 (moderate), red < 0.8 (congested). With the shortcut, the congestion-sensitive
+    links should show more speed reduction due to concentrated traffic.</p>""")
+
+    # Write report
+    _write_combined_report(
+        title="Braess Paradox Validation",
+        intro=f"""<p>Structural validation of the traffic assignment using the <b>Braess paradox</b> —
+        a 4-node diamond network where adding a shortcut link increases total system travel time.
+        Demand: {demand:.0f} vehicles. {max_iter} MSA iterations per scenario.</p>
+        <pre>
+    Network topology:
+
+        1 ──→ 3          1 ──→ 3
+        │     │           │     ↓
+        ↓     ↓           ↓     ↓
+        4 ──→ 2          4 ──→ 2
+      (without shortcut)  (with 3→4 shortcut)
+        </pre>""",
+        figures=figs,
+        descriptions=descriptions,
+        path=Path(output_path),
+    )
+    return Path(output_path)
