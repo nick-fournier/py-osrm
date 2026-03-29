@@ -9,6 +9,8 @@ from osrm.assignment.network_state import NetworkState
 from osrm.assignment.density_smoothing import DensitySmoothing, DensitySmoothingConfig
 from osrm.assignment.fractional_loading import FractionalLoader
 from osrm.assignment.segment_speed_writer import SegmentSpeedWriter
+from osrm.assignment.od_matrix import ODMatrixAdapter, DemandTrip
+from osrm.assignment.assignment_loop import AssignmentLoop, AssignmentConfig, AssignmentResult
 from osrm.assignment import plots
 
 __all__ = [
@@ -18,5 +20,10 @@ __all__ = [
     "DensitySmoothingConfig",
     "FractionalLoader",
     "SegmentSpeedWriter",
+    "ODMatrixAdapter",
+    "DemandTrip",
+    "AssignmentLoop",
+    "AssignmentConfig",
+    "AssignmentResult",
     "plots",
 ]
