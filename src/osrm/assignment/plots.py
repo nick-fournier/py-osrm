@@ -421,7 +421,7 @@ def convergence_report(
     Parameters
     ----------
     iteration_log : dict
-        Keys: "iteration", "relative_gap", "tstt", optionally "max_flow_delta".
+        Keys: "iteration", "relative_gap", "tstt", optionally "max_density_delta".
     network_state : NetworkState, optional
         If provided, adds network diagnostic plots.
     vdf : BiParabolicVDF, optional
@@ -500,16 +500,16 @@ def convergence(
         - "relative_gap": list[float]
         - "tstt": list[float]  (total system travel time)
         Optionally:
-        - "max_flow_delta": list[float]
+        - "max_density_delta": list[float]
     """
     iters = iteration_log["iteration"]
     gap = iteration_log["relative_gap"]
     tstt = iteration_log["tstt"]
 
-    n_rows = 3 if "max_flow_delta" in iteration_log else 2
+    n_rows = 3 if "max_density_delta" in iteration_log else 2
     titles = ["Relative Gap", "Total System Travel Time"]
     if n_rows == 3:
-        titles.append("Max Link Flow Delta")
+        titles.append("Max Link Density Delta")
 
     fig = make_subplots(rows=n_rows, cols=1, subplot_titles=titles,
                         vertical_spacing=0.08)
@@ -530,10 +530,10 @@ def convergence(
 
     if n_rows == 3:
         fig.add_trace(go.Scatter(
-            x=iters, y=iteration_log["max_flow_delta"],
+            x=iters, y=iteration_log["max_density_delta"],
             mode="lines+markers",
             line=dict(color="#FF9800", width=2),
-            marker=dict(size=6), name="Max Δq",
+            marker=dict(size=6), name="Max Δk",
         ), row=3, col=1)
 
     fig.update_layout(

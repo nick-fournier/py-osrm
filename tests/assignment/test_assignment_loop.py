@@ -194,7 +194,7 @@ class TestAssignmentLoop:
         assert "iteration" in log_dict
         assert "relative_gap" in log_dict
         assert "tstt" in log_dict
-        assert "max_flow_delta" in log_dict
+        assert "max_density_delta" in log_dict
         assert len(log_dict["iteration"]) == 2
 
 

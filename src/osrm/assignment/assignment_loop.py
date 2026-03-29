@@ -37,7 +37,8 @@ class AssignmentConfig:
     max_iterations: int = 50
     convergence_gap: float = 0.01
     bin_width_s: float = 3600.0
-    min_speed_kmh: float = 5.0
+    min_speed_kmh: float = 1.0
+    vdf_min_speed_kmh: float = 0.01
     smoothing: DensitySmoothingConfig = field(
         default_factory=DensitySmoothingConfig
     )
@@ -55,7 +56,7 @@ class IterationResult:
     iteration: int
     relative_gap: float
     tstt: float
-    max_flow_delta: float
+    max_density_delta: float
     n_oversaturated: int
     route_time_s: float
     customize_time_s: float
@@ -78,7 +79,7 @@ class AssignmentResult:
             "iteration": [r.iteration for r in self.iteration_log],
             "relative_gap": [r.relative_gap for r in self.iteration_log],
             "tstt": [r.tstt for r in self.iteration_log],
-            "max_flow_delta": [r.max_flow_delta for r in self.iteration_log],
+            "max_density_delta": [r.max_density_delta for r in self.iteration_log],
         }
 
 
@@ -109,7 +110,7 @@ class AssignmentLoop:
         self.config = config or AssignmentConfig()
         self.vdf = BiParabolicVDF(
             kc_ratio=self.config.vdf_kc_ratio,
-            min_speed_kmh=self.config.min_speed_kmh,
+            min_speed_kmh=self.config.vdf_min_speed_kmh,
         )
         self.smoother = DensitySmoothing(self.config.smoothing)
         self.loader = FractionalLoader(self.config.bin_width_s)
@@ -129,13 +130,17 @@ class AssignmentLoop:
 
     def _route_single(
         self, engine: osrm_module.OSRM, trip: DemandTrip,
+        alternatives: bool = False,
     ) -> Optional[dict]:
         """Route a single OD pair with annotations."""
         try:
-            result = engine.Route(
+            kwargs = dict(
                 coordinates=[trip.origin, trip.destination],
                 annotations=["nodes", "distance", "duration", "speed"],
             )
+            if alternatives:
+                kwargs["alternatives"] = True
+            result = engine.Route(**kwargs)
             if result.get("code") == "Ok" and result.get("routes"):
                 return result
         except Exception as e:
@@ -147,15 +152,17 @@ class AssignmentLoop:
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
     ) -> NetworkState:
-        """Route all trips once to discover network edges.
+        """Route all trips with alternatives to discover network edges.
 
         Uses freeflow routing (before any congestion) to build the
-        edge registry from route annotations.
+        edge registry from route annotations. Requests alternatives
+        to capture non-shortest paths that may become attractive
+        under congestion.
         """
         logger.info("Discovering network edges from %d OD pairs...", len(trips))
         route_results = []
         for trip in trips:
-            result = self._route_single(engine, trip)
+            result = self._route_single(engine, trip, alternatives=True)
             if result:
                 route_results.append(result)
 
@@ -172,17 +179,30 @@ class AssignmentLoop:
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
         state: NetworkState,
-    ) -> Tuple[np.ndarray, float]:
-        """Route all trips, accumulate flow into a fresh array.
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Route all trips, accumulate link density and volume.
+
+        Returns two per-link arrays:
+
+        * **aon_density** (supply-side): average density contribution
+          ``Δk = volume / (v_kmh × T_hr)`` using OSRM annotation speed.
+        * **aon_volume** (demand-side): total vehicles routed through
+          each link, always conserves with total demand.
+
+        Any edges not yet in ``state`` are dynamically registered so
+        that density is never silently dropped.
 
         Returns
         -------
-        new_flow : np.ndarray
-            All-or-nothing flow from this iteration.
-        tstt : float
-            Total system travel time (vehicle-seconds).
+        aon_density : np.ndarray
+            All-or-nothing density (veh/km) from this iteration.
+        aon_volume : np.ndarray
+            All-or-nothing demand volume (vehicles) per link.
+        aon_tstt : float
+            AON total system travel time (vehicle-seconds).
         """
-        new_flow = np.zeros(state.n_edges, dtype=np.float64)
+        new_density = np.zeros(state.n_edges, dtype=np.float64)
+        new_volume = np.zeros(state.n_edges, dtype=np.float64)
         tstt = 0.0
         bin_width_hr = self.config.bin_width_s / 3600.0
 
@@ -197,35 +217,61 @@ class AssignmentLoop:
             for leg in route["legs"]:
                 ann = leg.get("annotation", {})
                 nodes = ann.get("nodes", [])
-                durations = ann.get("duration", [])
+                distances = ann.get("distance", [])
+                speeds = ann.get("speed", [])
 
                 for i in range(len(nodes) - 1):
-                    idx = state.edge_ordinal(int(nodes[i]), int(nodes[i + 1]))
-                    if idx is not None:
-                        # Convert volume (veh/period) to flow rate (veh/hr)
-                        new_flow[idx] += trip.volume / bin_width_hr
+                    from_id, to_id = int(nodes[i]), int(nodes[i + 1])
+                    idx = state.edge_ordinal(from_id, to_id)
+                    if idx is None:
+                        dist = distances[i] if i < len(distances) else 0.0
+                        spd = (speeds[i] * 3.6) if i < len(speeds) else 1.0
+                        jam_d = (self.config.default_jam_density_per_lane
+                                 * self.config.default_n_lanes)
+                        idx = state.register_edge(
+                            from_id, to_id, dist, spd, jam_d,
+                            self.config.default_n_lanes,
+                        )
+                        # Grow arrays to match
+                        if idx >= len(new_density):
+                            pad = state.n_edges - len(new_density)
+                            new_density = np.append(new_density, np.zeros(pad))
+                            new_volume = np.append(new_volume, np.zeros(pad))
 
-        return new_flow, tstt
+                    # Demand-side volume (always conserves)
+                    new_volume[idx] += trip.volume
+
+                    # Density contribution: k = volume / (v × T)
+                    seg_speed_kmh = (speeds[i] * 3.6) if i < len(speeds) else 1.0
+                    seg_speed_kmh = max(seg_speed_kmh, self.config.min_speed_kmh)
+                    new_density[idx] += trip.volume / (seg_speed_kmh * bin_width_hr)
+
+        return new_density, new_volume, tstt
 
     def _compute_relative_gap(
         self,
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
         state: NetworkState,
+        blended_volume: np.ndarray,
     ) -> float:
         """Compute Wardrop relative gap.
 
-        gap = Σ_a x_a · t_a / Σ_rs q_rs · π_rs - 1
+        gap = Σ_a (V_a · t_a) / Σ_rs (d_rs · π_rs) − 1
 
-        where x_a·t_a is link flow × link cost summed over all links,
-        and q_rs·π_rs is demand × shortest path cost summed over all OD pairs.
+        where V_a is the demand-side volume on link a (always conserves
+        with total demand), t_a = L_a / v_a is the link travel time at
+        current density, and π_rs is the shortest-path cost on the
+        updated network.
+
+        Using demand volume (not MFD throughput) ensures the numerator
+        accounts for all vehicles, even on oversaturated links.
         """
-        # Numerator: total travel on current costs
-        # t_e = length_m / (speed_kmh / 3.6) = length_m * 3.6 / speed_kmh
+        # Link travel time from current density-derived speed
         link_time_s = state.length_m * 3.6 / np.maximum(state.speed_kmh, 1.0)
-        bin_width_hr = self.config.bin_width_s / 3600.0
-        # flow_vph * link_time_s gives veh·s/hr; multiply by bin_width_hr to get veh·s
-        numerator = float(np.sum(state.flow_vph * link_time_s)) * bin_width_hr
+
+        # Numerator: total veh·s on network (demand-side)
+        numerator = float(np.sum(blended_volume * link_time_s))
 
         if numerator == 0:
             return 0.0
@@ -244,23 +290,28 @@ class AssignmentLoop:
         return max(0.0, numerator / denominator - 1.0)
 
     def _update_state(self, state: NetworkState) -> None:
-        """Update density and speed from current flow using VDF."""
-        state.density_vpkm = self.vdf.flow_to_density(
-            state.flow_vph, state.freeflow_kmh, state.jam_density
-        )
+        """Update speed and flow from current density using VDF.
 
+        Density is the primary state variable (set by MSA blending).
+        Speed comes from the forward MFD: v(k), monotonically decreasing.
+        Flow is derived: q = k × v.
+        """
         # Smooth density
         smoothed = self.smoother.smooth(state.density_vpkm)
 
-        # VDF: smoothed density → speed
+        # Forward MFD: density → speed (monotonic, always well-defined)
         state.speed_kmh = self.vdf.density_to_speed(
             smoothed, state.freeflow_kmh, state.jam_density
         )
+
+        # Derive flow from fundamental identity: q = k × v
+        state.flow_vph = state.density_vpkm * state.speed_kmh
 
     def run(
         self,
         trips: List[DemandTrip],
         progress_callback=None,
+        state_patch=None,
     ) -> AssignmentResult:
         """Run the iterative assignment loop.
 
@@ -270,6 +321,10 @@ class AssignmentLoop:
             Demand to assign.
         progress_callback : callable, optional
             Called with (iteration, gap, tstt) after each iteration.
+        state_patch : callable, optional
+            Called with (NetworkState,) immediately after discovery to
+            patch lane counts or other attributes not available from
+            OSRM annotations.
 
         Returns
         -------
@@ -282,35 +337,63 @@ class AssignmentLoop:
         engine = self._create_engine()
         state = self._discover_network(engine, trips)
 
+        if state_patch:
+            state_patch(state)
+
         # Build smoothing adjacency once
         self.smoother.build_adjacency(state.edge_ids, state.length_m)
 
-        prev_flow = np.zeros(state.n_edges, dtype=np.float64)
+        prev_density = np.zeros(state.n_edges, dtype=np.float64)
+        prev_volume = np.zeros(state.n_edges, dtype=np.float64)
 
         for n in range(1, self.config.max_iterations + 1):
             logger.info("=== Iteration %d ===", n)
 
-            # 2. Route all trips, get all-or-nothing flow
+            # 2. Route all trips, get all-or-nothing density and volume
             t_route = time.monotonic()
-            aon_flow, tstt = self._route_and_accumulate(engine, trips, state)
+            aon_density, aon_volume, aon_tstt = self._route_and_accumulate(
+                engine, trips, state,
+            )
             route_time = time.monotonic() - t_route
 
-            # 3. MSA blending: q = q_old + (1/n)(q_aon - q_old)
+            # Grow prev arrays if new edges were discovered during routing
+            if len(prev_density) < state.n_edges:
+                pad = state.n_edges - len(prev_density)
+                prev_density = np.append(prev_density, np.zeros(pad))
+                prev_volume = np.append(prev_volume, np.zeros(pad))
+                # Re-patch new edges (e.g. lane counts)
+                if state_patch:
+                    state_patch(state)
+                self.smoother.build_adjacency(state.edge_ids, state.length_m)
+
+            # 3. MSA blending on density and demand volume
             if n == 1:
-                state.flow_vph = aon_flow.copy()
+                state.density_vpkm = aon_density.copy()
+                blended_volume = aon_volume.copy()
             else:
                 alpha = 1.0 / n
-                state.flow_vph = prev_flow + alpha * (aon_flow - prev_flow)
+                state.density_vpkm = prev_density + alpha * (aon_density - prev_density)
+                blended_volume = prev_volume + alpha * (aon_volume - prev_volume)
 
-            max_delta = float(np.max(np.abs(state.flow_vph - prev_flow)))
-            prev_flow = state.flow_vph.copy()
+            # Cap density at jam density — a link cannot hold more than k_j
+            state.density_vpkm = np.minimum(
+                state.density_vpkm, state.jam_density
+            )
 
-            # 4. Update density + speed via VDF
+            max_delta = float(np.max(np.abs(state.density_vpkm - prev_density)))
+            prev_density = state.density_vpkm.copy()
+            prev_volume = blended_volume.copy()
+
+            # 4. Update speed (from density) and flow (derived) via VDF
             self._update_state(state)
 
+            # Compute blended TSTT from demand volume × link travel time
+            link_time_s = state.length_m * 3.6 / np.maximum(state.speed_kmh, 1.0)
+            tstt = float(np.sum(blended_volume * link_time_s))
+
             # 5. Count oversaturated links
-            q_c = self.vdf.capacity_flow(state.freeflow_kmh, state.jam_density)
-            n_oversat = int(np.sum(state.flow_vph > q_c))
+            k_c = self.vdf.critical_density(state.jam_density)
+            n_oversat = int(np.sum(state.density_vpkm > k_c))
 
             # 6. Write CSV and re-customize
             t_cust = time.monotonic()
@@ -328,13 +411,15 @@ class AssignmentLoop:
             engine = self._create_engine()
 
             # 8. Compute gap (on updated network)
-            gap = self._compute_relative_gap(engine, trips, state)
+            gap = self._compute_relative_gap(
+                engine, trips, state, blended_volume,
+            )
 
             iter_result = IterationResult(
                 iteration=n,
                 relative_gap=gap,
                 tstt=tstt,
-                max_flow_delta=max_delta,
+                max_density_delta=max_delta,
                 n_oversaturated=n_oversat,
                 route_time_s=route_time,
                 customize_time_s=customize_time,
@@ -342,7 +427,7 @@ class AssignmentLoop:
             log.append(iter_result)
 
             logger.info(
-                "Iter %d: gap=%.4f, TSTT=%.0f, max_Δq=%.1f, oversat=%d, "
+                "Iter %d: gap=%.4f, TSTT=%.0f, max_Δk=%.1f, oversat=%d, "
                 "route=%.1fs, customize=%.1fs",
                 n, gap, tstt, max_delta, n_oversat, route_time, customize_time,
             )

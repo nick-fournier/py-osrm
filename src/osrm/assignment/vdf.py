@@ -97,11 +97,13 @@ class BiParabolicVDF:
         v_f: np.ndarray,
         k_j: np.ndarray,
     ) -> np.ndarray:
-        """Closed-form flow → density inversion (uncongested branch).
+        """Closed-form flow → density inversion (uncongested branch only).
 
-        k(q) = k_c * (1 - sqrt(1 - q / q_c))
+        k(q) = k_c * (1 − √(1 − q/q_c))
 
-        Flows exceeding q_c are clamped to q_c (returns k_c).
+        Flows exceeding q_c are clamped to q_c (returns k_c). This is
+        the analytic inverse of the uncongested parabolic branch. For
+        assignment, use k = q / v instead (see AssignmentLoop._update_state).
 
         Parameters
         ----------
@@ -115,7 +117,7 @@ class BiParabolicVDF:
         Returns
         -------
         np.ndarray
-            Density (veh/km).
+            Density (veh/km), capped at k_c.
         """
         q = np.asarray(q, dtype=np.float64)
         v_f = np.asarray(v_f, dtype=np.float64)

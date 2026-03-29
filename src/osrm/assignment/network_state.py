@@ -140,6 +140,39 @@ class NetworkState:
                 matched += 1
         return matched
 
+    def register_edge(
+        self,
+        from_id: int,
+        to_id: int,
+        length_m: float,
+        freeflow_kmh: float,
+        jam_density: float,
+        n_lanes: int,
+    ) -> int:
+        """Register a new edge discovered mid-assignment.
+
+        Returns the ordinal of the new (or existing) edge.
+        """
+        key = (int(from_id), int(to_id))
+        existing = self._edge_index.get(key)
+        if existing is not None:
+            return existing
+
+        idx = self.n_edges
+        self.edge_ids = np.vstack([
+            self.edge_ids,
+            np.array([[from_id, to_id]], dtype=np.uint64),
+        ])
+        self.length_m = np.append(self.length_m, length_m)
+        self.freeflow_kmh = np.append(self.freeflow_kmh, max(freeflow_kmh, 1.0))
+        self.jam_density = np.append(self.jam_density, jam_density)
+        self.n_lanes = np.append(self.n_lanes, np.uint8(n_lanes))
+        self.flow_vph = np.append(self.flow_vph, 0.0)
+        self.density_vpkm = np.append(self.density_vpkm, 0.0)
+        self.speed_kmh = np.append(self.speed_kmh, max(freeflow_kmh, 1.0))
+        self._edge_index[key] = idx
+        return idx
+
     @classmethod
     def from_edges(
         cls,

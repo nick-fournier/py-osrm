@@ -41,6 +41,8 @@ def _prepare_network(tmp_path: Path, with_shortcut: bool):
 
 def _run_assignment(base_path: str, meta: dict, demand: float, max_iter: int = 15):
     """Run assignment on Braess network."""
+    from osrm.assignment.osm_synthesis import patch_braess_lanes
+
     trips = [DemandTrip(
         origin=meta["origin"],
         destination=meta["destination"],
@@ -56,7 +58,11 @@ def _run_assignment(base_path: str, meta: dict, demand: float, max_iter: int = 1
     )
 
     loop = AssignmentLoop(base_path, config)
-    return loop.run(trips)
+
+    def lane_patch(state):
+        patch_braess_lanes(state, meta)
+
+    return loop.run(trips, state_patch=lane_patch)
 
 
 class TestBraessParadox:
@@ -102,11 +108,11 @@ class TestBraessParadox:
         assert np.all(result.network_state.flow_vph >= 0)
 
     def test_speeds_within_bounds(self, tmp_path):
-        """Speeds must be between min_speed and freeflow."""
+        """Speeds must be between VDF min_speed and freeflow."""
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
         result = _run_assignment(base, meta, demand=3000.0)
         state = result.network_state
-        assert np.all(state.speed_kmh >= 5.0 - 1e-6)
+        assert np.all(state.speed_kmh >= 0.01 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
 
 

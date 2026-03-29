@@ -96,38 +96,38 @@ def braess_network(
     -------
     (path, metadata) where metadata includes node coords and link info.
     """
-    # Diamond layout: node 1 (left), 3 (top), 4 (bottom), 2 (right)
-    # Using Monaco-area coordinates for consistency with test data
+    # Diamond layout: node 1 (west), 3 (center-north), 4 (center-south), 2 (east)
+    # Realistic urban scale: ~4 km arterials, ~0.6 km shortcut
     nodes = {
-        1: (7.4200, 43.7350),  # left (origin)
-        3: (7.4230, 43.7370),  # top
-        4: (7.4230, 43.7330),  # bottom
-        2: (7.4260, 43.7350),  # right (destination)
+        1: (7.350, 43.735),    # west (origin)
+        3: (7.400, 43.7375),   # center-north
+        4: (7.400, 43.7325),   # center-south
+        2: (7.450, 43.735),    # east (destination)
     }
 
     ways = [
-        # 1→3: narrow, congestion-sensitive
+        # 1→3: narrow, congestion-sensitive (fast freeflow, 1 lane)
         {
             "id": 101, "nodes": [1, 3],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "50", "lanes": "1", "name": "Link 1-3",
+                "maxspeed": "60", "lanes": "1", "name": "Link 1-3 (narrow)",
             },
         },
-        # 1→4: wide, effectively constant cost
+        # 1→4: wide arterial, effectively constant cost (3 lanes, moderate speed)
         {
             "id": 102, "nodes": [1, 4],
             "tags": {
                 "highway": "primary", "oneway": "yes",
-                "maxspeed": "30", "lanes": "4", "name": "Link 1-4",
+                "maxspeed": "40", "lanes": "3", "name": "Link 1-4 (wide)",
             },
         },
-        # 3→2: wide, effectively constant cost
+        # 3→2: wide arterial, effectively constant cost
         {
             "id": 103, "nodes": [3, 2],
             "tags": {
                 "highway": "primary", "oneway": "yes",
-                "maxspeed": "30", "lanes": "4", "name": "Link 3-2",
+                "maxspeed": "40", "lanes": "3", "name": "Link 3-2 (wide)",
             },
         },
         # 4→2: narrow, congestion-sensitive
@@ -135,22 +135,30 @@ def braess_network(
             "id": 104, "nodes": [4, 2],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "50", "lanes": "1", "name": "Link 4-2",
+                "maxspeed": "60", "lanes": "1", "name": "Link 4-2 (narrow)",
             },
         },
     ]
 
     if with_shortcut:
-        # 3→4: short, wide, low cost
+        # 3→4: very short (~22m), connecting street — nearly zero cost
         ways.append({
             "id": 105, "nodes": [3, 4],
             "tags": {
-                "highway": "primary", "oneway": "yes",
-                "maxspeed": "60", "lanes": "4", "name": "Shortcut 3-4",
+                "highway": "secondary", "oneway": "yes",
+                "maxspeed": "60", "lanes": "1", "name": "Shortcut 3-4",
             },
         })
 
     osm_path = write_osm(nodes, ways, path)
+
+    # Build direct lane map keyed by (from_osm_id, to_osm_id).
+    # OSRM annotations preserve OSM node IDs, so this maps directly
+    # to NetworkState edge_ids.
+    lane_map = {}
+    for way in ways:
+        from_id, to_id = way["nodes"][0], way["nodes"][-1]
+        lane_map[(from_id, to_id)] = int(way["tags"].get("lanes", 1))
 
     metadata = {
         "origin": nodes[1],
@@ -160,6 +168,27 @@ def braess_network(
         "with_shortcut": with_shortcut,
         "narrow_links": ["1→3", "4→2"],
         "wide_links": ["1→4", "3→2"] + (["3→4"] if with_shortcut else []),
+        "lane_map": lane_map,
     }
 
     return osm_path, metadata
+
+
+def patch_braess_lanes(
+    state,
+    meta: dict,
+    jam_density_per_lane: float = 130.0,
+) -> None:
+    """Patch NetworkState with correct lane counts for a Braess network.
+
+    OSRM annotations preserve OSM node IDs, so we match edge_ids
+    directly against the synthesis lane_map {(from, to): n_lanes}.
+    """
+    lane_map = meta["lane_map"]
+    for i in range(state.n_edges):
+        key = (int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1]))
+        if key in lane_map:
+            lanes = lane_map[key]
+            state.n_lanes[i] = lanes
+            state.jam_density[i] = jam_density_per_lane * lanes
+        state.jam_density[i] = jam_density_per_lane * lanes
