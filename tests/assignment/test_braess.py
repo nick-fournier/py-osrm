@@ -120,7 +120,7 @@ def generate_braess_report(
     tmp_path: str | Path,
     output_path: str = "docs/plots/braess_validation.html",
     demand: float = 3000.0,
-    max_iter: int = 15,
+    max_iter: int = 100,
 ) -> Path:
     """Run Braess validation and generate an interactive HTML report.
 
@@ -156,190 +156,16 @@ def generate_braess_report(
     figs = []
     descriptions = []
 
-    # --- 1. TSTT Comparison ---
-    tstt_with = [r.tstt for r in result_with.iteration_log]
-    tstt_without = [r.tstt for r in result_without.iteration_log]
-    iters_w = [r.iteration for r in result_with.iteration_log]
-    iters_wo = [r.iteration for r in result_without.iteration_log]
-
-    fig1 = go.Figure()
-    fig1.add_trace(go.Scatter(
-        x=iters_w, y=tstt_with, mode="lines+markers",
-        name="With shortcut", line=dict(color="#F44336", width=2),
-    ))
-    fig1.add_trace(go.Scatter(
-        x=iters_wo, y=tstt_without, mode="lines+markers",
-        name="Without shortcut", line=dict(color="#2196F3", width=2),
-    ))
-    fig1.update_layout(
-        title="Total System Travel Time (TSTT) per Iteration",
-        xaxis_title="Iteration", yaxis_title="TSTT (veh·seconds)",
-        template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
-    )
-    figs.append(fig1)
-
-    delta = tstt_with[-1] - tstt_without[-1]
-    pct = delta / tstt_without[-1] * 100 if tstt_without[-1] > 0 else 0
-    descriptions.append(f"""<h2>1. Braess Paradox: TSTT Comparison</h2>
-    <p>The <b>Braess paradox</b> states that adding a link to a network can <i>increase</i>
-    total system travel time under user equilibrium. Red = network WITH shortcut,
-    blue = WITHOUT.</p>
-    <p><b>Result</b>: TSTT with shortcut = <b>{tstt_with[-1]:,.0f}</b> veh·s,
-    without = <b>{tstt_without[-1]:,.0f}</b> veh·s.
-    Δ = <b>{delta:+,.0f}</b> ({pct:+.1f}%).
-    {"✅ Paradox confirmed!" if delta > 0 else "⚠️ Paradox NOT observed."}</p>""")
-
-    # --- 2. Convergence Comparison ---
-    gap_with = [r.relative_gap for r in result_with.iteration_log]
-    gap_without = [r.relative_gap for r in result_without.iteration_log]
-
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(
-        x=iters_w, y=gap_with, mode="lines+markers",
-        name="With shortcut", line=dict(color="#F44336", width=2),
-    ))
-    fig2.add_trace(go.Scatter(
-        x=iters_wo, y=gap_without, mode="lines+markers",
-        name="Without shortcut", line=dict(color="#2196F3", width=2),
-    ))
-    fig2.update_layout(
-        title="Relative Gap per Iteration",
-        xaxis_title="Iteration", yaxis_title="Relative Gap",
-        template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
-    )
-    figs.append(fig2)
-    descriptions.append("""<h2>2. Convergence</h2>
-    <p>Relative gap measures distance from Wardrop user equilibrium. A gap of 0
-    means all used paths have equal cost. Both scenarios should converge toward zero.</p>""")
-
-    # --- 3. Link Flow Comparison (table) ---
-    def _flow_table(result_w, result_wo):
-        """Build an HTML table comparing link flows between scenarios."""
-        rows = []
-        # Collect all edge labels from both scenarios
-        for result, scenario in [(result_w, "With"), (result_wo, "Without")]:
-            state = result.network_state
-            for i in range(state.n_edges):
-                label = f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
-                rows.append((label, scenario, state.flow_vph[i]))
-
-        # Pivot into {link: {With: flow, Without: flow}}
-        from collections import OrderedDict
-        pivot: dict[str, dict[str, float]] = OrderedDict()
-        for label, scenario, flow in rows:
-            pivot.setdefault(label, {})[scenario] = flow
-
-        html = (
-            '<table style="border-collapse:collapse; width:100%; max-width:600px; '
-            'margin:12px auto; font-family:system-ui,sans-serif;">'
-            '<thead><tr style="border-bottom:2px solid #333;">'
-            '<th style="text-align:left;padding:8px;">Link</th>'
-            '<th style="text-align:right;padding:8px;">With Shortcut (veh/hr)</th>'
-            '<th style="text-align:right;padding:8px;">Without Shortcut (veh/hr)</th>'
-            '</tr></thead><tbody>'
-        )
-        for link, vals in pivot.items():
-            fw = vals.get("With")
-            fwo = vals.get("Without")
-            fw_cell = f'{fw:,.1f}' if fw is not None else '—'
-            fwo_cell = f'{fwo:,.1f}' if fwo is not None else '—'
-            html += (
-                f'<tr style="border-bottom:1px solid #e0e0e0;">'
-                f'<td style="padding:6px 8px;font-weight:600;">{link}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">{fw_cell}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">{fwo_cell}</td>'
-                f'</tr>'
-            )
-        html += '</tbody></table>'
-        return html
-
-    figs.append(None)
-    descriptions.append(
-        """<h2>3. Link Flows at Equilibrium</h2>
-        <p>Per-link flow at the final iteration. In the classic Braess network, the shortcut
-        causes traffic to concentrate on fewer links, overloading them.</p>"""
-        + _flow_table(result_with, result_without)
-    )
-
-    # --- 4. Speed Reduction (table) ---
-    def _speed_table(result_w, result_wo):
-        """Build an HTML table comparing speed ratios between scenarios."""
-        rows = []
-        for result, scenario in [(result_w, "With"), (result_wo, "Without")]:
-            state = result.network_state
-            ratio = state.speed_kmh / np.maximum(state.freeflow_kmh, 1.0)
-            for i in range(state.n_edges):
-                label = f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
-                rows.append((label, scenario, ratio[i], state.speed_kmh[i], state.freeflow_kmh[i]))
-
-        from collections import OrderedDict
-        pivot: dict[str, dict[str, tuple]] = OrderedDict()
-        for label, scenario, r, spd, ff in rows:
-            pivot.setdefault(label, {})[scenario] = (r, spd, ff)
-
-        html = (
-            '<table style="border-collapse:collapse; width:100%; max-width:700px; '
-            'margin:12px auto; font-family:system-ui,sans-serif;">'
-            '<thead><tr style="border-bottom:2px solid #333;">'
-            '<th style="text-align:left;padding:8px;">Link</th>'
-            '<th style="text-align:left;padding:8px;">v<sub>f</sub> (km/h)</th>'
-            '<th style="text-align:right;padding:8px;">With Shortcut</th>'
-            '<th style="text-align:right;padding:8px;">Without Shortcut</th>'
-            '</tr></thead><tbody>'
-        )
-
-        def _color(r):
-            if r < 0.8:
-                return "#F44336"
-            elif r < 0.95:
-                return "#FF9800"
-            return "#4CAF50"
-
-        for link, vals in pivot.items():
-            w = vals.get("With")
-            wo = vals.get("Without")
-            ff = (w[2] if w else None) or (wo[2] if wo else 0)
-
-            def _cell(v):
-                if v is None:
-                    return '<span style="color:#999;">—</span>'
-                r, spd, _ = v
-                return (f'<span style="color:{_color(r)};font-weight:600;">{r:.2f}</span>'
-                        f' ({spd:.1f} km/h)')
-
-            html += (
-                f'<tr style="border-bottom:1px solid #e0e0e0;">'
-                f'<td style="padding:6px 8px;font-weight:600;">{link}</td>'
-                f'<td style="padding:6px 8px;">{ff:.0f}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">{_cell(w)}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">{_cell(wo)}</td>'
-                f'</tr>'
-            )
-        html += '</tbody></table>'
-        return html
-
-    figs.append(None)
-    descriptions.append(
-        """<h2>4. Speed Reduction by Link</h2>
-        <p>Ratio of equilibrium speed to free-flow speed (v/v<sub>f</sub>).
-        <span style="color:#4CAF50;font-weight:600;">Green</span> ≥ 0.95 (uncongested),
-        <span style="color:#FF9800;font-weight:600;">orange</span> 0.8–0.95 (moderate),
-        <span style="color:#F44336;font-weight:600;">red</span> &lt; 0.8 (congested).</p>"""
-        + _speed_table(result_with, result_without)
-    )
-
-    # --- 0. Network topology diagram (prepend) ---
+    # --- 0. Network topology diagram ---
     node_pos = {1: (0, 0.5), 3: (0.5, 1), 4: (0.5, 0), 2: (1, 0.5)}
     edges_wo = [(1, 3), (1, 4), (3, 2), (4, 2)]
     edges_w = edges_wo + [(3, 4)]
     edge_styles = {
-        (1, 3): ("secondary 1-lane 50km/h", "#F44336"),
-        (1, 4): ("primary 4-lane 30km/h", "#2196F3"),
-        (3, 2): ("primary 4-lane 30km/h", "#2196F3"),
-        (4, 2): ("secondary 1-lane 50km/h", "#F44336"),
-        (3, 4): ("shortcut 4-lane 60km/h", "#FF9800"),
+        (1, 3): ("narrow 1-lane 60 km/h", "#F44336"),
+        (1, 4): ("wide 3-lane 40 km/h", "#2196F3"),
+        (3, 2): ("wide 3-lane 40 km/h", "#2196F3"),
+        (4, 2): ("narrow 1-lane 60 km/h", "#F44336"),
+        (3, 4): ("shortcut 1-lane 60 km/h", "#FF9800"),
     }
 
     topo_fig = make_subplots(
@@ -349,12 +175,10 @@ def generate_braess_report(
     )
 
     for col, edges in enumerate([edges_wo, edges_w], 1):
-        # Draw edges as arrows
         for u, v in edges:
             x0, y0 = node_pos[u]
             x1, y1 = node_pos[v]
             _, color = edge_styles[(u, v)]
-            # Line for the edge
             topo_fig.add_trace(go.Scatter(
                 x=[x0, x1], y=[y0, y1], mode="lines",
                 line=dict(color=color, width=3),
@@ -362,7 +186,6 @@ def generate_braess_report(
                 hovertext=f"{u}→{v}: {edge_styles[(u,v)][0]}",
                 showlegend=False,
             ), row=1, col=col)
-            # Arrowhead via annotation
             topo_fig.add_annotation(
                 x=x1, y=y1, ax=x0, ay=y0,
                 xref=f"x{col}" if col > 1 else "x",
@@ -372,9 +195,7 @@ def generate_braess_report(
                 showarrow=True, arrowhead=3, arrowsize=1.5,
                 arrowcolor=color, arrowwidth=2,
             )
-            # Edge label
             mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-            # Offset label slightly so it doesn't overlap the line
             dx, dy = y1 - y0, -(x1 - x0)
             mag = max((dx**2 + dy**2) ** 0.5, 1e-9)
             ox, oy = 0.06 * dx / mag, 0.06 * dy / mag
@@ -385,7 +206,6 @@ def generate_braess_report(
                 showarrow=False, font=dict(size=10, color=color),
             )
 
-        # Draw nodes
         xs = [node_pos[n][0] for n in sorted(node_pos)]
         ys = [node_pos[n][1] for n in sorted(node_pos)]
         labels = [str(n) for n in sorted(node_pos)]
@@ -417,22 +237,189 @@ def generate_braess_report(
         height=350,
     )
 
-    # Prepend topology as first figure
-    figs.insert(0, topo_fig)
-    descriptions.insert(0, """<h2>Network Topology</h2>
+    figs.append(topo_fig)
+    descriptions.append("""<h2>Network Topology</h2>
     <p>The Braess diamond network: <span style="color:#4CAF50">●</span> Origin (node 1),
     <span style="color:#F44336">●</span> Destination (node 2).
-    <span style="color:#F44336">Red</span> links are narrow (1-lane, 50 km/h — congestion-sensitive).
-    <span style="color:#2196F3">Blue</span> links are wide (4-lane, 30 km/h — effectively constant cost).
-    <span style="color:#FF9800">Orange</span> is the shortcut (4-lane, 60 km/h).
-    The paradox: adding the shortcut <i>increases</i> total system travel time.</p>""")
+    <span style="color:#F44336">Red</span> = narrow (1-lane, 60 km/h — congestion-sensitive).
+    <span style="color:#2196F3">Blue</span> = wide (3-lane, 40 km/h — high capacity).
+    <span style="color:#FF9800">Orange</span> = shortcut (1-lane, 60 km/h).
+    All arterials are ~4 km; the shortcut is ~0.6 km.</p>""")
+
+    # --- 1. Link state comparison table ---
+    def _state_table(result_w, result_wo):
+        """Build an HTML table comparing link density, speed, and flow."""
+        from collections import OrderedDict
+        rows = []
+        for result, scenario in [(result_w, "With"), (result_wo, "Without")]:
+            state = result.network_state
+            for i in range(state.n_edges):
+                label = f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+                rows.append((
+                    label, scenario,
+                    state.density_vpkm[i],
+                    state.speed_kmh[i],
+                    state.freeflow_kmh[i],
+                    state.flow_vph[i],
+                    state.jam_density[i],
+                    state.n_lanes[i],
+                ))
+
+        pivot: dict[str, dict[str, tuple]] = OrderedDict()
+        for label, scenario, k, v, vf, q, kj, lanes in rows:
+            pivot.setdefault(label, {"lanes": lanes, "kj": kj, "vf": vf})[scenario] = (k, v, q)
+
+        html = (
+            '<table style="border-collapse:collapse; width:100%; max-width:900px; '
+            'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.9em;">'
+            '<thead><tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:8px;">Link</th>'
+            '<th style="padding:8px;">Lanes</th>'
+            '<th style="padding:8px;">k<sub>j</sub></th>'
+            '<th style="padding:8px;">v<sub>f</sub></th>'
+            '<th colspan="3" style="text-align:center;padding:8px;border-left:2px solid #ccc;">With Shortcut</th>'
+            '<th colspan="3" style="text-align:center;padding:8px;border-left:2px solid #ccc;">Without Shortcut</th>'
+            '</tr><tr style="border-bottom:1px solid #999;">'
+            '<th></th><th></th><th></th><th></th>'
+            '<th style="padding:4px 8px;border-left:2px solid #ccc;">k</th>'
+            '<th style="padding:4px 8px;">v</th>'
+            '<th style="padding:4px 8px;">q</th>'
+            '<th style="padding:4px 8px;border-left:2px solid #ccc;">k</th>'
+            '<th style="padding:4px 8px;">v</th>'
+            '<th style="padding:4px 8px;">q</th>'
+            '</tr></thead><tbody>'
+        )
+
+        def _v_color(v, vf):
+            ratio = v / vf if vf > 0 else 1
+            if ratio < 0.1:
+                return "#F44336"
+            elif ratio < 0.5:
+                return "#FF9800"
+            return "#4CAF50"
+
+        def _k_style(k, kj):
+            ratio = k / kj if kj > 0 else 0
+            if ratio > 0.9:
+                return "font-weight:700;color:#F44336;"
+            elif ratio > 0.5:
+                return "color:#FF9800;"
+            return ""
+
+        for link, info in pivot.items():
+            lanes = info["lanes"]
+            kj = info["kj"]
+            vf = info["vf"]
+            w = info.get("With")
+            wo = info.get("Without")
+
+            def _cells(vals):
+                if vals is None:
+                    return '<td style="text-align:right;padding:4px 8px;border-left:2px solid #ccc;">—</td>' \
+                           '<td style="text-align:right;padding:4px 8px;">—</td>' \
+                           '<td style="text-align:right;padding:4px 8px;">—</td>'
+                k, v, q = vals
+                return (
+                    f'<td style="text-align:right;padding:4px 8px;border-left:2px solid #ccc;{_k_style(k, kj)}">{k:.1f}</td>'
+                    f'<td style="text-align:right;padding:4px 8px;color:{_v_color(v, vf)};">{v:.2f}</td>'
+                    f'<td style="text-align:right;padding:4px 8px;">{q:.0f}</td>'
+                )
+
+            html += (
+                f'<tr style="border-bottom:1px solid #e0e0e0;">'
+                f'<td style="padding:4px 8px;font-weight:600;">{link}</td>'
+                f'<td style="text-align:center;padding:4px 8px;">{lanes}</td>'
+                f'<td style="text-align:center;padding:4px 8px;">{kj:.0f}</td>'
+                f'<td style="text-align:center;padding:4px 8px;">{vf:.0f}</td>'
+                f'{_cells(w)}{_cells(wo)}'
+                f'</tr>'
+            )
+        html += '</tbody></table>'
+        return html
+
+    figs.append(None)
+    descriptions.append(
+        """<h2>Link State at Equilibrium</h2>
+        <p>Density (k, veh/km), speed (v, km/h), and flow (q = k×v, veh/hr) at the
+        final iteration. <span style="color:#F44336;font-weight:600;">Red density</span>
+        = near jam (k/k<sub>j</sub> &gt; 0.9).
+        <span style="color:#F44336">Red speed</span> = severe congestion (v/v<sub>f</sub> &lt; 0.1).
+        <span style="color:#FF9800">Orange</span> = moderate.
+        <span style="color:#4CAF50">Green</span> = uncongested.</p>"""
+        + _state_table(result_with, result_without)
+    )
+
+    # --- 2. TSTT Comparison ---
+    tstt_with = [r.tstt for r in result_with.iteration_log]
+    tstt_without = [r.tstt for r in result_without.iteration_log]
+    iters_w = [r.iteration for r in result_with.iteration_log]
+    iters_wo = [r.iteration for r in result_without.iteration_log]
+
+    fig_tstt = go.Figure()
+    fig_tstt.add_trace(go.Scatter(
+        x=iters_w, y=tstt_with, mode="lines+markers",
+        name="With shortcut", line=dict(color="#F44336", width=2),
+    ))
+    fig_tstt.add_trace(go.Scatter(
+        x=iters_wo, y=tstt_without, mode="lines+markers",
+        name="Without shortcut", line=dict(color="#2196F3", width=2),
+    ))
+    fig_tstt.update_layout(
+        title="Total System Travel Time (TSTT) per Iteration",
+        xaxis_title="Iteration", yaxis_title="TSTT (veh·seconds)",
+        template="plotly_white",
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+    )
+    figs.append(fig_tstt)
+
+    delta = tstt_with[-1] - tstt_without[-1]
+    pct = delta / tstt_without[-1] * 100 if tstt_without[-1] > 0 else 0
+    gap_w = result_with.iteration_log[-1].relative_gap
+    gap_wo = result_without.iteration_log[-1].relative_gap
+    descriptions.append(f"""<h2>TSTT Convergence</h2>
+    <p>Red = network WITH shortcut, blue = WITHOUT.
+    TSTT with shortcut = <b>{tstt_with[-1]:,.0f}</b> veh·s (gap={gap_w:.6f}),
+    without = <b>{tstt_without[-1]:,.0f}</b> veh·s (gap={gap_wo:.6f}).
+    Δ = <b>{delta:+,.0f}</b> ({pct:+.1f}%).
+    {"✅ <b>Braess paradox confirmed</b>: adding the shortcut <i>increases</i> total travel time."
+     if delta > 0 else "⚠️ Paradox not observed at this demand level."}</p>""")
+
+    # --- 3. Convergence (gap) ---
+    gap_with = [r.relative_gap for r in result_with.iteration_log]
+    gap_without = [r.relative_gap for r in result_without.iteration_log]
+
+    fig_gap = go.Figure()
+    fig_gap.add_trace(go.Scatter(
+        x=iters_w, y=gap_with, mode="lines+markers",
+        name="With shortcut", line=dict(color="#F44336", width=2),
+    ))
+    fig_gap.add_trace(go.Scatter(
+        x=iters_wo, y=gap_without, mode="lines+markers",
+        name="Without shortcut", line=dict(color="#2196F3", width=2),
+    ))
+    fig_gap.update_layout(
+        title="Wardrop Relative Gap per Iteration",
+        xaxis_title="Iteration", yaxis_title="Relative Gap",
+        yaxis_type="log",
+        template="plotly_white",
+        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+    )
+    figs.append(fig_gap)
+    descriptions.append("""<h2>Convergence</h2>
+    <p>Relative gap measures proximity to Wardrop user equilibrium (gap = 0 means
+    all used paths have equal cost). Log scale. The symmetric "without" scenario
+    converges faster; the asymmetric 3-path "with" scenario is slower but
+    steadily decreasing under MSA (α = 1/n).</p>""")
 
     # Write report
     _write_combined_report(
         title="Braess Paradox Validation",
-        intro=f"""<p>Structural validation of the traffic assignment using the <b>Braess paradox</b> —
-        a 4-node diamond network where adding a shortcut link increases total system travel time.
-        Demand: {demand:.0f} vehicles. {max_iter} MSA iterations per scenario.</p>""",
+        intro=f"""<p>Structural validation of the density-based traffic assignment using the
+        <b>Braess paradox</b> — a 4-node diamond network where adding a shortcut link
+        increases total system travel time under user equilibrium.</p>
+        <p>Demand: <b>{demand:,.0f}</b> vehicles.
+        <b>{max_iter}</b> MSA iterations per scenario.
+        VDF: bi-parabolic speed-density (Fournier et al.), k<sub>c</sub> = k<sub>j</sub>/3.</p>""",
         figures=figs,
         descriptions=descriptions,
         path=Path(output_path),
