@@ -302,8 +302,8 @@ def generate_braess_report(
             '<th style="padding:8px;">Lanes</th>'
             '<th style="padding:8px;">k<sub>j</sub></th>'
             '<th style="padding:8px;">v<sub>f</sub></th>'
-            '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">With Shortcut</th>'
             '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">Without Shortcut</th>'
+            '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">With Shortcut</th>'
             '</tr><tr style="border-bottom:1px solid #999;">'
             '<th></th><th></th><th></th><th></th><th></th>'
             '<th style="padding:4px 6px;border-left:2px solid #ccc;">k</th>'
@@ -370,9 +370,65 @@ def generate_braess_report(
                 f'<td style="text-align:center;padding:4px 6px;">{lanes}</td>'
                 f'<td style="text-align:center;padding:4px 6px;">{kj:.0f}</td>'
                 f'<td style="text-align:center;padding:4px 6px;">{vf:.0f}</td>'
-                f'{_cells(w)}{_cells(wo)}'
+                f'{_cells(wo)}{_cells(w)}'
                 f'</tr>'
             )
+        html += '</tbody></table>'
+        return html
+
+    def _route_travel_times(result_w, result_wo):
+        """Build a table of route travel times to demonstrate Wardrop equilibrium."""
+        routes = {
+            "Upper (1&rarr;3&rarr;2)": [("1", "3"), ("3", "2")],
+            "Lower (1&rarr;4&rarr;2)": [("1", "4"), ("4", "2")],
+            "Shortcut (1&rarr;3&rarr;4&rarr;2)": [("1", "3"), ("3", "4"), ("4", "2")],
+        }
+
+        def _link_times(result):
+            """Return {(from, to): travel_time_s} for each edge."""
+            state = result.network_state
+            times = {}
+            for i in range(state.n_edges):
+                from_id = str(int(state.edge_ids[i, 0]))
+                to_id = str(int(state.edge_ids[i, 1]))
+                v = max(state.speed_kmh[i], 0.01)
+                times[(from_id, to_id)] = state.length_m[i] / (v / 3.6)
+            return times
+
+        times_w = _link_times(result_w)
+        times_wo = _link_times(result_wo)
+
+        html = (
+            '<table style="border-collapse:collapse; width:100%; max-width:700px; '
+            'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.85em;">'
+            '<thead><tr style="border-bottom:2px solid #333;">'
+            '<th style="text-align:left;padding:8px;">Route</th>'
+            '<th style="text-align:right;padding:8px;">Without Shortcut</th>'
+            '<th style="text-align:right;padding:8px;">With Shortcut</th>'
+            '</tr></thead><tbody>'
+        )
+
+        for route_name, links in routes.items():
+            # Without shortcut
+            wo_total = None
+            if all(lk in times_wo for lk in links):
+                wo_total = sum(times_wo[lk] for lk in links)
+            # With shortcut
+            w_total = None
+            if all(lk in times_w for lk in links):
+                w_total = sum(times_w[lk] for lk in links)
+
+            wo_str = f"{wo_total:.1f}s" if wo_total is not None else "&mdash;"
+            w_str = f"{w_total:.1f}s" if w_total is not None else "&mdash;"
+
+            html += (
+                f'<tr style="border-bottom:1px solid #e0e0e0;">'
+                f'<td style="padding:6px 8px;font-weight:600;">{route_name}</td>'
+                f'<td style="text-align:right;padding:6px 8px;">{wo_str}</td>'
+                f'<td style="text-align:right;padding:6px 8px;">{w_str}</td>'
+                f'</tr>'
+            )
+
         html += '</tbody></table>'
         return html
 
@@ -388,6 +444,16 @@ def generate_braess_report(
         <span style="color:#FF9800">Orange</span> = moderate.
         <span style="color:#4CAF50">Green</span> = uncongested.</p>"""
         + _state_table(result_with, result_without)
+    )
+
+    # --- Route Travel Times (Wardrop equilibrium) ---
+    figs.append(None)
+    descriptions.append(
+        """<h2>Route Travel Times</h2>
+        <p>Total travel time for each OD route, summed from link-level t = L/v.
+        At user equilibrium (Wardrop), all <i>used</i> routes between an OD pair
+        should have equal travel time.</p>"""
+        + _route_travel_times(result_with, result_without)
     )
 
     # --- 2. TSTT Comparison ---
