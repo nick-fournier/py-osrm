@@ -4,6 +4,23 @@ Maintains per-edge state arrays (flow, density, speed) indexed by directed
 OSM node pairs. Provides O(1) edge lookup and vectorized state updates.
 
 See docs/pyosrm_assignment_module.md §3 for the data model.
+
+Important: freeflow_kmh is an immutable physical road attribute
+-------------------------------------------------------------
+Free-flow speed must be set once at network discovery time and never
+overwritten.  On a clean (uncustomized) OSRM instance, annotation speed
+equals the profile-derived speed from OSM maxspeed tags, so it is safe to
+use as freeflow.  After any segment-speed customization, annotation speed
+reflects congested conditions and must NOT be used for freeflow.
+
+Lane count and jam density are NOT available from OSRM annotations and
+must be supplied via the ``state_patch`` callback or an external OSM
+reader.
+
+TODO: Add an OSM PBF/XML reader to extract ``lanes`` tags directly,
+removing the need for a state_patch callback for lane-dependent
+attributes.  Alternatively, extend OSRM's annotation API to expose
+lane count per segment.
 """
 
 from __future__ import annotations
@@ -151,6 +168,11 @@ class NetworkState:
     ) -> int:
         """Register a new edge discovered mid-assignment.
 
+        The caller is responsible for providing a correct ``freeflow_kmh``.
+        During iteration (after OSRM customization), annotation speed is
+        congested — do NOT pass it here.  Use the network median freeflow
+        or a config default instead.
+
         Returns the ordinal of the new (or existing) edge.
         """
         key = (int(from_id), int(to_id))
@@ -204,9 +226,16 @@ class NetworkState:
     ) -> "NetworkState":
         """Build a NetworkState from OSRM route annotation results.
 
+        IMPORTANT: This must be called on a **clean** (uncustomized) OSRM
+        instance so that annotation speed reflects the original profile
+        speed (derived from OSM ``maxspeed`` tags).  After any segment-speed
+        customization, annotation speed is congested and must NOT be used
+        as freeflow.
+
         Discovers all unique directed edges across all routes. Uses OSRM
-        annotations for length and speed; applies defaults for jam_density
-        and lanes (no road class info available from annotations alone).
+        annotations for length and freeflow speed; applies defaults for
+        jam_density and lanes (not available from OSRM annotations —
+        supply via ``state_patch`` or an external OSM reader).
 
         Parameters
         ----------

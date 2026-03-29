@@ -36,6 +36,19 @@ from osrm.assignment.osm_synthesis import sioux_falls_network, patch_sioux_falls
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "sioux_falls"
 
 
+def _copy_clean_osrm(base_path: str, run_dir: Path) -> str:
+    """Copy clean OSRM files to a fresh directory for an isolated run.
+
+    Segment-speed customization permanently mutates OSRM edge weights,
+    so each assignment run() needs its own copy of the base files.
+    """
+    src = Path(base_path).parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for f in src.iterdir():
+        shutil.copy2(f, run_dir / f.name)
+    return str(run_dir / Path(base_path).name)
+
+
 def _prepare_sf_network(tmp_path: Path):
     """Synthesize, extract, partition, customize Sioux Falls."""
     work = tmp_path / "sioux_falls"
@@ -256,6 +269,8 @@ def generate_sioux_falls_report(
     )
 
     # --- 1. Demand scaling sweep ---
+    # Each run permanently mutates OSRM edge weights via segment-speed
+    # customization, so each scale level needs a fresh copy of the base files.
     scales = [0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50, 0.75, 1.00]
     sweep_demand = []
     sweep_gap = []
@@ -264,8 +279,9 @@ def generate_sioux_falls_report(
     sweep_tstt = []
 
     for scale in scales:
+        run_base = _copy_clean_osrm(base, tmp_path / f"sf_scale_{scale:.2f}")
         result = _run_sf_assignment(
-            base, meta, max_iter=max_iter, method="fw", demand_scale=scale,
+            run_base, meta, max_iter=max_iter, method="fw", demand_scale=scale,
         )
         state = result.network_state
         last = result.iteration_log[-1]
@@ -374,8 +390,9 @@ def generate_sioux_falls_report(
     )
 
     # --- 2. Detailed 10% run: FW vs MSA convergence ---
+    base_fw = _copy_clean_osrm(base, tmp_path / "fw_detail")
     result_fw = _run_sf_assignment(
-        base, meta, max_iter=max_iter, method="fw", demand_scale=0.10,
+        base_fw, meta, max_iter=max_iter, method="fw", demand_scale=0.10,
     )
     base_msa, meta_msa = _prepare_sf_network(tmp_path / "msa")
     result_msa = _run_sf_assignment(
@@ -513,7 +530,8 @@ def generate_sioux_falls_report(
     check_scales = [0.05, 0.10, 0.15, 0.20]
     colors_vc = ["#4CAF50", "#1565C0", "#FF6F00", "#D32F2F"]
     for sc, col in zip(check_scales, colors_vc):
-        res = _run_sf_assignment(base, meta, max_iter=max_iter, method="fw", demand_scale=sc)
+        vc_base = _copy_clean_osrm(base, tmp_path / f"sf_vc_{sc:.2f}")
+        res = _run_sf_assignment(vc_base, meta, max_iter=max_iter, method="fw", demand_scale=sc)
         st = res.network_state
         vc_list = []
         flow_list = []

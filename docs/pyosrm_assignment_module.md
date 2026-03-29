@@ -204,7 +204,21 @@ critical property that makes the entire design work without OSRM-core changes.
 | `datasources` | uint8 | source ID | yes |
 
 **Not available**: OSM way IDs, internal edge IDs, number of lanes, capacity.
-These must come from external data or heuristics.
+These must come from external data or heuristics (supplied via the
+``state_patch`` callback).
+
+> **Freeflow speed invariant.**  On a *clean* (uncustomized) OSRM instance,
+> annotation ``speed`` reflects the profile-derived speed from OSM ``maxspeed``
+> tags — this IS the free-flow speed.  Segment-speed customization
+> **permanently mutates** OSRM edge weights (even re-partition does not undo
+> it; only a full re-extract from OSM resets).  Therefore ``freeflow_kmh`` is
+> captured once at network discovery and treated as immutable.  Each
+> ``AssignmentLoop.run()`` call must operate on a clean OSRM base path.
+>
+> **TODO — lane count from OSM.**  Lane count is not exposed by OSRM
+> annotations.  Currently supplied via ``state_patch``.  Future work: add an
+> OSM PBF/XML reader to extract ``lanes`` tags directly, or extend OSRM's
+> annotation API to include lane count per segment.
 
 
 ## 3  Network state model

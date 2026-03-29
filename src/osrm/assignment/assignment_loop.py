@@ -171,10 +171,17 @@ class AssignmentLoop:
     ) -> NetworkState:
         """Route all trips with alternatives to discover network edges.
 
-        Uses freeflow routing (before any congestion) to build the
-        edge registry from route annotations. Requests alternatives
-        to capture non-shortest paths that may become attractive
-        under congestion.
+        IMPORTANT: ``engine`` must be a clean (uncustomized) OSRM instance
+        so that annotation speed reflects the original profile speed from
+        OSM ``maxspeed`` tags.  This speed is stored as ``freeflow_kmh``
+        and is never updated — it is an immutable physical road attribute.
+
+        Segment-speed customization permanently mutates OSRM edge weights
+        (only re-extract from OSM resets them), so discovery cannot be
+        repeated on a contaminated instance.
+
+        Requests alternatives to capture non-shortest paths that may
+        become attractive under congestion.
         """
         logger.info("Discovering network edges from %d OD pairs...", len(trips))
         route_results = []
@@ -242,6 +249,10 @@ class AssignmentLoop:
                     idx = state.edge_ordinal(from_id, to_id)
                     if idx is None:
                         dist = distances[i] if i < len(distances) else 0.0
+                        # Annotation speed is valid as freeflow here:
+                        # the segment-speed CSV only contains edges already
+                        # in NetworkState, so a never-seen edge still has
+                        # its original profile speed from OSM maxspeed.
                         spd = (speeds[i] * 3.6) if i < len(speeds) else 1.0
                         jam_d = (self.config.default_jam_density_per_lane
                                  * self.config.default_n_lanes)
@@ -400,16 +411,32 @@ class AssignmentLoop:
         state_patch : callable, optional
             Called with (NetworkState,) immediately after discovery to
             patch lane counts or other attributes not available from
-            OSRM annotations.
+            OSRM annotations (e.g. lane count, jam density).
 
         Returns
         -------
         AssignmentResult
+
+        Notes
+        -----
+        Network discovery must happen on a clean (uncustomized) OSRM
+        instance so that annotation speed = freeflow.  Segment-speed
+        customization permanently mutates OSRM edge weights (even
+        re-partition does not undo it; only re-extract from OSM resets).
+        Therefore freeflow_kmh is captured once at discovery and treated
+        as immutable for the lifetime of the NetworkState.
+
+        If ``run()`` is called multiple times on the same base path,
+        the caller must re-extract/partition/customize beforehand, or
+        use a separate base path per run.
         """
         t_start = time.monotonic()
         log: List[IterationResult] = []
 
-        # 1. Initial routing on freeflow to discover network
+        # 1. Discover network on current OSRM state.
+        # IMPORTANT: the engine MUST be clean (no prior segment-speed
+        # customization) so annotation speed = freeflow from OSM maxspeed.
+        # See class docstring for the freeflow invariant.
         engine = self._create_engine()
         state = self._discover_network(engine, trips)
 
