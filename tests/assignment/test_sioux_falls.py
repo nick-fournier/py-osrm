@@ -482,8 +482,8 @@ def generate_sioux_falls_report(
         ln = int(state.n_lanes[i])
         kj = state.jam_density[i]
         qc = vf * kj / 6
-        tt = dist_m / 1000 / v * 60 if v > 0.01 else 999
-        ff_tt = dist_m / 1000 / vf * 60 if vf > 0.01 else 999
+        tt = dist_m / 1000 / v * 60 if v > 0 else float("inf")
+        ff_tt = dist_m / 1000 / vf * 60 if vf > 0 else float("inf")
         vc = flow / qc if qc > 0 else 0
         rows.append((key, ln, dist_m, vf, v, flow, qc, ff_tt, tt, vc))
 
@@ -515,8 +515,10 @@ def generate_sioux_falls_report(
     )
 
     for key, ln, dist_m, vf, v, flow, qc, ff_tt, tt, vc in rows:
-        ratio = tt / ff_tt if ff_tt > 0.01 and ff_tt < 900 else 1.0
+        ratio = tt / ff_tt if ff_tt > 0 and tt < float("inf") else float("inf")
         vc_style = _vc_color(vc)
+        tt_str = f"{tt:.2f}" if tt < float("inf") else "&infin;"
+        ratio_str = f"{ratio:.2f}" if ratio < float("inf") else "&infin;"
         table_html += (
             f'<tr style="border-bottom:1px solid #eee;">'
             f'<td style="padding:4px 6px;">{key[0]}&rarr;{key[1]}</td>'
@@ -528,17 +530,17 @@ def generate_sioux_falls_report(
             f'<td style="text-align:right;padding:4px 6px;{vc_style}">{vc:.2f}</td>'
             f'<td style="text-align:right;padding:4px 6px;">{v:.1f}</td>'
             f'<td style="text-align:right;padding:4px 6px;">{ff_tt:.2f}</td>'
-            f'<td style="text-align:right;padding:4px 6px;">{tt:.2f}</td>'
-            f'<td style="text-align:right;padding:4px 6px;">{ratio:.2f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{tt_str}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{ratio_str}</td>'
             f'</tr>\n'
         )
 
     table_html += '</tbody></table>'
 
-    # Summary stats
+    # Summary stats (exclude inf for means)
     all_vc = [r[9] for r in rows]
     all_speeds = [r[4] for r in rows]
-    all_ratios = [r[8] / r[7] if r[7] > 0.01 else 1.0 for r in rows]
+    finite_ratios = [r[8] / r[7] for r in rows if r[7] > 0 and r[8] < float("inf")]
     n_congested = sum(1 for vc in all_vc if vc > 0.6)
 
     figs.append(None)  # placeholder — table goes in description
@@ -548,7 +550,7 @@ def generate_sioux_falls_report(
         f"Mean V/C: <b>{np.mean(all_vc):.2f}</b>, "
         f"max V/C: {max(all_vc):.2f}. "
         f"Mean speed: <b>{np.mean(all_speeds):.0f} km/h</b>. "
-        f"Mean TT/FF: {np.mean(all_ratios):.2f}. "
+        f"Mean TT/FF: {np.mean(finite_ratios):.2f}. "
         f"Links with V/C &gt; 0.6: {n_congested}/{state.n_edges}. "
         "Units: v<sub>f</sub> and Speed in km/h, q<sub>c</sub> and Flow in vph, "
         "TT in minutes. "
@@ -579,11 +581,11 @@ def generate_sioux_falls_report(
         vf = state.freeflow_kmh[i]
         v = state.speed_kmh[i]
         our_flow = state.flow_vph[i]
-        our_tt = dist_m / 1000 / v * 60 if v > 0.01 else 999
+        our_tt = dist_m / 1000 / v * 60 if v > 0 else float("inf")
 
-        # BPR cost is in TNTP units (= 0.01 hours for Sioux Falls).
-        # Convert to minutes for comparison.
-        bpr_tt_min = bpr_cost * 60.0
+        # BPR cost is the equilibrium travel time in minutes (same unit
+        # as TNTP free-flow time column).
+        bpr_tt_min = bpr_cost
 
         mfd_flows.append(our_flow)
         bpr_flows.append(bpr_flow)
@@ -620,21 +622,27 @@ def generate_sioux_falls_report(
         f"&rho; = <b>{flow_rho:.3f}</b> ({len(mfd_flows)} matched links).</p>"
     )
 
-    # 4b: Travel time scatter
+    # 4b: Travel time scatter (exclude gridlocked links with inf TT)
+    finite_mask = [t < float("inf") for t in mfd_tt]
+    tt_bpr_f = [b for b, m in zip(bpr_tt, finite_mask) if m]
+    tt_mfd_f = [t for t, m in zip(mfd_tt, finite_mask) if m]
+    tt_labels_f = [l for l, m in zip(link_labels, finite_mask) if m]
+    n_gridlocked = sum(1 for m in finite_mask if not m)
+
     fig_tt_corr = go.Figure()
     fig_tt_corr.add_trace(go.Scatter(
-        x=bpr_tt, y=mfd_tt, mode="markers",
+        x=tt_bpr_f, y=tt_mfd_f, mode="markers",
         marker=dict(size=6, color="#D32F2F", opacity=0.7),
-        hovertext=link_labels, hoverinfo="text",
+        hovertext=tt_labels_f, hoverinfo="text",
     ))
     # Add y=x reference line
-    tt_max = max(max(bpr_tt, default=1), max(mfd_tt, default=1)) * 1.1
+    tt_max = max(max(tt_bpr_f, default=1), max(tt_mfd_f, default=1)) * 1.1
     fig_tt_corr.add_shape(
         type="line", x0=0, x1=tt_max, y0=0, y1=tt_max,
         line=dict(color="#999", dash="dash", width=1),
     )
-    if len(mfd_tt) >= 3:
-        tt_rho, _ = spearmanr(bpr_tt, mfd_tt)
+    if len(tt_mfd_f) >= 3:
+        tt_rho, _ = spearmanr(tt_bpr_f, tt_mfd_f)
     else:
         tt_rho = 0.0
     fig_tt_corr.update_layout(
@@ -645,15 +653,19 @@ def generate_sioux_falls_report(
         xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
     )
     figs.append(fig_tt_corr)
+    gridlock_note = (
+        f" ({n_gridlocked} gridlocked link{'s' if n_gridlocked != 1 else ''} excluded.)"
+        if n_gridlocked > 0 else ""
+    )
     descriptions.append(
         "<h2>Travel Time Correlation: MFD vs BPR</h2>"
-        "<p>Per-link travel time: MFD at 10% demand vs BPR at 100% demand. "
-        "Dashed line = y&thinsp;=&thinsp;x. MFD at 10% demand is near freeflow, "
-        "so travel times are shorter than BPR&rsquo;s congested equilibrium. "
-        "The pattern should correlate: longer links take longer in both models. "
-        f"Spearman &rho; = <b>{tt_rho:.3f}</b>. "
-        "Note: BPR &lsquo;cost&rsquo; is in TNTP units (minutes), which embeds "
-        "the BPR polynomial &mdash; not a physical road attribute.</p>"
+        f"<p>Per-link travel time (minutes): MFD at 10% demand ({len(tt_mfd_f)} "
+        "links) vs BPR at 100% demand equilibrium. "
+        "Dashed line = y&thinsp;=&thinsp;x. "
+        "MFD at 10% demand is near freeflow, so travel times cluster near "
+        "freeflow values. BPR at 100% shows heavy congestion on some links "
+        "(cost &gt;&gt; freeflow time). "
+        f"Spearman &rho; = <b>{tt_rho:.3f}</b>.{gridlock_note}</p>"
     )
 
     # --- 5. V/C scatter across demand levels ---
