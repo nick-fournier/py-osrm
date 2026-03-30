@@ -360,19 +360,38 @@ def braess_network(
     -------
     (path, metadata) where metadata includes node coords and link info.
     """
-    # 6 nodes: 4 main + 2 detour waypoints for constant links.
+    # 6-node network: 4 main nodes + S-curve waypoints for highway links.
     # Variable links (1→3, 4→2): ~30 km direct.
-    # Constant links (1→4, 3→2): ~54 km via detour waypoints (1.8× ratio).
+    # Constant links (1→4, 3→2): ~54 km via S-curve waypoints (1.8× ratio).
     # Shortcut (3→4): ~3 km vertical (10% of variable length).
-    # 30 km scale maximizes stability margin (~1.2 min) against OSRM
+    # 30 km scale maximizes stability margin (~0.9 min) against OSRM
     # speed quantization while maintaining 11.9% paradox strength.
+    # Highway S-curves use 8 intermediate waypoints each, keeping the
+    # geographic footprint to ~11 km offset instead of ~22 km with a
+    # single detour point.
     nodes = {
         1: (7.1000, 43.7400),   # west (origin)
         3: (7.4725, 43.7535),   # center-north
         4: (7.4725, 43.7265),   # center-south
         2: (7.8451, 43.7400),   # east (destination)
-        5: (7.2863, 43.5315),   # detour south (for 1→4 highway)
-        6: (7.6588, 43.9485),   # detour north (for 3→2 highway)
+        # Highway 1→4 S-curve waypoints (south-then-north)
+        10: (7.1370, 43.6758),
+        11: (7.1761, 43.6409),
+        12: (7.2183, 43.6510),
+        13: (7.2632, 43.7006),
+        14: (7.3093, 43.7659),
+        15: (7.3542, 43.8155),
+        16: (7.3964, 43.8256),
+        17: (7.4355, 43.7907),
+        # Highway 3→2 S-curve waypoints (north-then-south)
+        18: (7.5183, 43.8147),
+        19: (7.5620, 43.8466),
+        20: (7.6026, 43.8335),
+        21: (7.6404, 43.7809),
+        22: (7.6772, 43.7126),
+        23: (7.7150, 43.6600),
+        24: (7.7556, 43.6469),
+        25: (7.7993, 43.6788),
     }
 
     ways = [
@@ -385,18 +404,18 @@ def braess_network(
                 "name": "Link 1-3 (variable)",
             },
         },
-        # 1→5→4: constant cost highway (4 lanes, ~54 km via detour)
+        # 1→...→4: constant cost highway (4 lanes, ~54 km via S-curve)
         {
-            "id": 102, "nodes": [1, 5, 4],
+            "id": 102, "nodes": [1, 10, 11, 12, 13, 14, 15, 16, 17, 4],
             "tags": {
                 "highway": "motorway", "oneway": "yes",
                 "maxspeed": "80", "lanes": "4",
                 "name": "Link 1-4 (highway)",
             },
         },
-        # 3→6→2: constant cost highway (4 lanes, ~54 km via detour)
+        # 3→...→2: constant cost highway (4 lanes, ~54 km via S-curve)
         {
-            "id": 103, "nodes": [3, 6, 2],
+            "id": 103, "nodes": [3, 18, 19, 20, 21, 22, 23, 24, 25, 2],
             "tags": {
                 "highway": "motorway", "oneway": "yes",
                 "maxspeed": "80", "lanes": "4",

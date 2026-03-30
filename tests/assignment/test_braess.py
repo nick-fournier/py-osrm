@@ -133,6 +133,56 @@ class TestBraessParadox:
             f"should carry substantial traffic for paradox to work"
         )
 
+    def test_with_shortcut_all_on_shortcut_path(self, tmp_path):
+        """With the shortcut, all traffic should use 1→3→4→2.
+
+        This IS the correct Braess equilibrium: the shortcut path is
+        cheaper than alternatives (by ~0.9 min), so no driver deviates.
+        Highway links carry zero flow.
+        """
+        base, meta = _prepare_network(tmp_path, with_shortcut=True)
+        result = _run_assignment(
+            base, meta, demand=self.DEMAND, max_iter=30,
+        )
+        state = result.network_state
+
+        # Variable links + shortcut carry all demand
+        shortcut_path_edges = {(1, 3), (3, 4), (4, 2)}
+        for i in range(state.n_edges):
+            f, t = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
+            if (f, t) in shortcut_path_edges:
+                assert state.flow_vph[i] > self.DEMAND * 0.8, (
+                    f"Edge {f}→{t} should carry ~full demand, "
+                    f"got {state.flow_vph[i]:.0f} vph"
+                )
+            else:
+                assert state.flow_vph[i] < self.DEMAND * 0.1, (
+                    f"Edge {f}→{t} should carry ~zero flow, "
+                    f"got {state.flow_vph[i]:.0f} vph"
+                )
+
+    def test_without_shortcut_balanced_split(self, tmp_path):
+        """Without shortcut, traffic should split roughly 50/50."""
+        base, meta = _prepare_network(tmp_path, with_shortcut=False)
+        result = _run_assignment(
+            base, meta, demand=self.DEMAND, max_iter=30,
+        )
+        state = result.network_state
+
+        # Find flow on variable links (1→3 and 4→2)
+        flows = {}
+        for i in range(state.n_edges):
+            f, t = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
+            if (f, t) == (1, 3) or (f, t) == (4, 2):
+                flows[(f, t)] = state.flow_vph[i]
+
+        assert len(flows) == 2, f"Expected 2 variable-link flows, got {flows}"
+        for edge, flow in flows.items():
+            assert self.DEMAND * 0.3 < flow < self.DEMAND * 0.7, (
+                f"Edge {edge[0]}→{edge[1]} has {flow:.0f} vph — "
+                f"expected ~50% of {self.DEMAND:.0f}"
+            )
+
     def test_both_complete_without_error(self, tmp_path):
         """Both networks should complete assignment without error."""
         base_with, meta_with = _prepare_network(tmp_path, with_shortcut=True)
@@ -264,11 +314,13 @@ def generate_braess_report(
             (lat - ref_lat) * 111.32,
         )
 
-    # Logical edges — highways route via detour waypoints (5, 6)
+    # Logical edges — highways route via S-curve waypoints
+    hw_14_nodes = (1, 10, 11, 12, 13, 14, 15, 16, 17, 4)
+    hw_32_nodes = (3, 18, 19, 20, 21, 22, 23, 24, 25, 2)
     edges_wo = [
         ((1, 3), "variable 1-lane 80 km/h", "#F44336"),
-        ((1, 5, 4), "highway 4-lane 80 km/h", "#2196F3"),
-        ((3, 6, 2), "highway 4-lane 80 km/h", "#2196F3"),
+        (hw_14_nodes, "highway 4-lane 80 km/h", "#2196F3"),
+        (hw_32_nodes, "highway 4-lane 80 km/h", "#2196F3"),
         ((4, 2), "variable 1-lane 80 km/h", "#F44336"),
     ]
     edges_w = edges_wo + [
@@ -285,8 +337,7 @@ def generate_braess_report(
 
     for col, edges in enumerate([edges_wo, edges_w], 1):
         for edge_info in edges:
-            *node_seq, label, color = edge_info[0], edge_info[1], edge_info[2]
-            node_seq = edge_info[0]
+            node_seq, label, color = edge_info[0], edge_info[1], edge_info[2]
             xs = [node_km[n][0] for n in node_seq]
             ys = [node_km[n][1] for n in node_seq]
             u, v = node_seq[0], node_seq[-1]
@@ -336,17 +387,6 @@ def generate_braess_report(
             text=labels, textfont=dict(size=14, color="white"),
             textposition="middle center",
             hovertext=hover, hoverinfo="text",
-            showlegend=False,
-        ), row=1, col=col)
-
-        # Detour waypoints (small grey dots)
-        wp_nodes = [5, 6]
-        wxs = [node_km[n][0] for n in wp_nodes]
-        wys = [node_km[n][1] for n in wp_nodes]
-        topo_fig.add_trace(go.Scatter(
-            x=wxs, y=wys, mode="markers",
-            marker=dict(size=8, color="#BDBDBD", line=dict(width=1, color="white")),
-            hovertext=[f"Waypoint {n}" for n in wp_nodes], hoverinfo="text",
             showlegend=False,
         ), row=1, col=col)
 
@@ -495,9 +535,14 @@ def generate_braess_report(
 
     def _route_travel_times(result_w, result_wo):
         """Build a table of route travel times to demonstrate Wardrop equilibrium."""
+        # Highway segments follow S-curve waypoint chains
+        hw_14 = [("1","10"),("10","11"),("11","12"),("12","13"),
+                 ("13","14"),("14","15"),("15","16"),("16","17"),("17","4")]
+        hw_32 = [("3","18"),("18","19"),("19","20"),("20","21"),
+                 ("21","22"),("22","23"),("23","24"),("24","25"),("25","2")]
         routes = {
-            "Upper (1&rarr;3&rarr;2)": [("1", "3"), ("3", "6"), ("6", "2")],
-            "Lower (1&rarr;4&rarr;2)": [("1", "5"), ("5", "4"), ("4", "2")],
+            "Upper (1&rarr;3&rarr;2)": [("1", "3")] + hw_32,
+            "Lower (1&rarr;4&rarr;2)": hw_14 + [("4", "2")],
             "Shortcut (1&rarr;3&rarr;4&rarr;2)": [("1", "3"), ("3", "4"), ("4", "2")],
         }
 
