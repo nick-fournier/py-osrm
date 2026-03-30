@@ -979,9 +979,9 @@ def generate_validation_report(
     0. Network topology map
     1. Demand scaling sweep (oversaturation, speed, TSTT)
     2. FW vs MSA convergence comparison
-    3. Per-link state table
+    3. Speed–density and flow–density MFD scatter
     4. Flow and travel time correlation vs BPR reference
-    5. V/C scatter at multiple demand levels
+    5. Per-link state table
 
     Parameters
     ----------
@@ -1005,7 +1005,7 @@ def generate_validation_report(
     sweep_scales : sequence of float, optional
         Demand fractions for the scaling sweep.
     vc_scales : sequence of float, optional
-        Demand fractions for V/C scatter plot.
+        Deprecated — V/C scatter removed. Kept for API compatibility.
     intro_html : str
         Additional HTML to insert after the auto-generated intro.
 
@@ -1060,28 +1060,18 @@ def generate_validation_report(
     )
 
     # --- 3. MFD scatter ---
+    state = result_fw.network_state
     logger.info("[%s] Building MFD scatter plots...", network_name)
     _add_mfd_section(figs, descriptions, state, detail_scale)
 
     # --- 4. Flow and TT correlation ---
-    state = result_fw.network_state
     if ref:
         logger.info("[%s] Building correlation plots...", network_name)
         _add_correlation_section(
             figs, descriptions, state, ref, link_attrs, detail_scale,
         )
 
-    # --- 5. V/C scatter ---
-    logger.info(
-        "[%s] Running V/C scatter (%d scales)...",
-        network_name, len(vc_scales),
-    )
-    _add_vc_section(
-        figs, descriptions, base, meta, copy_fn, run_fn,
-        link_attrs, vc_scales, max_iter, tmp_path,
-    )
-
-    # --- 6. Link state table (at end — large for big networks) ---
+    # --- 5. Link state table (at end — large for big networks) ---
     logger.info("[%s] Building link state table...", network_name)
     _add_link_table_section(
         figs, descriptions, state, link_attrs, detail_scale, total_demand,
