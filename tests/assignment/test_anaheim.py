@@ -200,3 +200,31 @@ class TestAnaheim:
         assert state.n_edges >= 200, (
             f"Only {state.n_edges} edges discovered from 914-link network"
         )
+
+
+def generate_anaheim_report(
+    tmp_path: str | Path,
+    output_path: str = "docs/plots/anaheim_validation.html",
+    max_iter: int = 50,
+) -> Path:
+    """Generate Anaheim validation report using the generic reporter.
+
+    Call directly::
+
+        from tests.assignment.test_anaheim import generate_anaheim_report
+        generate_anaheim_report("/tmp/work")
+    """
+    from osrm.assignment.plots import generate_validation_report
+
+    return generate_validation_report(
+        network_name="Anaheim",
+        prepare_fn=_prepare_anaheim_network,
+        run_fn=_run_anaheim_assignment,
+        copy_fn=_copy_clean_osrm,
+        tmp_path=Path(tmp_path),
+        output_path=output_path,
+        max_iter=max_iter,
+        detail_scale=0.30,
+        sweep_scales=[0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 0.75, 1.00],
+        vc_scales=[0.10, 0.20, 0.30, 0.50],
+    )
