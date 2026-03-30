@@ -1433,16 +1433,38 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     """Section: network-wide MFD from per-link state.
 
     Plots speed–density and flow–density scatter for all links,
-    overlaid with the theoretical VDF curve for a representative link.
+    overlaid with theoretical VDF curves for each lane class present
+    in the network.
     """
     from osrm.assignment.vdf import BiParabolicVDF
-    vdf = BiParabolicVDF()
+    vdf = BiParabolicVDF(min_speed_kmh=1.08)
 
     k = state.density_vpkm
     v = state.speed_kmh
     q = state.flow_vph
     vf = state.freeflow_kmh
     kj = state.jam_density
+
+    # --- Build VDF curves per lane class ---
+    # Group links by lane count, use median v_f for each group
+    lane_classes = {}
+    for i in range(state.n_edges):
+        nl = int(state.n_lanes[i])
+        lane_classes.setdefault(nl, []).append(i)
+
+    curve_colors = ["#999", "#66BB6A", "#AB47BC", "#FF7043", "#42A5F5"]
+    curves = []
+    for idx, (nl, idxs) in enumerate(sorted(lane_classes.items())):
+        med_vf_nl = float(np.median(vf[idxs]))
+        kj_nl = float(np.median(kj[idxs]))
+        k_pts = np.linspace(0, kj_nl, 200)
+        vf_arr = np.full_like(k_pts, med_vf_nl)
+        kj_arr = np.full_like(k_pts, kj_nl)
+        v_pts = vdf.density_to_speed(k_pts, vf_arr, kj_arr)
+        q_pts = vdf.density_to_flow(k_pts, vf_arr, kj_arr)
+        label = f"{nl}-lane (v_f={med_vf_nl:.0f}, k_j={kj_nl:.0f})"
+        color = curve_colors[idx % len(curve_colors)]
+        curves.append((nl, k_pts, v_pts, q_pts, label, color))
 
     # --- Speed–Density ---
     fig_vk = go.Figure()
@@ -1454,18 +1476,12 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
         hoverinfo="text",
         showlegend=False,
     ))
-    # Theoretical curve for median v_f / k_j
-    med_vf = float(np.median(vf[vf > 0])) if (vf > 0).any() else 60.0
-    med_kj = float(np.median(kj[kj > 0])) if (kj > 0).any() else 150.0
-    k_curve = np.linspace(0, med_kj, 200)
-    v_curve = vdf.density_to_speed(
-        k_curve, np.full_like(k_curve, med_vf), np.full_like(k_curve, med_kj),
-    )
-    fig_vk.add_trace(go.Scatter(
-        x=k_curve, y=v_curve, mode="lines",
-        line=dict(color="#999", dash="dash", width=1),
-        name=f"VDF (v_f={med_vf:.0f}, k_j={med_kj:.0f})",
-    ))
+    for nl, k_pts, v_pts, q_pts, label, color in curves:
+        fig_vk.add_trace(go.Scatter(
+            x=k_pts, y=v_pts, mode="lines",
+            line=dict(color=color, dash="dash", width=1),
+            name=label,
+        ))
     fig_vk.update_layout(
         title=f"Speed–Density ({detail_scale:.0%} demand)",
         xaxis_title="Density (veh/km)",
@@ -1475,15 +1491,15 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
         yaxis=dict(rangemode="tozero"),
     )
     figs.append(fig_vk)
+    curve_labels = ", ".join(f"{nl}-lane" for nl, *_ in curves)
     descriptions.append(
         "<h2>Speed–Density (MFD)</h2>"
-        "<p>Each point is one link. Dashed line: theoretical VDF at "
-        f"median v<sub>f</sub>={med_vf:.0f} km/h, k<sub>j</sub>={med_kj:.0f} veh/km. "
-        "Points above the curve have higher v<sub>f</sub> or lower k/k<sub>j</sub>; "
-        "points below are more congested.</p>"
+        "<p>Each point is one link. Dashed curves: theoretical VDF for "
+        f"lane classes ({curve_labels}), using median v<sub>f</sub> per class.</p>"
     )
 
     # --- Flow–Density ---
+    # Use density_to_flow() — not k×v — to avoid speed-floor artifact
     fig_qk = go.Figure()
     fig_qk.add_trace(go.Scatter(
         x=k, y=q, mode="markers",
@@ -1493,12 +1509,12 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
         hoverinfo="text",
         showlegend=False,
     ))
-    q_curve = k_curve * v_curve
-    fig_qk.add_trace(go.Scatter(
-        x=k_curve, y=q_curve, mode="lines",
-        line=dict(color="#999", dash="dash", width=1),
-        name=f"VDF (v_f={med_vf:.0f}, k_j={med_kj:.0f})",
-    ))
+    for nl, k_pts, v_pts, q_pts, label, color in curves:
+        fig_qk.add_trace(go.Scatter(
+            x=k_pts, y=q_pts, mode="lines",
+            line=dict(color=color, dash="dash", width=1),
+            name=label,
+        ))
     fig_qk.update_layout(
         title=f"Flow–Density ({detail_scale:.0%} demand)",
         xaxis_title="Density (veh/km)",
