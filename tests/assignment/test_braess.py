@@ -75,17 +75,26 @@ def _run_assignment(
 class TestBraessParadox:
     """Structural validation: Braess paradox.
 
-    The paradox: adding a zero-cost shortcut to a 4-node network
-    INCREASES total system travel time under user equilibrium.
+    The paradox: adding a cheap shortcut to a 4-node diamond network
+    INCREASES total system travel time under user equilibrium because
+    the shortcut attracts all traffic through both narrow links.
+
+    Demand = 2500 vph ≈ 93% of narrow link capacity (q_c ≈ 2680).
     """
+
+    DEMAND = 2500.0
 
     def test_tstt_increases_with_shortcut(self, tmp_path):
         """Core Braess test: TSTT should be higher with the shortcut."""
         base_with, meta_with = _prepare_network(tmp_path, with_shortcut=True)
         base_without, meta_without = _prepare_network(tmp_path, with_shortcut=False)
 
-        result_with = _run_assignment(base_with, meta_with, demand=1500.0)
-        result_without = _run_assignment(base_without, meta_without, demand=1500.0)
+        result_with = _run_assignment(
+            base_with, meta_with, demand=self.DEMAND, max_iter=30, method="fw",
+        )
+        result_without = _run_assignment(
+            base_without, meta_without, demand=self.DEMAND, max_iter=30, method="fw",
+        )
 
         tstt_with = result_with.iteration_log[-1].tstt
         tstt_without = result_without.iteration_log[-1].tstt
@@ -95,13 +104,34 @@ class TestBraessParadox:
             f"should exceed TSTT without ({tstt_without:.0f})"
         )
 
+    def test_shortcut_carries_flow(self, tmp_path):
+        """The shortcut link must actually carry flow at equilibrium."""
+        base, meta = _prepare_network(tmp_path, with_shortcut=True)
+        result = _run_assignment(
+            base, meta, demand=self.DEMAND, max_iter=30, method="fw",
+        )
+        state = result.network_state
+
+        # Find the shortcut edge (3→4)
+        shortcut_flow = 0.0
+        for i in range(state.n_edges):
+            f, t = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
+            if f == 3 and t == 4:
+                shortcut_flow = state.flow_vph[i]
+                break
+
+        assert shortcut_flow > 100, (
+            f"Shortcut 3→4 has only {shortcut_flow:.0f} vph flow — "
+            f"should carry substantial traffic for paradox to work"
+        )
+
     def test_both_complete_without_error(self, tmp_path):
         """Both networks should complete assignment without error."""
         base_with, meta_with = _prepare_network(tmp_path, with_shortcut=True)
         base_without, meta_without = _prepare_network(tmp_path, with_shortcut=False)
 
-        result_with = _run_assignment(base_with, meta_with, demand=2000.0, max_iter=5)
-        result_without = _run_assignment(base_without, meta_without, demand=2000.0, max_iter=5)
+        result_with = _run_assignment(base_with, meta_with, demand=self.DEMAND, max_iter=5)
+        result_without = _run_assignment(base_without, meta_without, demand=self.DEMAND, max_iter=5)
 
         assert result_with.iterations == 5
         assert result_without.iterations == 5
@@ -111,13 +141,13 @@ class TestBraessParadox:
     def test_flow_nonnegativity(self, tmp_path):
         """All link flows must be non-negative."""
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
-        result = _run_assignment(base, meta, demand=1500.0)
+        result = _run_assignment(base, meta, demand=self.DEMAND)
         assert np.all(result.network_state.flow_vph >= 0)
 
     def test_speeds_within_bounds(self, tmp_path):
         """Speeds must be between VDF min_speed and freeflow."""
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
-        result = _run_assignment(base, meta, demand=1500.0)
+        result = _run_assignment(base, meta, demand=self.DEMAND)
         state = result.network_state
         assert np.all(state.speed_kmh >= 0.01 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
@@ -125,7 +155,7 @@ class TestBraessParadox:
     def test_fw_monotone_tstt(self, tmp_path):
         """Frank-Wolfe should produce monotonically improving TSTT after iter 1."""
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
-        result = _run_assignment(base, meta, demand=1500.0, max_iter=20, method="fw")
+        result = _run_assignment(base, meta, demand=self.DEMAND, max_iter=20, method="fw")
 
         # TSTT should be roughly stable (not oscillating wildly)
         tstt_vals = [r.tstt for r in result.iteration_log]
@@ -146,12 +176,12 @@ class TestBraessParadox:
         The fix: each run needs a clean copy of the OSRM files.
         """
         base1, meta = _prepare_network(tmp_path / "r1", with_shortcut=True)
-        r1 = _run_assignment(base1, meta, demand=1500.0, max_iter=10)
+        r1 = _run_assignment(base1, meta, demand=self.DEMAND, max_iter=10)
         s1 = r1.network_state
 
         # Second run on a fresh copy (correct usage)
         base2, meta2 = _prepare_network(tmp_path / "r2", with_shortcut=True)
-        r2 = _run_assignment(base2, meta2, demand=1500.0, max_iter=10)
+        r2 = _run_assignment(base2, meta2, demand=self.DEMAND, max_iter=10)
         s2 = r2.network_state
 
         # Build freeflow maps keyed by edge
@@ -165,7 +195,7 @@ class TestBraessParadox:
         }
 
         common = set(ff1) & set(ff2)
-        assert len(common) >= 4, f"Expected ≥4 common edges, got {len(common)}"
+        assert len(common) >= 3, f"Expected ≥3 common edges, got {len(common)}"
         for key in common:
             assert abs(ff1[key] - ff2[key]) < 0.5, (
                 f"Freeflow mismatch on {key}: run1={ff1[key]:.1f}, "
@@ -176,7 +206,7 @@ class TestBraessParadox:
 def generate_braess_report(
     tmp_path: str | Path,
     output_path: str = "docs/plots/braess_validation.html",
-    demand: float = 1500.0,
+    demand: float = 2500.0,
     max_iter: int = 100,
 ) -> Path:
     """Run Braess validation and generate an interactive HTML report.

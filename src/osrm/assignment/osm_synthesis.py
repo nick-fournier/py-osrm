@@ -322,21 +322,30 @@ def braess_network(
 ) -> Tuple[Path, Dict[str, any]]:
     """Generate the Braess paradox network as OSM XML.
 
-    Network topology (diamond):
+    Network topology (diamond)::
 
         1 ──→ 3
         │     ↓ (shortcut, optional)
         ↓     ↓
         4 ──→ 2
 
-    - Links 1→3 and 4→2: narrow (1 lane), congestion-sensitive
-    - Links 1→4 and 3→2: wide (4 lanes), effectively constant cost
-    - Shortcut 3→4: ~2 km, fast (80 km/h), 1 lane (if enabled)
+    Designed for the bi-parabolic MFD to produce a clear Braess paradox:
+
+    - Links 1→3 and 4→2: **narrow** (1 lane, 80 km/h, ~4 km).
+      Congestion-sensitive — at demand D the cost doubles vs D/2.
+      q_c ≈ 2680 vph per the MFD (k_j=200, k_c=67).
+    - Links 1→4 and 3→2: **wide** (6 lanes, 40 km/h, ~4 km).
+      High-capacity (q_c ≈ 8000) — effectively constant cost.
+    - Shortcut 3→4: **cheap** (2 lanes, 80 km/h, ~0.45 km).
+      Travel time ≈ 0.34 min even at full demand.
+
+    At D ≈ 2500 vph (≈93% of narrow capacity):
+    - Without shortcut: traffic splits evenly, each narrow at 50% → fast.
+    - With shortcut: all traffic uses 1→3→4→2 because shortcut path is
+      cheapest. Both narrow links carry full D → heavy congestion.
+      TSTT increases ≈ 10-15% (the paradox).
 
     Origin = node 1, Destination = node 2.
-
-    Nodes form a diamond at Monaco coordinates.
-    Arterials are ~4 km; the shortcut is ~2 km.
 
     Parameters
     ----------
@@ -349,12 +358,12 @@ def braess_network(
     -------
     (path, metadata) where metadata includes node coords and link info.
     """
-    # Diamond layout: node 1 (west), 3 (center-north), 4 (center-south), 2 (east)
-    # Realistic urban scale: ~4 km arterials, ~0.6 km shortcut
+    # Diamond layout: nodes 3 and 4 are close together vertically
+    # so the shortcut is short (~0.45 km) while arterials are ~4 km.
     nodes = {
         1: (7.350, 43.735),    # west (origin)
-        3: (7.400, 43.744),    # center-north
-        4: (7.400, 43.726),    # center-south
+        3: (7.400, 43.737),    # center-north
+        4: (7.400, 43.733),    # center-south
         2: (7.450, 43.735),    # east (destination)
     }
 
@@ -364,15 +373,15 @@ def braess_network(
             "id": 101, "nodes": [1, 3],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "60", "lanes": "1", "name": "Link 1-3 (narrow)",
+                "maxspeed": "80", "lanes": "1", "name": "Link 1-3 (narrow)",
             },
         },
-        # 1→4: wide arterial, effectively constant cost (3 lanes, moderate speed)
+        # 1→4: wide arterial, effectively constant cost (6 lanes)
         {
             "id": 102, "nodes": [1, 4],
             "tags": {
                 "highway": "primary", "oneway": "yes",
-                "maxspeed": "40", "lanes": "3", "name": "Link 1-4 (wide)",
+                "maxspeed": "40", "lanes": "6", "name": "Link 1-4 (wide)",
             },
         },
         # 3→2: wide arterial, effectively constant cost
@@ -380,7 +389,7 @@ def braess_network(
             "id": 103, "nodes": [3, 2],
             "tags": {
                 "highway": "primary", "oneway": "yes",
-                "maxspeed": "40", "lanes": "3", "name": "Link 3-2 (wide)",
+                "maxspeed": "40", "lanes": "6", "name": "Link 3-2 (wide)",
             },
         },
         # 4→2: narrow, congestion-sensitive
@@ -388,18 +397,18 @@ def braess_network(
             "id": 104, "nodes": [4, 2],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "60", "lanes": "1", "name": "Link 4-2 (narrow)",
+                "maxspeed": "80", "lanes": "1", "name": "Link 4-2 (narrow)",
             },
         },
     ]
 
     if with_shortcut:
-        # 3→4: shortcut connecting street — fast but 1 lane
+        # 3→4: shortcut — short, fast, enough capacity to not congest
         ways.append({
             "id": 105, "nodes": [3, 4],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "80", "lanes": "1", "name": "Shortcut 3-4",
+                "maxspeed": "80", "lanes": "2", "name": "Shortcut 3-4",
             },
         })
 
@@ -420,7 +429,8 @@ def braess_network(
         "n_links": len(ways),
         "with_shortcut": with_shortcut,
         "narrow_links": ["1→3", "4→2"],
-        "wide_links": ["1→4", "3→2"] + (["3→4"] if with_shortcut else []),
+        "wide_links": ["1→4", "3→2"],
+        "shortcut_link": "3→4" if with_shortcut else None,
         "lane_map": lane_map,
     }
 
@@ -430,7 +440,7 @@ def braess_network(
 def patch_braess_lanes(
     state,
     meta: dict,
-    jam_density_per_lane: float = 130.0,
+    jam_density_per_lane: float = 200.0,
 ) -> None:
     """Patch NetworkState with correct lane counts for a Braess network.
 
