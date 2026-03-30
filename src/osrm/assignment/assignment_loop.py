@@ -11,6 +11,7 @@ See docs/traffic_assignment_design.md §4 and §7 for full specification.
 from __future__ import annotations
 
 import logging
+import random
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -290,6 +291,7 @@ class AssignmentLoop:
         trips: List[DemandTrip],
         state: NetworkState,
         blended_volume: np.ndarray,
+        sample_frac: float = 1.0,
     ) -> float:
         """Compute Wardrop relative gap.
 
@@ -302,6 +304,13 @@ class AssignmentLoop:
 
         Using demand volume (not MFD throughput) ensures the numerator
         accounts for all vehicles, even on oversaturated links.
+
+        Parameters
+        ----------
+        sample_frac : float
+            Fraction of trips to sample for the denominator.  At 1.0
+            all trips are used.  At e.g. 0.2, a random 20% of trips
+            are routed and the result is scaled up.
         """
         # Link travel time from current density-derived speed
         link_time_s = state.length_m * 3.6 / np.maximum(state.speed_kmh, 1.0)
@@ -312,13 +321,24 @@ class AssignmentLoop:
         if numerator == 0:
             return 0.0
 
+        # Optionally sample trips for denominator
+        if sample_frac < 1.0 and len(trips) > 1:
+            n_sample = max(1, int(len(trips) * sample_frac))
+            sampled = random.sample(trips, n_sample)
+            scale = len(trips) / n_sample
+        else:
+            sampled = trips
+            scale = 1.0
+
         # Denominator: demand × shortest path cost on current network
         denominator = 0.0
-        for trip in trips:
+        for trip in sampled:
             result = self._route_single(engine, trip)
             if result and result.get("routes"):
                 shortest_time = result["routes"][0]["duration"]
                 denominator += trip.volume * shortest_time
+
+        denominator *= scale
 
         if denominator == 0:
             return 0.0
@@ -407,6 +427,8 @@ class AssignmentLoop:
         trips: List[DemandTrip],
         progress_callback=None,
         state_patch=None,
+        gap_every: int = 5,
+        gap_sample_frac: float = 1.0,
     ) -> AssignmentResult:
         """Run the iterative assignment loop.
 
@@ -420,6 +442,16 @@ class AssignmentLoop:
             Called with (NetworkState,) immediately after discovery to
             patch lane counts or other attributes not available from
             OSRM annotations (e.g. lane count, jam density).
+        gap_every : int
+            Compute Wardrop relative gap every *N* iterations. The last
+            iteration always computes gap regardless.  On skipped
+            iterations the previous gap value is carried forward.
+            Default 5.
+        gap_sample_frac : float
+            Fraction of OD pairs to sample when computing gap (0, 1].
+            At 1.0 (default) all trips are used.  Lower values (e.g.
+            0.2) reduce gap computation cost for very large networks at
+            the expense of gap accuracy.
 
         Returns
         -------
@@ -533,9 +565,15 @@ class AssignmentLoop:
             engine_time = time.monotonic() - t_engine
 
             # 8. Compute gap (on updated network)
-            gap = self._compute_relative_gap(
-                engine, trips, state, blended_volume,
-            )
+            is_last = n == self.config.max_iterations
+            compute_gap = (n % gap_every == 0) or n == 1 or is_last
+            if compute_gap:
+                gap = self._compute_relative_gap(
+                    engine, trips, state, blended_volume,
+                    sample_frac=gap_sample_frac,
+                )
+            else:
+                gap = log[-1].relative_gap if log else float("nan")
 
             iter_result = IterationResult(
                 iteration=n,
@@ -560,8 +598,9 @@ class AssignmentLoop:
             if progress_callback:
                 progress_callback(n, gap, tstt)
 
-            # 9. Convergence check
-            if self.config.convergence_gap > 0 and gap < self.config.convergence_gap:
+            # 9. Convergence check (only on freshly computed gap)
+            if (compute_gap and self.config.convergence_gap > 0
+                    and gap < self.config.convergence_gap):
                 logger.info("Converged at iteration %d (gap=%.4f)", n, gap)
                 break
 
