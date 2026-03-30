@@ -1059,7 +1059,11 @@ def generate_validation_report(
         tmp_path, detail_scale, total_demand, max_iter,
     )
 
-    # --- 3. Flow and TT correlation ---
+    # --- 3. MFD scatter ---
+    logger.info("[%s] Building MFD scatter plots...", network_name)
+    _add_mfd_section(figs, descriptions, state, detail_scale)
+
+    # --- 4. Flow and TT correlation ---
     state = result_fw.network_state
     if ref:
         logger.info("[%s] Building correlation plots...", network_name)
@@ -1067,7 +1071,7 @@ def generate_validation_report(
             figs, descriptions, state, ref, link_attrs, detail_scale,
         )
 
-    # --- 4. V/C scatter ---
+    # --- 5. V/C scatter ---
     logger.info(
         "[%s] Running V/C scatter (%d scales)...",
         network_name, len(vc_scales),
@@ -1077,7 +1081,7 @@ def generate_validation_report(
         link_attrs, vc_scales, max_iter, tmp_path,
     )
 
-    # --- 5. Link state table (at end — large for big networks) ---
+    # --- 6. Link state table (at end — large for big networks) ---
     logger.info("[%s] Building link state table...", network_name)
     _add_link_table_section(
         figs, descriptions, state, link_attrs, detail_scale, total_demand,
@@ -1129,7 +1133,7 @@ def _add_topology_section(figs, descriptions, name, nodes, link_attrs,
             x=[x0, x1], y=[y0, y1], mode="lines",
             line=dict(color=color, width=max(1, lanes * 1.2)),
             hoverinfo="text",
-            hovertext=f"{u}&rarr;{v}: {lanes}L, {attrs['ff_speed_kmh']:.0f} km/h",
+            hovertext=f"{u}→{v}: {lanes}L, {attrs['ff_speed_kmh']:.0f} km/h",
             showlegend=False,
         ))
 
@@ -1208,7 +1212,7 @@ def _add_sweep_section(figs, descriptions, base, meta, copy_fn, run_fn,
             for o in sweep_oversat
         ],
         hovertext=[
-            f"{d:,.0f} vph &rarr; {o}/{n_links} links oversat"
+            f"{d:,.0f} vph → {o}/{n_links} links oversat"
             for d, o in zip(sweep_demand, sweep_oversat)
         ],
         hoverinfo="text",
@@ -1347,13 +1351,14 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
         vf = state.freeflow_kmh[i]
         v = state.speed_kmh[i]
         flow = state.flow_vph[i]
+        k = state.density_vpkm[i]
         ln = int(state.n_lanes[i])
         kj = state.jam_density[i]
         qc = vf * kj / 6
         tt = dist_m / 1000 / v * 60 if v > 0 else float("inf")
         ff_tt = dist_m / 1000 / vf * 60 if vf > 0 else float("inf")
         vc = flow / qc if qc > 0 else 0
-        rows.append((key, ln, dist_m, vf, v, flow, qc, ff_tt, tt, vc))
+        rows.append((key, ln, dist_m, vf, v, flow, k, kj, qc, ff_tt, tt, vc))
 
     rows.sort(key=lambda r: r[0])
 
@@ -1374,6 +1379,8 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
         '<th style="padding:6px;">v<sub>f</sub></th>'
         '<th style="padding:6px;">q<sub>c</sub></th>'
         '<th style="padding:6px;border-left:2px solid #ccc;">Flow</th>'
+        '<th style="padding:6px;">k</th>'
+        '<th style="padding:6px;">k/k<sub>j</sub></th>'
         '<th style="padding:6px;">V/C</th>'
         '<th style="padding:6px;">Speed</th>'
         '<th style="padding:6px;">FF TT</th>'
@@ -1382,9 +1389,12 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
         '</tr></thead>\n<tbody>\n'
     )
 
-    for key, ln, dist_m, vf, v, flow, qc, ff_tt, tt, vc in rows:
+    for key, ln, dist_m, vf, v, flow, k, kj, qc, ff_tt, tt, vc in rows:
         ratio = tt / ff_tt if ff_tt > 0 and tt < float("inf") else float("inf")
         vc_style = _vc_color(vc)
+        k_kj = k / kj if kj > 0 else 0
+        k_style = ("color:#D32F2F;font-weight:bold;" if k_kj > 0.9
+                    else "color:#FF6F00;" if k_kj > 0.5 else "")
         tt_str = f"{tt:.2f}" if tt < float("inf") else "&infin;"
         ratio_str = f"{ratio:.2f}" if ratio < float("inf") else "&infin;"
         table_html += (
@@ -1395,6 +1405,8 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
             f'<td style="text-align:right;padding:4px 6px;">{vf:.0f}</td>'
             f'<td style="text-align:right;padding:4px 6px;">{qc:.0f}</td>'
             f'<td style="text-align:right;padding:4px 6px;border-left:2px solid #ccc;">{flow:.0f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;">{k:.1f}</td>'
+            f'<td style="text-align:right;padding:4px 6px;{k_style}">{k_kj:.2f}</td>'
             f'<td style="text-align:right;padding:4px 6px;{vc_style}">{vc:.2f}</td>'
             f'<td style="text-align:right;padding:4px 6px;">{v:.1f}</td>'
             f'<td style="text-align:right;padding:4px 6px;">{ff_tt:.2f}</td>'
@@ -1405,9 +1417,9 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
 
     table_html += '</tbody></table>'
 
-    all_vc = [r[9] for r in rows]
+    all_vc = [r[11] for r in rows]
     all_speeds = [r[4] for r in rows]
-    finite_ratios = [r[8] / r[7] for r in rows if r[7] > 0 and r[8] < float("inf")]
+    finite_ratios = [r[10] / r[9] for r in rows if r[9] > 0 and r[10] < float("inf")]
     n_congested = sum(1 for vc in all_vc if vc > 0.6)
 
     figs.append(None)
@@ -1424,6 +1436,93 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
         '<span style="color:#FF6F00">Orange</span>: V/C &gt; 0.6, '
         '<span style="color:#D32F2F"><b>Red</b></span>: V/C &gt; 0.85.</p>'
         + table_html
+    )
+
+
+def _add_mfd_section(figs, descriptions, state, detail_scale):
+    """Section: network-wide MFD from per-link state.
+
+    Plots speed–density and flow–density scatter for all links,
+    overlaid with the theoretical VDF curve for a representative link.
+    """
+    from osrm.assignment.vdf import BiParabolicVDF
+    vdf = BiParabolicVDF()
+
+    k = state.density_vpkm
+    v = state.speed_kmh
+    q = state.flow_vph
+    vf = state.freeflow_kmh
+    kj = state.jam_density
+
+    # --- Speed–Density ---
+    fig_vk = go.Figure()
+    fig_vk.add_trace(go.Scatter(
+        x=k, y=v, mode="markers",
+        marker=dict(size=4, color="#1565C0", opacity=0.5),
+        hovertext=[f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+                   for i in range(state.n_edges)],
+        hoverinfo="text",
+        showlegend=False,
+    ))
+    # Theoretical curve for median v_f / k_j
+    med_vf = float(np.median(vf[vf > 0])) if (vf > 0).any() else 60.0
+    med_kj = float(np.median(kj[kj > 0])) if (kj > 0).any() else 200.0
+    k_curve = np.linspace(0, med_kj, 200)
+    v_curve = vdf.density_to_speed(
+        k_curve, np.full_like(k_curve, med_vf), np.full_like(k_curve, med_kj),
+    )
+    fig_vk.add_trace(go.Scatter(
+        x=k_curve, y=v_curve, mode="lines",
+        line=dict(color="#999", dash="dash", width=1),
+        name=f"VDF (v_f={med_vf:.0f}, k_j={med_kj:.0f})",
+    ))
+    fig_vk.update_layout(
+        title=f"Speed–Density ({detail_scale:.0%} demand)",
+        xaxis_title="Density (veh/km)",
+        yaxis_title="Speed (km/h)",
+        template="plotly_white",
+        xaxis=dict(rangemode="tozero"),
+        yaxis=dict(rangemode="tozero"),
+    )
+    figs.append(fig_vk)
+    descriptions.append(
+        "<h2>Speed–Density (MFD)</h2>"
+        "<p>Each point is one link. Dashed line: theoretical VDF at "
+        f"median v<sub>f</sub>={med_vf:.0f} km/h, k<sub>j</sub>={med_kj:.0f} veh/km. "
+        "Points above the curve have higher v<sub>f</sub> or lower k/k<sub>j</sub>; "
+        "points below are more congested.</p>"
+    )
+
+    # --- Flow–Density ---
+    fig_qk = go.Figure()
+    fig_qk.add_trace(go.Scatter(
+        x=k, y=q, mode="markers",
+        marker=dict(size=4, color="#D32F2F", opacity=0.5),
+        hovertext=[f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+                   for i in range(state.n_edges)],
+        hoverinfo="text",
+        showlegend=False,
+    ))
+    q_curve = k_curve * v_curve
+    fig_qk.add_trace(go.Scatter(
+        x=k_curve, y=q_curve, mode="lines",
+        line=dict(color="#999", dash="dash", width=1),
+        name=f"VDF (v_f={med_vf:.0f}, k_j={med_kj:.0f})",
+    ))
+    fig_qk.update_layout(
+        title=f"Flow–Density ({detail_scale:.0%} demand)",
+        xaxis_title="Density (veh/km)",
+        yaxis_title="Flow (veh/hr)",
+        template="plotly_white",
+        xaxis=dict(rangemode="tozero"),
+        yaxis=dict(rangemode="tozero"),
+    )
+    figs.append(fig_qk)
+    descriptions.append(
+        "<h2>Flow–Density (MFD)</h2>"
+        "<p>Each point is one link. The inverted-U shape is the fundamental "
+        "diagram: flow increases with density up to capacity, then drops as "
+        "congestion sets in.</p>"
     )
 
 
@@ -1452,7 +1551,7 @@ def _add_correlation_section(figs, descriptions, state, ref, link_attrs,
         bpr_flows.append(bpr_flow)
         mfd_tt.append(our_tt)
         bpr_tt.append(bpr_cost)
-        link_labels.append(f"{key[0]}&rarr;{key[1]}")
+        link_labels.append(f"{key[0]}→{key[1]}")
 
     # 4a: Flow scatter
     fig_flow = go.Figure()
@@ -1559,7 +1658,7 @@ def _add_vc_section(figs, descriptions, base, meta, copy_fn, run_fn,
             vc_i = st.flow_vph[i] / qc_i if qc_i > 0 else 0
             vc_list.append(vc_i)
             flow_list.append(st.flow_vph[i])
-            hover_list.append(f"{k[0]}&rarr;{k[1]}: V/C={vc_i:.2f}")
+            hover_list.append(f"{k[0]}→{k[1]}: V/C={vc_i:.2f}")
         max_flow = max(max_flow, max(flow_list) if flow_list else 1)
         fig.add_trace(go.Scatter(
             x=flow_list, y=vc_list, mode="markers",

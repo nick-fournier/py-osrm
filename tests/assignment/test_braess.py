@@ -354,7 +354,7 @@ def generate_braess_report(
                 x=xs, y=ys, mode="lines",
                 line=dict(color=color, width=3),
                 hoverinfo="text",
-                hovertext=f"{u}&rarr;{v}: {label}",
+                hovertext=f"{u}→{v}: {label}",
                 showlegend=False,
             ), row=1, col=col)
             topo_fig.add_annotation(
