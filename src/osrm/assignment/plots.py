@@ -901,22 +901,22 @@ def generate_validation_report(
         tmp_path, detail_scale, total_demand, max_iter,
     )
 
-    # --- 3. Link state table ---
+    # --- 3. Flow and TT correlation ---
     state = result_fw.network_state
-    _add_link_table_section(
-        figs, descriptions, state, link_attrs, detail_scale, total_demand,
-    )
-
-    # --- 4. Flow and TT correlation ---
     if ref:
         _add_correlation_section(
             figs, descriptions, state, ref, link_attrs, detail_scale,
         )
 
-    # --- 5. V/C scatter ---
+    # --- 4. V/C scatter ---
     _add_vc_section(
         figs, descriptions, base, meta, copy_fn, run_fn,
         link_attrs, vc_scales, max_iter, tmp_path,
+    )
+
+    # --- 5. Link state table (at end — large for big networks) ---
+    _add_link_table_section(
+        figs, descriptions, state, link_attrs, detail_scale, total_demand,
     )
 
     # Compose intro

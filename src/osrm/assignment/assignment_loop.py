@@ -75,6 +75,7 @@ class IterationResult:
     n_oversaturated: int
     route_time_s: float
     customize_time_s: float
+    engine_time_s: float = 0.0
     step_size: float = 0.0
 
 
@@ -97,6 +98,9 @@ class AssignmentResult:
             "tstt": [r.tstt for r in self.iteration_log],
             "max_density_delta": [r.max_density_delta for r in self.iteration_log],
             "step_size": [r.step_size for r in self.iteration_log],
+            "route_time_s": [r.route_time_s for r in self.iteration_log],
+            "customize_time_s": [r.customize_time_s for r in self.iteration_log],
+            "engine_time_s": [r.engine_time_s for r in self.iteration_log],
         }
 
 
@@ -523,8 +527,10 @@ class AssignmentLoop:
             customize_time = time.monotonic() - t_cust
 
             # 7. Reload engine
+            t_engine = time.monotonic()
             del engine
             engine = self._create_engine()
+            engine_time = time.monotonic() - t_engine
 
             # 8. Compute gap (on updated network)
             gap = self._compute_relative_gap(
@@ -539,15 +545,16 @@ class AssignmentLoop:
                 n_oversaturated=n_oversat,
                 route_time_s=route_time,
                 customize_time_s=customize_time,
+                engine_time_s=engine_time,
                 step_size=alpha,
             )
             log.append(iter_result)
 
             logger.info(
                 "Iter %d: gap=%.4f, TSTT=%.0f, alpha=%.4f, max_dk=%.1f, "
-                "oversat=%d, route=%.1fs, customize=%.1fs",
+                "oversat=%d, route=%.1fs, customize=%.1fs, engine=%.1fs",
                 n, gap, tstt, alpha, max_delta, n_oversat,
-                route_time, customize_time,
+                route_time, customize_time, engine_time,
             )
 
             if progress_callback:
