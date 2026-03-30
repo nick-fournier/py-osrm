@@ -233,47 +233,89 @@ def _vdf_smoothing_comparison(
     k_j: float = 200.0,
     vdf: BiParabolicVDF | None = None,
 ) -> go.Figure:
-    """Compare sharp vs stretched VDF near jam density.
+    """Compare three VDF smoothing strategies near jam density.
 
-    Shows how using k_j_eff = k_j × (1 + ε) in the congested branch
-    equation smooths the speed gradient near k_j without adding a
-    third piecewise segment.
+    1. Current: parabola hits zero at k_j, then speed floor (gradient → ∞)
+    2. Stretched k_j: parabola hits zero at k_j_eff > k_j (shifts singularity)
+    3. Exponential tail: C1-continuous splice at k_s, asymptotic decay (no singularity)
     """
     vdf = vdf or BiParabolicVDF(min_speed_kmh=0.01)
     k_c = vdf.kc_ratio * k_j
     q_c = v_f * k_c / 2.0
+    R = (k_j - k_c) ** 2  # congested branch denominator
 
-    # Range: 0 to 1.2 × k_j to show behaviour beyond jam
-    frac = np.linspace(0.0, 1.2, 1000)
+    def _parabola_v(ki: float, kj_denom: float) -> float:
+        """Congested branch speed for a given k and k_j denominator."""
+        if ki <= k_c:
+            return q_c * (2.0 * k_c - ki) / k_c**2
+        if ki <= 0:
+            return v_f
+        ratio = (ki - k_c) ** 2 / (kj_denom - k_c) ** 2
+        return max(0.0, q_c * (1.0 - ratio) / ki)
+
+    def _parabola_dvdk(ki: float) -> float:
+        """Analytical dv/dk of the congested branch at k = ki."""
+        if ki <= k_c or ki <= 0:
+            return -v_f / (2.0 * k_c)  # uncongested slope
+        f = 1.0 - (ki - k_c) ** 2 / R
+        fp = -2.0 * (ki - k_c) / R
+        return q_c * (fp * ki - f) / ki**2
+
+    # Range: 0 to 1.5 × k_j (density can exceed k_j in practice)
+    frac = np.linspace(0.001, 1.5, 2000)
     k = frac * k_j
 
     fig = make_subplots(
         rows=1, cols=2,
         subplot_titles=[
-            "Speed–Density (full range)",
-            "Cost gradient |dv/dk| near k_j",
+            "Speed–Density",
+            "Cost gradient |dv/dk| (log scale)",
         ],
     )
 
-    epsilons = [0.0, 0.05, 0.10, 0.20]
-    colors = ["#F44336", "#FF9800", "#4CAF50", "#2196F3"]
-    labels = ["ε=0 (current)", "ε=0.05", "ε=0.10", "ε=0.20"]
+    curves: list[tuple[str, str, np.ndarray]] = []
 
-    for eps, color, label in zip(epsilons, colors, labels):
-        k_j_eff = k_j * (1.0 + eps)
+    # --- 1. Current: parabola + speed floor ---
+    v_current = np.array([max(_parabola_v(ki, k_j), vdf.min_speed_kmh)
+                          for ki in k])
+    curves.append(("Current (parabola + floor)", "#F44336", v_current))
 
-        v = np.zeros_like(k)
-        for i in range(len(k)):
-            if k[i] <= k_c:
-                v[i] = q_c * (2.0 * k_c - k[i]) / k_c**2
-            elif k[i] > 0:
-                ratio = (k[i] - k_c)**2 / (k_j_eff - k_c)**2
-                v[i] = q_c * max(0.0, 1.0 - ratio) / k[i]
-            v[i] = max(v[i], vdf.min_speed_kmh)
+    # --- 2. Stretched k_j (ε = 0.10) ---
+    k_j_stretched = k_j * 1.10
+    v_stretched = np.array([max(_parabola_v(ki, k_j_stretched), vdf.min_speed_kmh)
+                            for ki in k])
+    curves.append(("Stretched k_j (ε=0.10)", "#FF9800", v_stretched))
 
+    # --- 3. Exponential tail at several k_s values ---
+    ks_fracs = [0.75, 0.85, 0.95]
+    exp_colors = ["#4CAF50", "#2196F3", "#9C27B0"]
+    for ks_frac, color in zip(ks_fracs, exp_colors):
+        k_s = ks_frac * k_j
+        v_s = _parabola_v(k_s, k_j)
+        dvdk_s = _parabola_dvdk(k_s)
+
+        # C1 match: v_tail = A·exp(-B·(k - k_s)), A = v_s, B = -dvdk_s / v_s
+        A = v_s
+        B = -dvdk_s / v_s  # dvdk_s < 0, so B > 0
+
+        v_exp = np.zeros_like(k)
+        for i, ki in enumerate(k):
+            if ki <= k_c:
+                v_exp[i] = q_c * (2.0 * k_c - ki) / k_c**2
+            elif ki <= k_s:
+                v_exp[i] = max(0.0, _parabola_v(ki, k_j))
+            else:
+                v_exp[i] = A * np.exp(-B * (ki - k_s))
+            v_exp[i] = max(v_exp[i], vdf.min_speed_kmh)
+
+        curves.append((f"Exp tail (k_s={ks_frac:.2f}·k_j)", color, v_exp))
+
+    # Plot all curves
+    for label, color, v in curves:
         fig.add_trace(go.Scatter(
             x=frac, y=v, mode="lines",
-            line=dict(color=color, width=2),
+            line=dict(color=color, width=2.5 if "Current" in label else 2,
+                      dash="dot" if "Stretched" in label else "solid"),
             name=label,
         ), row=1, col=1)
 
@@ -281,26 +323,29 @@ def _vdf_smoothing_comparison(
         dv = np.abs(np.gradient(v, k))
         fig.add_trace(go.Scatter(
             x=frac[1:], y=dv[1:], mode="lines",
-            line=dict(color=color, width=2),
-            name=label,
-            showlegend=False,
+            line=dict(color=color, width=2.5 if "Current" in label else 2,
+                      dash="dot" if "Stretched" in label else "solid"),
+            name=label, showlegend=False,
         ), row=1, col=2)
 
-    # Mark physical k_j
-    fig.add_vline(x=1.0, line_dash="dash", line_color="gray",
-                  annotation_text="k_j", row=1, col=1)
-    fig.add_vline(x=1.0, line_dash="dash", line_color="gray",
-                  annotation_text="k_j", row=1, col=2)
+    # Mark physical k_j and k_c
+    for col in [1, 2]:
+        fig.add_vline(x=1.0, line_dash="dash", line_color="gray",
+                      annotation_text="k_j", row=1, col=col)
+        fig.add_vline(x=k_c / k_j, line_dash="dot", line_color="lightgray",
+                      annotation_text="k_c", row=1, col=col)
 
-    fig.update_xaxes(title_text="k / k_j", row=1, col=1)
-    fig.update_yaxes(title_text="Speed (km/h)", row=1, col=1)
-    fig.update_xaxes(title_text="k / k_j", row=1, col=2)
-    fig.update_yaxes(title_text="|dv/dk| (km/h per veh/km)", type="log", row=1, col=2)
+    fig.update_xaxes(title_text="k / k_j", fixedrange=True, row=1, col=1)
+    fig.update_yaxes(title_text="Speed (km/h)", fixedrange=True, row=1, col=1)
+    fig.update_xaxes(title_text="k / k_j", fixedrange=True, row=1, col=2)
+    fig.update_yaxes(title_text="|dv/dk| (km/h per veh/km)", type="log",
+                     fixedrange=True, row=1, col=2)
     fig.update_layout(
-        title="VDF Smoothing: Stretched k_j_eff = k_j × (1 + ε)",
+        title="VDF Smoothing Strategies: Parabola vs Stretched vs Exponential Tail",
         template="plotly_white",
-        height=450,
+        height=500,
         legend=dict(x=0.02, y=0.98),
+        dragmode=False,
     )
     return fig
 
@@ -468,19 +513,25 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
         and prevent absorbing gridlock states?  Or remove the hard cap entirely and let the
         VDF's speed floor handle it?</p>""",
 
-        f"""<h2>4. Proposed Smoothing: Stretched $k_j$</h2>
-        <p>Instead of adding a third piecewise segment, we can <b>stretch</b> the congested
-        branch by evaluating it at $k_{{j,eff}} = k_j \\cdot (1 + \\varepsilon)$.
-        The equation form stays identical — same 2-part bi-parabolic — but the parabola
-        reaches zero speed at $k_{{j,eff}}$ instead of $k_j$.</p>
-        <p>At physical $k_j$, the stretched model still returns a small positive speed
-        instead of hitting the floor. The <b>left panel</b> shows speed vs density for
-        several $\\varepsilon$ values. The <b>right panel</b> shows the cost gradient
-        $|dv/dk|$ — lower gradient near $k_j$ means smoother cost surface for Frank-Wolfe.</p>
-        <p>At $\\varepsilon = 0.10$, speed at $k = k_j$ ≈
-        {0.5 * v_f * k_c / (2 * k_j) * (1.0 - ((k_j - k_c) / (1.1*k_j - k_c))**2) :.1f} km/h
-        — slow enough to be unattractive for routing, but smooth enough for FW convergence.
-        The gradient at $k_j$ drops by roughly an order of magnitude vs $\\varepsilon = 0$.</p>""",
+        f"""<h2>4. Smoothing Strategies: Stretched k_j vs Exponential Tail</h2>
+        <p>The congested parabola has a singularity ($|dv/dk| \\to \\infty$) wherever it crosses
+        zero speed. Three strategies are compared:</p>
+        <ol>
+        <li><b>Current</b> (red): parabola hits zero at $k_j$, then speed floor. Gradient
+        discontinuity creates convergence problems for Frank-Wolfe.</li>
+        <li><b>Stretched $k_j$</b> (orange, dashed): uses $k_{{j,eff}} = 1.10 \\cdot k_j$ in the
+        equation. Moves the singularity from $k_j$ to $k_{{j,eff}}$ but does NOT remove it —
+        if density exceeds $k_{{j,eff}}$ (which it can), the same cliff reappears.</li>
+        <li><b>Exponential tail</b> (solid colors): at a splice density $k_s$, the parabola is
+        replaced with $v(k) = v(k_s) \\cdot e^{{-B(k - k_s)}}$ where $B = -v'(k_s)/v(k_s)$.
+        This matches value and slope ($C^1$ continuous) and decays asymptotically — <b>no zero
+        crossing, no singularity at any density</b>. Three splice points shown:
+        $k_s = 0.75 k_j$ (early), $0.85 k_j$ (recommended), $0.95 k_j$ (late).</li>
+        </ol>
+        <p>The <b>right panel</b> shows the gradient $|dv/dk|$ on log scale. The current and
+        stretched models spike to infinity at their respective zero crossings, while the
+        exponential tail has a finite, monotonically decreasing gradient everywhere beyond
+        $k_s$. This makes the cost surface smooth for any iterative solver.</p>""",
 
         """<h2>5. Inverse Round-Trip Accuracy</h2>
         <p>A key advantage of this VDF over BPR: the flow-to-density inversion has a
