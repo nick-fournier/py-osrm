@@ -79,14 +79,15 @@ class TestBraessParadox:
     INCREASES total system travel time under user equilibrium because
     the shortcut attracts all traffic through both variable links.
 
-    Network: 1-lane variable links (~30 km), 4-lane constant links (~54 km),
-    1-lane shortcut (~3 km).  All 80 km/h OSM maxspeed.
+    Network: simple 4-node diamond, all links ~10 km, shortcut ~1 km.
+    Variable links (1→3, 4→2): 1 lane, maxspeed 80 (v_f ≈ 64 km/h).
+    Constant links (1→4, 3→2): 4 lanes, maxspeed 50 (v_f ≈ 40 km/h).
 
-    Demand = 2005 vph ≈ 94% of variable-link capacity (q_c ≈ 2133).
-    Expected TSTT increase ≈ 11.9% with 1.2 min stability margin.
+    Demand = 2500 vph.  Mixed equilibrium: ~53% shortcut, ~23% each
+    upper/lower.  Expected TSTT increase ≈ 6.7%.
     """
 
-    DEMAND = 2005.0
+    DEMAND = 2500.0
 
     def test_tstt_increases_with_shortcut(self, tmp_path):
         """Core Braess test: TSTT should be higher with the shortcut."""
@@ -134,11 +135,10 @@ class TestBraessParadox:
         )
 
     def test_with_shortcut_all_on_shortcut_path(self, tmp_path):
-        """With the shortcut, all traffic should use 1→3→4→2.
+        """With shortcut, equilibrium should be mixed across all three routes.
 
-        This IS the correct Braess equilibrium: the shortcut path is
-        cheaper than alternatives (by ~0.9 min), so no driver deviates.
-        Highway links carry zero flow.
+        The shortcut path (1→3→4→2) attracts the most flow, but
+        upper (1→3→2) and lower (1→4→2) also carry traffic.
         """
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
         result = _run_assignment(
@@ -146,20 +146,31 @@ class TestBraessParadox:
         )
         state = result.network_state
 
-        # Variable links + shortcut carry all demand
-        shortcut_path_edges = {(1, 3), (3, 4), (4, 2)}
+        flows = {}
         for i in range(state.n_edges):
             f, t = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
-            if (f, t) in shortcut_path_edges:
-                assert state.flow_vph[i] > self.DEMAND * 0.8, (
-                    f"Edge {f}→{t} should carry ~full demand, "
-                    f"got {state.flow_vph[i]:.0f} vph"
-                )
-            else:
-                assert state.flow_vph[i] < self.DEMAND * 0.1, (
-                    f"Edge {f}→{t} should carry ~zero flow, "
-                    f"got {state.flow_vph[i]:.0f} vph"
-                )
+            flows[(f, t)] = state.flow_vph[i]
+
+        sc_flow = flows.get((3, 4), 0)
+        upper_flow = flows.get((3, 2), 0)
+        lower_flow = flows.get((1, 4), 0)
+
+        # Shortcut carries the most flow
+        assert sc_flow > upper_flow, (
+            f"Shortcut ({sc_flow:.0f}) should exceed upper ({upper_flow:.0f})"
+        )
+        assert sc_flow > lower_flow, (
+            f"Shortcut ({sc_flow:.0f}) should exceed lower ({lower_flow:.0f})"
+        )
+        # But all three routes carry meaningful flow (mixed equilibrium)
+        assert upper_flow > self.DEMAND * 0.05, (
+            f"Upper route has only {upper_flow:.0f} vph — "
+            f"expected meaningful flow for mixed equilibrium"
+        )
+        assert lower_flow > self.DEMAND * 0.05, (
+            f"Lower route has only {lower_flow:.0f} vph — "
+            f"expected meaningful flow for mixed equilibrium"
+        )
 
     def test_without_shortcut_balanced_split(self, tmp_path):
         """Without shortcut, traffic should split roughly 50/50."""
@@ -258,7 +269,7 @@ class TestBraessParadox:
 def generate_braess_report(
     tmp_path: str | Path,
     output_path: str = "docs/plots/braess_validation.html",
-    demand: float = 2005.0,
+    demand: float = 2500.0,
     max_iter: int = 100,
 ) -> Path:
     """Run Braess validation and generate an interactive HTML report.
@@ -314,13 +325,11 @@ def generate_braess_report(
             (lat - ref_lat) * 111.32,
         )
 
-    # Logical edges — highways route via S-curve waypoints
-    hw_14_nodes = (1, 10, 11, 12, 13, 14, 15, 16, 17, 4)
-    hw_32_nodes = (3, 18, 19, 20, 21, 22, 23, 24, 25, 2)
+    # Simple 4-node diamond — direct edges between nodes
     edges_wo = [
         ((1, 3), "variable 1-lane 80 km/h", "#F44336"),
-        (hw_14_nodes, "highway 4-lane 80 km/h", "#2196F3"),
-        (hw_32_nodes, "highway 4-lane 80 km/h", "#2196F3"),
+        ((1, 4), "constant 4-lane 50 km/h", "#2196F3"),
+        ((3, 2), "constant 4-lane 50 km/h", "#2196F3"),
         ((4, 2), "variable 1-lane 80 km/h", "#F44336"),
     ]
     edges_w = edges_wo + [
@@ -348,9 +357,8 @@ def generate_braess_report(
                 hovertext=f"{u}&rarr;{v}: {label}",
                 showlegend=False,
             ), row=1, col=col)
-            # Arrow at final segment
             topo_fig.add_annotation(
-                x=xs[-1], y=ys[-1], ax=xs[-2], ay=ys[-2],
+                x=xs[-1], y=ys[-1], ax=xs[0], ay=ys[0],
                 xref=f"x{col}" if col > 1 else "x",
                 yref=f"y{col}" if col > 1 else "y",
                 axref=f"x{col}" if col > 1 else "x",
@@ -358,14 +366,11 @@ def generate_braess_report(
                 showarrow=True, arrowhead=3, arrowsize=1.5,
                 arrowcolor=color, arrowwidth=2,
             )
-            # Label at midpoint of full path
-            mid_idx = len(xs) // 2
-            mx = (xs[mid_idx - 1] + xs[mid_idx]) / 2
-            my = (ys[mid_idx - 1] + ys[mid_idx]) / 2
+            mx, my = (xs[0] + xs[-1]) / 2, (ys[0] + ys[-1]) / 2
             dx = ys[-1] - ys[0]
             dy = -(xs[-1] - xs[0])
             mag = max((dx**2 + dy**2) ** 0.5, 1e-9)
-            ox, oy = 0.5 * dx / mag, 0.5 * dy / mag
+            ox, oy = 0.3 * dx / mag, 0.3 * dy / mag
             topo_fig.add_annotation(
                 x=mx + ox, y=my + oy, text=f"{u}&rarr;{v}",
                 xref=f"x{col}" if col > 1 else "x",
@@ -373,7 +378,6 @@ def generate_braess_report(
                 showarrow=False, font=dict(size=10, color=color),
             )
 
-        # Main nodes (large labeled markers)
         xs = [node_km[n][0] for n in main_nodes]
         ys = [node_km[n][1] for n in main_nodes]
         labels = [str(n) for n in main_nodes]
@@ -417,9 +421,10 @@ def generate_braess_report(
     descriptions.append("""<h2>Network Topology</h2>
     <p>The Braess diamond network (to scale): <span style="color:#4CAF50">●</span> Origin (node 1),
     <span style="color:#F44336">●</span> Destination (node 2).
-    <span style="color:#F44336">Red</span> = variable (1-lane, 80 km/h &mdash; congestion-sensitive, ~30 km).
-    <span style="color:#2196F3">Blue</span> = highway (4-lane, 80 km/h &mdash; high capacity, ~54 km via detour).
-    <span style="color:#FF9800">Orange</span> = shortcut (1-lane, 80 km/h, ~3 km).</p>""")
+    <span style="color:#F44336">Red</span> = variable (1-lane, 80 km/h &mdash; fast but congestion-sensitive).
+    <span style="color:#2196F3">Blue</span> = constant (4-lane, 50 km/h &mdash; slow but robust).
+    <span style="color:#FF9800">Orange</span> = shortcut (1-lane, 80 km/h, ~1 km).
+    All main links ~10 km.</p>""")
 
     # --- 1. Link state comparison table ---
     def _state_table(result_w, result_wo):
@@ -535,14 +540,10 @@ def generate_braess_report(
 
     def _route_travel_times(result_w, result_wo):
         """Build a table of route travel times to demonstrate Wardrop equilibrium."""
-        # Highway segments follow S-curve waypoint chains
-        hw_14 = [("1","10"),("10","11"),("11","12"),("12","13"),
-                 ("13","14"),("14","15"),("15","16"),("16","17"),("17","4")]
-        hw_32 = [("3","18"),("18","19"),("19","20"),("20","21"),
-                 ("21","22"),("22","23"),("23","24"),("24","25"),("25","2")]
+        # Simple 4-node edges — no multi-segment highways
         routes = {
-            "Upper (1&rarr;3&rarr;2)": [("1", "3")] + hw_32,
-            "Lower (1&rarr;4&rarr;2)": hw_14 + [("4", "2")],
+            "Upper (1&rarr;3&rarr;2)": [("1", "3"), ("3", "2")],
+            "Lower (1&rarr;4&rarr;2)": [("1", "4"), ("4", "2")],
             "Shortcut (1&rarr;3&rarr;4&rarr;2)": [("1", "3"), ("3", "4"), ("4", "2")],
         }
 

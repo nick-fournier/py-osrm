@@ -329,23 +329,18 @@ def braess_network(
         ↓     ↓
         4 ──→ 2
 
-    Designed for the bi-parabolic MFD to produce a clear Braess paradox.
+    Simple 4-node diamond, all main links ~10 km, shortcut ~1 km.
+    Asymmetry via **speed** not geometry:
 
-    The classical paradox requires two types of links:
+    - **Variable** (fast, fragile): 1→3 and 4→2.  1 lane, maxspeed 80.
+      Fast at low flow but congestion-sensitive.
+    - **Constant** (slow, robust): 1→4 and 3→2.  4 lanes, maxspeed 60.
+      Slower freeflow but nearly constant travel time.
+    - **Shortcut** 3→4: 1 lane, maxspeed 80, ~1 km.
 
-    - **Variable** (congestion-sensitive): 1→3 and 4→2.  1 lane, 80 km/h,
-      ~30 km.  At demand D, travel time grows significantly vs D/2.
-    - **Constant** (capacity-insensitive): 1→4 and 3→2.  4 lanes, 80 km/h,
-      ~54 km (1.8× variable, via detour waypoints).  High capacity means
-      travel time is nearly constant regardless of flow.
-    - **Shortcut** 3→4: 1 lane, 80 km/h, ~3 km (10% of variable length).
-
-    At D ≈ 2005 vph (94% of variable-link capacity at v_f ≈ 64 km/h):
-
-    - Without shortcut: traffic splits 50/50.  Path cost ≈ 84.8 min.
-    - With shortcut: all traffic uses 1→3→4→2.  Path cost ≈ 94.9 min.
-    - Alternative (skip shortcut): ≈ 95.8 min > 94.9, so stable.
-    - TSTT increases ~11.9%, margin ≈ 1.2 min against OSRM quantization.
+    At low flow the variable links are faster than constant links,
+    making the shortcut path (1→3→4→2) attractive.  At high flow,
+    variable links congest and the equilibrium is mixed.
 
     Origin = node 1, Destination = node 2.
 
@@ -360,42 +355,21 @@ def braess_network(
     -------
     (path, metadata) where metadata includes node coords and link info.
     """
-    # 6-node network: 4 main nodes + S-curve waypoints for highway links.
-    # Variable links (1→3, 4→2): ~30 km direct.
-    # Constant links (1→4, 3→2): ~54 km via S-curve waypoints (1.8× ratio).
-    # Shortcut (3→4): ~3 km vertical (10% of variable length).
-    # 30 km scale maximizes stability margin (~0.9 min) against OSRM
-    # speed quantization while maintaining 11.9% paradox strength.
-    # Highway S-curves use 8 intermediate waypoints each, keeping the
-    # geographic footprint to ~11 km offset instead of ~22 km with a
-    # single detour point.
+    # Simple 4-node diamond.  All main links ~10 km, shortcut ~1 km.
+    # Asymmetry via speed, not geometry:
+    #   Variable (1→3, 4→2): fast but fragile — 1 lane, maxspeed 80.
+    #   Constant (1→4, 3→2): slow but robust — 4 lanes, maxspeed 50.
+    # At low flow the variable links are faster → shortcut attractive.
+    # At high flow they congest → mixed equilibrium.
     nodes = {
-        1: (7.1000, 43.7400),   # west (origin)
-        3: (7.4725, 43.7535),   # center-north
-        4: (7.4725, 43.7265),   # center-south
-        2: (7.8451, 43.7400),   # east (destination)
-        # Highway 1→4 S-curve waypoints (south-then-north)
-        10: (7.1370, 43.6758),
-        11: (7.1761, 43.6409),
-        12: (7.2183, 43.6510),
-        13: (7.2632, 43.7006),
-        14: (7.3093, 43.7659),
-        15: (7.3542, 43.8155),
-        16: (7.3964, 43.8256),
-        17: (7.4355, 43.7907),
-        # Highway 3→2 S-curve waypoints (north-then-south)
-        18: (7.5183, 43.8147),
-        19: (7.5620, 43.8466),
-        20: (7.6026, 43.8335),
-        21: (7.6404, 43.7809),
-        22: (7.6772, 43.7126),
-        23: (7.7150, 43.6600),
-        24: (7.7556, 43.6469),
-        25: (7.7993, 43.6788),
+        1: (7.1758, 43.7400),  # west (origin)
+        3: (7.3000, 43.7445),  # center-north
+        4: (7.3000, 43.7355),  # center-south
+        2: (7.4242, 43.7400),  # east (destination)
     }
 
     ways = [
-        # 1→3: variable, congestion-sensitive (1 lane, ~30 km)
+        # 1→3: variable — fast, congestion-sensitive (1 lane, ~10 km)
         {
             "id": 101, "nodes": [1, 3],
             "tags": {
@@ -404,25 +378,25 @@ def braess_network(
                 "name": "Link 1-3 (variable)",
             },
         },
-        # 1→...→4: constant cost highway (4 lanes, ~54 km via S-curve)
+        # 1→4: constant — slow, high-capacity (4 lanes, ~10 km)
         {
-            "id": 102, "nodes": [1, 10, 11, 12, 13, 14, 15, 16, 17, 4],
+            "id": 102, "nodes": [1, 4],
             "tags": {
-                "highway": "motorway", "oneway": "yes",
-                "maxspeed": "80", "lanes": "4",
-                "name": "Link 1-4 (highway)",
+                "highway": "primary", "oneway": "yes",
+                "maxspeed": "50", "lanes": "4",
+                "name": "Link 1-4 (constant)",
             },
         },
-        # 3→...→2: constant cost highway (4 lanes, ~54 km via S-curve)
+        # 3→2: constant — slow, high-capacity (4 lanes, ~10 km)
         {
-            "id": 103, "nodes": [3, 18, 19, 20, 21, 22, 23, 24, 25, 2],
+            "id": 103, "nodes": [3, 2],
             "tags": {
-                "highway": "motorway", "oneway": "yes",
-                "maxspeed": "80", "lanes": "4",
-                "name": "Link 3-2 (highway)",
+                "highway": "primary", "oneway": "yes",
+                "maxspeed": "50", "lanes": "4",
+                "name": "Link 3-2 (constant)",
             },
         },
-        # 4→2: variable, congestion-sensitive (1 lane, ~30 km)
+        # 4→2: variable — fast, congestion-sensitive (1 lane, ~10 km)
         {
             "id": 104, "nodes": [4, 2],
             "tags": {
@@ -434,7 +408,7 @@ def braess_network(
     ]
 
     if with_shortcut:
-        # 3→4: shortcut — 10% of variable length (~3 km)
+        # 3→4: shortcut (~1 km, same type as variable links)
         ways.append({
             "id": 105, "nodes": [3, 4],
             "tags": {
