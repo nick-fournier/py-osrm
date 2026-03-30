@@ -48,6 +48,12 @@ class AssignmentConfig:
         Maximum bisection iterations for the FW line search.
     fw_line_search_tol : float
         Convergence tolerance for the FW line search bracket width.
+    incremental_steps : tuple of float
+        Demand fractions for incremental loading during the warm-up
+        phase.  Each entry triggers one AON iteration at that fraction
+        of full demand before the main FW/MSA loop begins.
+        Default ``(0.25, 0.50, 0.75, 1.0)``.  Set to ``(1.0,)`` to
+        disable (single full-demand loading, legacy behaviour).
     """
 
     method: str = "msa"
@@ -66,6 +72,7 @@ class AssignmentConfig:
     verbosity: str = "ERROR"
     fw_bisections: int = 20
     fw_line_search_tol: float = 1e-6
+    incremental_steps: Tuple[float, ...] = (0.25, 0.50, 0.75, 1.0)
 
 
 @dataclass
@@ -616,6 +623,62 @@ class AssignmentLoop:
 
         prev_density = np.zeros(state.n_edges, dtype=np.float64)
         prev_volume = np.zeros(state.n_edges, dtype=np.float64)
+
+        # --- Incremental loading warm-up ---
+        # Load demand in increasing fractions to avoid catastrophic
+        # overshoot on bottleneck links in iteration 1.  Each step
+        # routes at full demand but scales AON output, then replaces
+        # (not blends) the state.  The main loop inherits a network
+        # that has already seen partial congestion.
+        inc_steps = self.config.incremental_steps
+        n_inc = 0
+        for step_frac in inc_steps:
+            if step_frac >= 1.0:
+                break  # 1.0 is handled by the main loop's first iteration
+            n_inc += 1
+            logger.info(
+                "=== Incremental step %d/%d (%.0f%% demand) ===",
+                n_inc, len(inc_steps), step_frac * 100,
+            )
+            t_route = time.monotonic()
+            aon_density, aon_volume, aon_tstt = self._route_and_accumulate(
+                engine, trips, state,
+            )
+            route_time = time.monotonic() - t_route
+
+            # Grow arrays if new edges discovered
+            if len(prev_density) < state.n_edges:
+                pad = state.n_edges - len(prev_density)
+                prev_density = np.append(prev_density, np.zeros(pad))
+                prev_volume = np.append(prev_volume, np.zeros(pad))
+                if state_patch:
+                    state_patch(state)
+                self.smoother.build_adjacency(state.edge_ids, state.length_m)
+
+            # Scale to fractional demand and replace state
+            state.density_vpkm = np.maximum(aon_density * step_frac, 0.0)
+            blended_volume = np.maximum(aon_volume * step_frac, 0.0)
+            prev_density = state.density_vpkm.copy()
+            prev_volume = blended_volume.copy()
+
+            self._update_state(state)
+
+            # Customize OSRM with partial-demand speeds
+            csv_path = self.writer.write_from_state(state, only_changed=True)
+            osrm_module.customize(
+                self.base_path,
+                segment_speed_file=str(csv_path),
+                verbosity=self.config.verbosity,
+            )
+            del engine
+            engine = self._create_engine()
+
+            logger.info(
+                "Incremental step %d: frac=%.2f, max_k/kj=%.2f, route=%.3fs",
+                n_inc, step_frac,
+                float(np.max(state.density_vpkm / state.jam_density)),
+                route_time,
+            )
 
         for n in range(1, self.config.max_iterations + 1):
             logger.info("=== Iteration %d ===", n)
