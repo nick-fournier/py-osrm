@@ -21,8 +21,8 @@ class TestWrite:
         assert path.exists()
         lines = path.read_text().strip().split("\n")
         assert len(lines) == 2
-        assert lines[0] == "100,200,45.0"
-        assert lines[1] == "300,400,30.0"
+        assert lines[0] == "100,200,45.0000"
+        assert lines[1] == "300,400,30.0000"
 
     def test_speed_floor(self, writer):
         edge_ids = np.array([[100, 200]], dtype=np.uint64)
@@ -30,7 +30,7 @@ class TestWrite:
         path = writer.write(edge_ids, speeds, min_speed_kmh=5.0)
 
         lines = path.read_text().strip().split("\n")
-        assert lines[0] == "100,200,5.0"
+        assert lines[0] == "100,200,5.0000"
 
     def test_suffix(self, writer, tmp_path):
         edge_ids = np.array([[100, 200]], dtype=np.uint64)

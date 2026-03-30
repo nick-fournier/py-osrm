@@ -174,6 +174,60 @@ class AssignmentLoop:
             logger.debug(f"Route failed for {trip.origin}→{trip.destination}: {e}")
         return None
 
+    def _snap_trips(
+        self,
+        engine: osrm_module.OSRM,
+        trips: List[DemandTrip],
+    ) -> List[DemandTrip]:
+        """Snap trip coordinates to OSRM waypoints.
+
+        Calls Nearest once per unique coordinate, then replaces all
+        trip origins/destinations with the snapped location.  This
+        ensures routes start/end at actual network nodes, eliminating
+        phantom partial-segment inconsistencies between link-level
+        cost computation and OSRM route durations.
+        """
+        unique_coords: Dict[Tuple[float, float], list] = {}
+        for trip in trips:
+            for coord in (tuple(trip.origin), tuple(trip.destination)):
+                if coord not in unique_coords:
+                    unique_coords[coord] = list(coord)
+
+        # Snap each unique coordinate via Nearest
+        snapped: Dict[Tuple[float, float], list] = {}
+        for coord in unique_coords:
+            try:
+                result = engine.Nearest(coordinates=[list(coord)], number=1)
+                if result.get("code") == "Ok" and result.get("waypoints"):
+                    snapped[coord] = result["waypoints"][0]["location"]
+                else:
+                    snapped[coord] = list(coord)
+            except Exception:
+                snapped[coord] = list(coord)
+
+        # Rebuild trips with snapped coordinates
+        snapped_trips = []
+        for trip in trips:
+            snapped_trips.append(DemandTrip(
+                origin=snapped[tuple(trip.origin)],
+                destination=snapped[tuple(trip.destination)],
+                volume=trip.volume,
+            ))
+
+        n_moved = sum(
+            1 for c in unique_coords
+            if abs(snapped[c][0] - c[0]) > 1e-8 or abs(snapped[c][1] - c[1]) > 1e-8
+        )
+        logger.info(
+            "Snapped %d/%d unique coordinates (max shift: %.2fm)",
+            n_moved, len(unique_coords),
+            max(
+                ((snapped[c][0] - c[0])**2 + (snapped[c][1] - c[1])**2)**0.5 * 111_000
+                for c in unique_coords
+            ) if unique_coords else 0,
+        )
+        return snapped_trips
+
     def _discover_network(
         self,
         engine: osrm_module.OSRM,
@@ -552,6 +606,12 @@ class AssignmentLoop:
         # customization) so annotation speed = freeflow from OSM maxspeed.
         # See class docstring for the freeflow invariant.
         engine = self._create_engine()
+
+        # Pre-snap trip coordinates to OSRM waypoints so routes
+        # start/end at actual network nodes, not mid-segment phantom
+        # points.  Eliminates numerator/denominator gap inconsistency.
+        trips = self._snap_trips(engine, trips)
+
         state = self._discover_network(engine, trips)
 
         if state_patch:

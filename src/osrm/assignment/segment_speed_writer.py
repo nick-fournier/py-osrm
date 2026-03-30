@@ -76,7 +76,7 @@ class SegmentSpeedWriter:
         with open(path, "w") as f:
             for i in range(len(edge_ids)):
                 f.write(
-                    f"{int(edge_ids[i, 0])},{int(edge_ids[i, 1])},{speeds[i]:.1f}\n"
+                    f"{int(edge_ids[i, 0])},{int(edge_ids[i, 1])},{speeds[i]:.4f}\n"
                 )
 
         return path
