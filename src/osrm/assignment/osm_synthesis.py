@@ -139,7 +139,7 @@ def tntp_to_osm(
     *,
     ref_flows: Optional[List] = None,
     osrm_speed_factor: float = 0.8,
-    jam_density_per_lane: float = 200.0,
+    jam_density_per_lane: float = 150.0,
     per_lane_capacity: float = 1800.0,
     speed_units: str = "auto",
     classify_override: Optional[ClassifyOverride] = None,
@@ -306,7 +306,7 @@ def patch_lanes(
     Works for any network whose ``meta["lane_map"]`` maps
     ``(from_node, to_node) -> n_lanes``.
     """
-    kj_lane = jam_density_per_lane or meta.get("jam_density_per_lane", 200.0)
+    kj_lane = jam_density_per_lane or meta.get("jam_density_per_lane", 150.0)
     lane_map = meta["lane_map"]
     for i in range(state.n_edges):
         key = (int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1]))
@@ -448,7 +448,7 @@ def braess_network(
 def patch_braess_lanes(
     state,
     meta: dict,
-    jam_density_per_lane: float = 200.0,
+    jam_density_per_lane: float = 150.0,
 ) -> None:
     """Patch NetworkState with correct lane counts for a Braess network.
 
@@ -468,7 +468,7 @@ def sioux_falls_network(
     path: str | Path,
     fixture_dir: str | Path | None = None,
     osrm_speed_factor: float = 0.8,
-    jam_density_per_lane: float = 200.0,
+    jam_density_per_lane: float = 150.0,
 ) -> Tuple[Path, Dict]:
     """Generate the Sioux Falls 24-node network as OSM XML.
 

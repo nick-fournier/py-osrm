@@ -86,7 +86,8 @@ class AssignmentConfig:
         default_factory=DensitySmoothingConfig
     )
     vdf_kc_ratio: float = 1.0 / 3.0
-    default_jam_density_per_lane: float = 200.0
+    # HCM standard: ~150 veh/km/lane (~6.7m spacing at standstill)
+    default_jam_density_per_lane: float = 150.0
     default_n_lanes: int = 1
     speed_csv_dir: Optional[str] = None
     verbosity: str = "ERROR"

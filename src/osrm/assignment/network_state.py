@@ -221,7 +221,7 @@ class NetworkState:
     def from_route_annotations(
         cls,
         routes: list,
-        default_jam_density_per_lane: float = 130.0,
+        default_jam_density_per_lane: float = 150.0,
         default_n_lanes: int = 1,
     ) -> "NetworkState":
         """Build a NetworkState from OSRM route annotation results.

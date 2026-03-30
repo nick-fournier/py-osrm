@@ -1456,7 +1456,7 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     ))
     # Theoretical curve for median v_f / k_j
     med_vf = float(np.median(vf[vf > 0])) if (vf > 0).any() else 60.0
-    med_kj = float(np.median(kj[kj > 0])) if (kj > 0).any() else 200.0
+    med_kj = float(np.median(kj[kj > 0])) if (kj > 0).any() else 150.0
     k_curve = np.linspace(0, med_kj, 200)
     v_curve = vdf.density_to_speed(
         k_curve, np.full_like(k_curve, med_vf), np.full_like(k_curve, med_kj),
