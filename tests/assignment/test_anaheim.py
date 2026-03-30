@@ -201,6 +201,54 @@ class TestAnaheim:
             f"Only {state.n_edges} edges discovered from 914-link network"
         )
 
+    def test_incremental_loading_reduces_overshoot(self, tmp_path):
+        """Incremental loading should reduce max density overshoot vs direct."""
+        base, meta = _prepare_anaheim_network(tmp_path / "prep")
+
+        # Direct loading (no warm-up)
+        bp_direct = _copy_clean_osrm(base, tmp_path / "direct")
+        meta_full = dict(meta)
+        meta_full["od_matrix"] = meta["od_matrix"] * 1.0
+        trips = _build_trips(meta_full)
+
+        cfg_direct = AssignmentConfig(
+            method="fw", max_iterations=20, convergence_gap=0.0,
+            smoothing=DensitySmoothingConfig(method="none"),
+            verbosity="ERROR",
+            speed_csv_dir=str(tmp_path / "direct"),
+            incremental_steps=(1.0,),
+        )
+        loop_direct = AssignmentLoop(bp_direct, cfg_direct)
+        r_direct = loop_direct.run(
+            trips, state_patch=lambda s: patch_lanes(s, meta),
+        )
+        max_ratio_direct = float(np.max(
+            r_direct.network_state.density_vpkm
+            / r_direct.network_state.jam_density
+        ))
+
+        # Incremental loading (default 4-step warm-up)
+        bp_inc = _copy_clean_osrm(base, tmp_path / "inc")
+        cfg_inc = AssignmentConfig(
+            method="fw", max_iterations=20, convergence_gap=0.0,
+            smoothing=DensitySmoothingConfig(method="none"),
+            verbosity="ERROR",
+            speed_csv_dir=str(tmp_path / "inc"),
+        )
+        loop_inc = AssignmentLoop(bp_inc, cfg_inc)
+        r_inc = loop_inc.run(
+            trips, state_patch=lambda s: patch_lanes(s, meta),
+        )
+        max_ratio_inc = float(np.max(
+            r_inc.network_state.density_vpkm
+            / r_inc.network_state.jam_density
+        ))
+
+        assert max_ratio_inc < max_ratio_direct, (
+            f"Incremental ({max_ratio_inc:.2f}) should have lower max k/kj "
+            f"than direct ({max_ratio_direct:.2f})"
+        )
+
 
 def generate_anaheim_report(
     tmp_path: str | Path,
@@ -224,7 +272,7 @@ def generate_anaheim_report(
         tmp_path=Path(tmp_path),
         output_path=output_path,
         max_iter=max_iter,
-        detail_scale=0.30,
+        detail_scale=1.00,
         sweep_scales=[0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 0.75, 1.00],
         vc_scales=[0.10, 0.20, 0.30, 0.50],
     )
