@@ -1011,7 +1011,7 @@ def generate_validation_report(
     Path to the generated report.
     """
     if sweep_scales is None:
-        sweep_scales = [0.02, 0.05, 0.08, 0.10, 0.15, 0.20, 0.30, 0.50, 0.75, 1.00]
+        sweep_scales = [0.10, 0.20, 0.30, 0.50, 0.75, 1.00]
     if vc_scales is None:
         vc_scales = [0.05, 0.10, 0.15, 0.20]
 
