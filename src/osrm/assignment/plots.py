@@ -344,8 +344,9 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
         kc_ratio=cfg.vdf_kc_ratio,
         min_speed_kmh=cfg.vdf_min_speed_kmh,
     )
-    v_f, k_j = 60.0, 150.0
+    v_f, k_j = 60.0, cfg.default_jam_density_per_lane * cfg.default_n_lanes
     k_c = vdf.kc_ratio * k_j
+    q_c = v_f * k_c / 2.0
 
     figs = [
         vdf_speed_density(v_f=v_f, k_j=k_j, vdf=vdf),
@@ -367,9 +368,9 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
 
         f"""<h2>2. Flow–Density Fundamental Diagram (MFD)</h2>
         <p>This IS the macroscopic fundamental diagram. Both branches are downward-opening
-        parabolas in q-k space with vertex at (k<sub>c</sub>, q<sub>c</sub>). Capacity flow
-        q<sub>c</sub> = v<sub>f</sub> · k<sub>c</sub> / 2 = {v_f * k_c / 2:.0f} veh/hr occurs at critical
-        density. The uncongested branch (left of k<sub>c</sub>) is the operating regime for
+        parabolas in q-k space with vertex at ($k_c$, $q_c$). Capacity flow
+        $q_c = v_f \\cdot k_c / 2$ = {q_c:.0f} veh/hr occurs at critical
+        density. The uncongested branch (left of $k_c$) is the operating regime for
         equilibrium assignment — the congested branch represents breakdown conditions
         where adding vehicles reduces throughput.</p>""",
 
@@ -408,14 +409,32 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
 
     _write_combined_report(
         title="Bi-Parabolic VDF Theory Validation",
-        intro=f"""<p>These plots validate the bi-parabolic flow-density Volume Delay Function
-        (Fournier) implemented in <code>osrm.assignment.vdf.BiParabolicVDF</code>.
-        The model uses two parabolic branches in q-k space, requiring only free-flow speed
-        (v<sub>f</sub>) and jam density (k<sub>j</sub>) as inputs.</p>
+        intro=f"""
+        <div class="equations">
+        <h3>Model Equations</h3>
+        <p><b>Derived parameters:</b>
+        $k_c = k_j / 3$ (critical density) &nbsp;|&nbsp;
+        $q_c = v_f \\cdot k_c / 2$ (capacity flow) &nbsp;|&nbsp;
+        $v_c = v_f / 2$ (critical speed)</p>
+
+        <p><b>Uncongested branch</b> ($k \\leq k_c$): &emsp;
+        $v(k) = \\dfrac{{q_c \\left(2 k_c - k\\right)}}{{k_c^2}}$</p>
+
+        <p><b>Congested branch</b> ($k > k_c$): &emsp;
+        $v(k) = \\dfrac{{q_c}}{{k}} \\left[1 - \\dfrac{{(k - k_c)^2}}{{(k_j - k_c)^2}}\\right]$</p>
+
+        <p><b>Fundamental identity:</b> &emsp; $q = k \\cdot v(k)$</p>
+
+        <p><b>Wardrop relative gap:</b> &emsp;
+        $\\text{{gap}} = \\dfrac{{\\sum_a V_a \\cdot t_a}}{{\\sum_{{rs}} d_{{rs}} \\cdot \\pi_{{rs}}}} - 1$
+        &emsp; where $t_a = L_a / v_a$ is link travel time, $\\pi_{{rs}}$ is shortest-path cost.</p>
+        </div>
+
         <p><b>Parameters (matching assignment defaults):</b>
-        v<sub>f</sub> = {v_f:.0f} km/h,
-        k<sub>j</sub> = {k_j:.0f} veh/km,
-        k<sub>c</sub> = k<sub>j</sub>/3 = {k_c:.0f} veh/km,
+        $v_f$ = {v_f:.0f} km/h,
+        $k_j$ = {k_j:.0f} veh/km,
+        $k_c$ = {k_c:.0f} veh/km,
+        $q_c$ = {q_c:.0f} veh/hr,
         min speed = {vdf.min_speed_kmh} km/h.</p>""",
         figures=figs,
         descriptions=descriptions,
@@ -462,6 +481,10 @@ def _write_combined_report(
     <meta charset="utf-8">
     <title>{title}</title>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+    <script>
+        MathJax = {{ tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }} }};
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -497,6 +520,17 @@ def _write_combined_report(
         .meta {{
             color: #777;
             font-size: 13px;
+        }}
+        .equations {{
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px 30px;
+            margin: 20px 0;
+        }}
+        .equations h3 {{
+            color: #1976D2;
+            margin-top: 0;
         }}
     </style>
 </head>
