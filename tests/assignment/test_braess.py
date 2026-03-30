@@ -724,7 +724,8 @@ def generate_braess_report(
         xaxis_title="Iteration", yaxis_title="Relative Gap",
         yaxis_type="log",
         template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+        xaxis=dict(fixedrange=True),
+        yaxis=dict(fixedrange=True, dtick=1, tickformat=".0e"),
     )
     figs.append(fig_gap)
 

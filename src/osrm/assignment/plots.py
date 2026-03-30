@@ -1271,7 +1271,8 @@ def _add_sweep_section(figs, descriptions, base, meta, copy_fn, run_fn,
         yaxis_title="TSTT (veh-seconds)",
         yaxis_type="log",
         template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+        xaxis=dict(fixedrange=True),
+        yaxis=dict(fixedrange=True, dtick=1, tickformat=".0e"),
     )
     figs.append(fig_tstt)
     descriptions.append(
@@ -1314,7 +1315,8 @@ def _add_convergence_section(figs, descriptions, base, meta, copy_fn,
         xaxis_title="Iteration", yaxis_title="Relative Gap",
         yaxis_type="log",
         template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+        xaxis=dict(fixedrange=True),
+        yaxis=dict(fixedrange=True, dtick=1, tickformat=".0e"),
     )
     figs.append(fig)
 
