@@ -14,6 +14,7 @@ Reports are written to docs/plots/.
 
 from __future__ import annotations
 
+import logging
 import sys
 import tempfile
 import time
@@ -68,6 +69,13 @@ def main() -> None:
         if key not in REPORTS:
             print(f"Unknown report: {key!r}. Choose from: {list(REPORTS.keys())}")
             sys.exit(1)
+
+    # Enable assignment loop progress logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     for key in targets:
         label, fn = REPORTS[key]

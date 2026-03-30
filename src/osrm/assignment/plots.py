@@ -15,11 +15,14 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
 import plotly.graph_objects as go
+
+logger = logging.getLogger(__name__)
 from plotly.subplots import make_subplots
 
 from osrm.assignment.vdf import BiParabolicVDF
@@ -1027,18 +1030,27 @@ def generate_validation_report(
     descriptions: list[str] = []
 
     # --- 0. Network topology map ---
+    logger.info("[%s] Building topology map...", network_name)
     _add_topology_section(
         figs, descriptions, network_name, node_coords, link_attrs,
         n_links, n_zones, total_demand,
     )
 
     # --- 1. Demand scaling sweep ---
+    logger.info(
+        "[%s] Running demand sweep (%d scales)...",
+        network_name, len(sweep_scales),
+    )
     _add_sweep_section(
         figs, descriptions, base, meta, copy_fn, run_fn,
         sweep_scales, total_demand, n_links, max_iter,
     )
 
     # --- 2. FW vs MSA convergence ---
+    logger.info(
+        "[%s] Running convergence comparison (FW + MSA, %d iters)...",
+        network_name, max_iter,
+    )
     result_fw = _add_convergence_section(
         figs, descriptions, base, meta, copy_fn, prepare_fn, run_fn,
         tmp_path, detail_scale, total_demand, max_iter,
@@ -1047,17 +1059,23 @@ def generate_validation_report(
     # --- 3. Flow and TT correlation ---
     state = result_fw.network_state
     if ref:
+        logger.info("[%s] Building correlation plots...", network_name)
         _add_correlation_section(
             figs, descriptions, state, ref, link_attrs, detail_scale,
         )
 
     # --- 4. V/C scatter ---
+    logger.info(
+        "[%s] Running V/C scatter (%d scales)...",
+        network_name, len(vc_scales),
+    )
     _add_vc_section(
         figs, descriptions, base, meta, copy_fn, run_fn,
         link_attrs, vc_scales, max_iter, tmp_path,
     )
 
     # --- 5. Link state table (at end — large for big networks) ---
+    logger.info("[%s] Building link state table...", network_name)
     _add_link_table_section(
         figs, descriptions, state, link_attrs, detail_scale, total_demand,
     )
@@ -1163,6 +1181,7 @@ def _add_sweep_section(figs, descriptions, base, meta, copy_fn, run_fn,
     sweep_tstt = []
 
     for scale in scales:
+        logger.info("  Sweep scale %.0f%%...", scale * 100)
         run_base = copy_fn(base, Path(base).parent.parent / f"sweep_{scale:.2f}")
         result = run_fn(run_base, meta, max_iter, "fw", scale)
         state = result.network_state
@@ -1266,9 +1285,11 @@ def _add_convergence_section(figs, descriptions, base, meta, copy_fn,
                               prepare_fn, run_fn, tmp_path,
                               detail_scale, total_demand, max_iter):
     """Section 2: FW vs MSA convergence. Returns FW result."""
+    logger.info("  Running FW at %.0f%% demand...", detail_scale * 100)
     base_fw = copy_fn(base, tmp_path / "fw_detail")
     result_fw = run_fn(base_fw, meta, max_iter, "fw", detail_scale)
 
+    logger.info("  Running MSA at %.0f%% demand...", detail_scale * 100)
     base_msa, meta_msa = prepare_fn(tmp_path / "msa")
     result_msa = run_fn(base_msa, meta_msa, max_iter, "msa", detail_scale)
 
@@ -1506,6 +1527,7 @@ def _add_vc_section(figs, descriptions, base, meta, copy_fn, run_fn,
     max_flow = 1
 
     for sc, col in zip(scales, colors):
+        logger.info("  V/C scale %.0f%%...", sc * 100)
         vc_base = copy_fn(base, tmp_path / f"vc_{sc:.2f}")
         res = run_fn(vc_base, meta, max_iter, "fw", sc)
         st = res.network_state
