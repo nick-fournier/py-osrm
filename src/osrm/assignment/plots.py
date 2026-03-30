@@ -156,6 +156,78 @@ def vdf_flow_density(
     return _save_or_show(fig, path)
 
 
+def _vdf_near_jam_detail(
+    v_f: float = 60.0,
+    k_j: float = 150.0,
+    vdf: BiParabolicVDF | None = None,
+) -> go.Figure:
+    """Plot speed and travel-time sensitivity near jam density.
+
+    Shows the steep gradient in the congested regime that causes
+    convergence difficulties for Frank-Wolfe assignment.
+    """
+    vdf = vdf or BiParabolicVDF()
+
+    # Zoom: k/k_j from 0.5 to 1.0
+    frac = np.linspace(0.5, 1.0, 500)
+    k = frac * k_j
+    v_f_arr = np.full_like(k, v_f)
+    k_j_arr = np.full_like(k, k_j)
+    v = vdf.density_to_speed(k, v_f_arr, k_j_arr)
+
+    # Travel time per km (seconds)
+    tt_per_km = 3600.0 / np.maximum(v, 0.001)
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=["Speed near k_j", "Travel time per km near k_j"],
+    )
+
+    fig.add_trace(go.Scatter(
+        x=frac, y=v, mode="lines",
+        line=dict(color="#F44336", width=2),
+        name="Speed",
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=frac, y=tt_per_km, mode="lines",
+        line=dict(color="#FF9800", width=2),
+        name="Travel time/km",
+    ), row=1, col=2)
+
+    # Annotate key thresholds
+    for threshold, label in [(0.9, "90%"), (0.95, "95%"), (0.99, "99%")]:
+        kk = np.array([threshold * k_j])
+        vv = vdf.density_to_speed(kk, np.array([v_f]), np.array([k_j]))[0]
+        tt = 3600.0 / max(vv, 0.001)
+        fig.add_trace(go.Scatter(
+            x=[threshold], y=[vv], mode="markers+text",
+            marker=dict(size=8, color="#333"),
+            text=[f"{label}: {vv:.1f} km/h"],
+            textposition="top left",
+            showlegend=False,
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=[threshold], y=[tt], mode="markers+text",
+            marker=dict(size=8, color="#333"),
+            text=[f"{label}: {tt:.0f}s/km"],
+            textposition="top left",
+            showlegend=False,
+        ), row=1, col=2)
+
+    fig.update_xaxes(title_text="k / k_j", row=1, col=1)
+    fig.update_yaxes(title_text="Speed (km/h)", row=1, col=1)
+    fig.update_xaxes(title_text="k / k_j", row=1, col=2)
+    fig.update_yaxes(title_text="Travel time (s/km)", type="log", row=1, col=2)
+    fig.update_layout(
+        title="Near-Jam Behaviour: Speed Collapse and Travel-Time Explosion",
+        template="plotly_white",
+        showlegend=False,
+        height=400,
+    )
+    return fig
+
+
 def vdf_inverse_accuracy(
     v_f: float = 60.0,
     k_j: float = 150.0,
@@ -256,19 +328,29 @@ def vdf_multi_class(
 def vdf_theory(output_dir: str = "docs/plots") -> Path:
     """Generate a single combined VDF theory validation report.
 
+    Uses the same parameters as the assignment loop defaults so the
+    report reflects actual operational behaviour.
+
     Returns path to the saved HTML file.
     """
     d = Path(output_dir)
     d.mkdir(parents=True, exist_ok=True)
     path = d / "vdf_theory_report.html"
 
-    vdf = BiParabolicVDF()
+    # Use assignment-actual min_speed (0.01 km/h, not VDF default 5.0)
+    from osrm.assignment.assignment_loop import AssignmentConfig
+    cfg = AssignmentConfig()
+    vdf = BiParabolicVDF(
+        kc_ratio=cfg.vdf_kc_ratio,
+        min_speed_kmh=cfg.vdf_min_speed_kmh,
+    )
     v_f, k_j = 60.0, 150.0
     k_c = vdf.kc_ratio * k_j
 
     figs = [
         vdf_speed_density(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_flow_density(v_f=v_f, k_j=k_j, vdf=vdf),
+        _vdf_near_jam_detail(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_inverse_accuracy(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_multi_class(vdf=vdf),
     ]
@@ -281,7 +363,7 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
         v(k) = q<sub>c</sub>(2k<sub>c</sub> − k) / k<sub>c</sub>². The <b>congested branch</b> (red) is
         parabolic in q-k space, yielding a nonlinear speed drop. At k = 0, v = v<sub>f</sub> = {v_f:.0f} km/h.
         At k = k<sub>c</sub>, v = v<sub>f</sub>/2 = {v_f/2:.0f} km/h. The junction is C¹-continuous
-        (matching value and slope). A floor of {vdf.min_speed_kmh} km/h prevents zero speeds.</p>""",
+        (matching value and slope). A floor of {vdf.min_speed_kmh} km/h prevents division by zero.</p>""",
 
         f"""<h2>2. Flow–Density Fundamental Diagram (MFD)</h2>
         <p>This IS the macroscopic fundamental diagram. Both branches are downward-opening
@@ -291,7 +373,23 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
         equilibrium assignment — the congested branch represents breakdown conditions
         where adding vehicles reduces throughput.</p>""",
 
-        """<h2>3. Inverse Round-Trip Accuracy</h2>
+        f"""<h2>3. Near-Jam Behaviour (k → k<sub>j</sub>)</h2>
+        <p>This panel zooms into the congested branch near jam density to show the steep
+        speed gradient that impacts convergence. At k/k<sub>j</sub> = 0.90, speed is just
+        {vdf.density_to_speed(np.array([0.9*k_j]), np.array([v_f]), np.array([k_j]))[0]:.1f} km/h.
+        At k/k<sub>j</sub> = 0.99 it drops to
+        {vdf.density_to_speed(np.array([0.99*k_j]), np.array([v_f]), np.array([k_j]))[0]:.2f} km/h.
+        This extreme sensitivity means a small density change near k<sub>j</sub> produces a
+        large travel-time change — creating a near-discontinuity that Frank-Wolfe's linear
+        search direction struggles to navigate. Links that hit the density cap (k = k<sub>j</sub>)
+        reach the speed floor ({vdf.min_speed_kmh} km/h) and become "gridlock traps" that
+        FW's shrinking step sizes cannot recover from in a practical number of iterations.</p>
+        <p><b>Design question:</b> Should we cap density at e.g. 0.99·k<sub>j</sub> to maintain
+        a minimum ~{vdf.density_to_speed(np.array([0.99*k_j]), np.array([v_f]), np.array([k_j]))[0]:.1f} km/h
+        and prevent absorbing gridlock states?  Or remove the hard cap entirely and let the
+        VDF's speed floor handle it?</p>""",
+
+        """<h2>4. Inverse Round-Trip Accuracy</h2>
         <p>A key advantage of this VDF over BPR: the flow-to-density inversion has a
         <b>closed-form solution</b> via the quadratic formula — no Newton solver needed.
         Left panel: q<sub>in</sub> vs q<sub>out</sub> after q → k(q) → q(k) round-trip
@@ -299,7 +397,7 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
         be near machine epsilon (~10<sup>-10</sup>). This confirms the vectorized NumPy
         implementation is numerically exact.</p>""",
 
-        """<h2>4. Speed–Density by Road Class</h2>
+        """<h2>5. Speed–Density by Road Class</h2>
         <p>The bi-parabolic model is "parameter-light" — only v<sub>f</sub> (free-flow speed)
         and k<sub>j</sub> (jam density) are needed per link. k<sub>c</sub> = k<sub>j</sub>/3 is derived,
         not calibrated. This overlay shows how different road classes produce different
@@ -310,11 +408,15 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
 
     _write_combined_report(
         title="Bi-Parabolic VDF Theory Validation",
-        intro="""<p>These plots validate the bi-parabolic flow-density Volume Delay Function
+        intro=f"""<p>These plots validate the bi-parabolic flow-density Volume Delay Function
         (Fournier) implemented in <code>osrm.assignment.vdf.BiParabolicVDF</code>.
         The model uses two parabolic branches in q-k space, requiring only free-flow speed
-        (v<sub>f</sub>) and jam density (k<sub>j</sub>) as inputs. All plots use default parameters:
-        v<sub>f</sub> = 60 km/h, k<sub>j</sub> = 150 veh/km, k<sub>c</sub> = k<sub>j</sub>/3 = 50 veh/km.</p>""",
+        (v<sub>f</sub>) and jam density (k<sub>j</sub>) as inputs.</p>
+        <p><b>Parameters (matching assignment defaults):</b>
+        v<sub>f</sub> = {v_f:.0f} km/h,
+        k<sub>j</sub> = {k_j:.0f} veh/km,
+        k<sub>c</sub> = k<sub>j</sub>/3 = {k_c:.0f} veh/km,
+        min speed = {vdf.min_speed_kmh} km/h.</p>""",
         figures=figs,
         descriptions=descriptions,
         path=path,
