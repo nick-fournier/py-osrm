@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
@@ -366,115 +365,28 @@ class AssignmentLoop:
 
     def _compute_relative_gap(
         self,
-        engine: osrm_module.OSRM,
-        trips: List[DemandTrip],
         state: NetworkState,
         blended_volume: np.ndarray,
-        sample_frac: float = 1.0,
+        aon_volume: np.ndarray,
     ) -> float:
-        """Compute Wardrop relative gap using the Table API.
+        """Compute Wardrop relative gap using VDF link costs.
 
-        gap = Σ_a (V_a · t_a) / Σ_rs (d_rs · π_rs) − 1
+        gap = Σ_a (V_blended · c_a) / Σ_a (V_aon · c_a) − 1
 
-        Uses OSRM Table for a single bulk query instead of routing each
-        OD pair individually, making gap computation essentially free
-        compared to the per-link annotation routing.
+        Both numerator and denominator use the same VDF-derived link
+        cost ``c_a = L_a / v_a``, eliminating systematic bias from OSRM
+        speed quantization and turn-penalty overhead.
 
-        Parameters
-        ----------
-        sample_frac : float
-            Fraction of trips to sample for the denominator.  At 1.0
-            all trips are used.  At e.g. 0.2, a random 20% of trips
-            are routed and the result is scaled up.
+        At equilibrium, blended flows equal AON flows (everyone is
+        already on shortest paths), so gap → 0.
         """
-        # Link travel time from current density-derived speed
         link_time_s = state.length_m * 3.6 / np.maximum(state.speed_kmh, 1.0)
 
-        # Numerator: total veh·s on network (demand-side)
-        numerator = float(np.sum(blended_volume * link_time_s))
-
-        if numerator == 0:
-            return 0.0
-
-        # Optionally sample trips for denominator
-        if sample_frac < 1.0 and len(trips) > 1:
-            n_sample = max(1, int(len(trips) * sample_frac))
-            sampled = random.sample(trips, n_sample)
-            scale = len(trips) / n_sample
-        else:
-            sampled = trips
-            scale = 1.0
-
-        # Deduplicate coordinates: build index maps for sources/destinations
-        origin_map: Dict[Tuple[float, float], int] = {}
-        dest_map: Dict[Tuple[float, float], int] = {}
-        for trip in sampled:
-            o = tuple(trip.origin)
-            d = tuple(trip.destination)
-            if o not in origin_map:
-                origin_map[o] = len(origin_map)
-            if d not in dest_map:
-                dest_map[d] = len(dest_map)
-
-        # Build coordinate list: origins first, then destinations
-        n_origins = len(origin_map)
-        all_coords = list(origin_map.keys()) + list(dest_map.keys())
-        source_indices = list(range(n_origins))
-        dest_indices = list(range(n_origins, n_origins + len(dest_map)))
-
-        try:
-            table_result = engine.Table(
-                coordinates=all_coords,
-                sources=source_indices,
-                destinations=dest_indices,
-                annotations=["duration"],
-            )
-            durations = table_result.get("durations", [])
-        except Exception as e:
-            logger.warning("Table API failed, falling back to Route: %s", e)
-            return self._compute_relative_gap_route(
-                engine, sampled, state, blended_volume, scale,
-            )
-
-        # Sum demand × shortest-path duration
-        denominator = 0.0
-        for trip in sampled:
-            o_idx = origin_map[tuple(trip.origin)]
-            d_idx = dest_map[tuple(trip.destination)]
-            if o_idx < len(durations) and d_idx < len(durations[o_idx]):
-                dur = durations[o_idx][d_idx]
-                if dur is not None:
-                    denominator += trip.volume * dur
-
-        denominator *= scale
-
-        if denominator == 0:
-            return 0.0
-
-        return numerator / denominator - 1.0
-
-    def _compute_relative_gap_route(
-        self,
-        engine: osrm_module.OSRM,
-        trips: List[DemandTrip],
-        state: NetworkState,
-        blended_volume: np.ndarray,
-        scale: float = 1.0,
-    ) -> float:
-        """Fallback gap computation using individual Route calls."""
-        link_time_s = state.length_m * 3.6 / np.maximum(state.speed_kmh, 1.0)
         numerator = float(np.sum(blended_volume * link_time_s))
         if numerator == 0:
             return 0.0
 
-        denominator = 0.0
-        for trip in trips:
-            result = self._route_single(engine, trip)
-            if result and result.get("routes"):
-                shortest_time = result["routes"][0]["duration"]
-                denominator += trip.volume * shortest_time
-
-        denominator *= scale
+        denominator = float(np.sum(aon_volume * link_time_s))
         if denominator == 0:
             return 0.0
 
@@ -575,12 +487,10 @@ class AssignmentLoop:
             Compute Wardrop relative gap every *N* iterations. The last
             iteration always computes gap regardless.  On skipped
             iterations the previous gap value is carried forward.
-            Default 5.
         gap_sample_frac : float
-            Fraction of OD pairs to sample when computing gap (0, 1].
-            At 1.0 (default) all trips are used.  Lower values (e.g.
-            0.2) reduce gap computation cost for very large networks at
-            the expense of gap accuracy.
+            Deprecated — kept for API compatibility.  Gap computation
+            now uses VDF link costs (a single dot product) and no longer
+            routes OD pairs, so sampling is unnecessary.
 
         Returns
         -------
@@ -700,6 +610,20 @@ class AssignmentLoop:
                     state_patch(state)
                 self.smoother.build_adjacency(state.edge_ids, state.length_m)
 
+            # 2b. Compute gap BEFORE blending — link costs match the
+            #     network that OSRM routed on, so AON paths are truly
+            #     shortest under these costs.
+            is_last = n == self.config.max_iterations
+            compute_gap = (n % gap_every == 0) or n == 1 or is_last
+            t_gap = time.monotonic()
+            if compute_gap:
+                gap = self._compute_relative_gap(
+                    state, prev_volume, aon_volume,
+                )
+            else:
+                gap = log[-1].relative_gap if log else float("nan")
+            gap_time = time.monotonic() - t_gap
+
             # 3. Blending: MSA (fixed 1/n) or FW (optimal step)
             if n == 1:
                 alpha = 1.0
@@ -754,19 +678,6 @@ class AssignmentLoop:
             del engine
             engine = self._create_engine()
             engine_time = time.monotonic() - t_engine
-
-            # 8. Compute gap (on updated network)
-            is_last = n == self.config.max_iterations
-            compute_gap = (n % gap_every == 0) or n == 1 or is_last
-            t_gap = time.monotonic()
-            if compute_gap:
-                gap = self._compute_relative_gap(
-                    engine, trips, state, blended_volume,
-                    sample_frac=gap_sample_frac,
-                )
-            else:
-                gap = log[-1].relative_gap if log else float("nan")
-            gap_time = time.monotonic() - t_gap
 
             iter_result = IterationResult(
                 iteration=n,
