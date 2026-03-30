@@ -451,7 +451,7 @@ class AssignmentLoop:
         if denominator == 0:
             return 0.0
 
-        return max(0.0, numerator / denominator - 1.0)
+        return numerator / denominator - 1.0
 
     def _compute_relative_gap_route(
         self,
@@ -478,7 +478,7 @@ class AssignmentLoop:
         if denominator == 0:
             return 0.0
 
-        return max(0.0, numerator / denominator - 1.0)
+        return numerator / denominator - 1.0
 
     def _fw_line_search(
         self,
@@ -794,7 +794,7 @@ class AssignmentLoop:
 
             # 9. Convergence check (only on freshly computed gap)
             if (compute_gap and self.config.convergence_gap > 0
-                    and gap < self.config.convergence_gap):
+                    and 0 <= gap < self.config.convergence_gap):
                 logger.info("Converged at iteration %d (gap=%.4f)", n, gap)
                 break
 
@@ -805,7 +805,9 @@ class AssignmentLoop:
         self.writer.cleanup()
 
         return AssignmentResult(
-            converged=log[-1].relative_gap < self.config.convergence_gap if log else False,
+            converged=(log[-1].relative_gap >= 0
+                       and log[-1].relative_gap < self.config.convergence_gap)
+                      if log else False,
             iterations=len(log),
             final_gap=log[-1].relative_gap if log else float("inf"),
             network_state=state,

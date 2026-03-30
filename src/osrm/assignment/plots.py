@@ -1301,18 +1301,18 @@ def _add_convergence_section(figs, descriptions, base, meta, copy_fn,
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=iters_fw, y=[g if g > 0 else None for g in gap_fw],
+        x=iters_fw, y=[abs(g) if g != 0 else None for g in gap_fw],
         mode="lines+markers", name="Frank-Wolfe",
         line=dict(color="#D32F2F", width=2.5), marker=dict(size=4),
     ))
     fig.add_trace(go.Scatter(
-        x=iters_msa, y=[g if g > 0 else None for g in gap_msa],
+        x=iters_msa, y=[abs(g) if g != 0 else None for g in gap_msa],
         mode="lines+markers", name="MSA (1/n)",
         line=dict(color="#1565C0", width=1.5, dash="dash"), marker=dict(size=3),
     ))
     fig.update_layout(
         title=f"Wardrop Gap: FW vs MSA ({detail_scale:.0%} Demand)",
-        xaxis_title="Iteration", yaxis_title="Relative Gap",
+        xaxis_title="Iteration", yaxis_title="|Relative Gap|",
         yaxis_type="log",
         template="plotly_white",
         xaxis=dict(fixedrange=True),

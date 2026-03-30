@@ -167,9 +167,9 @@ class TestAssignmentLoop:
         result = loop.run(adapter.trips())
 
         gaps = [r.relative_gap for r in result.iteration_log]
-        # Gap should be lower at the end than the start (allowing some noise)
-        assert gaps[-1] <= gaps[0] + 0.1, (
-            f"Gap should trend downward: {gaps}"
+        # |gap| should be lower at the end than the start (allowing some noise)
+        assert abs(gaps[-1]) <= abs(gaps[0]) + 0.1, (
+            f"Gap magnitude should trend downward: {gaps}"
         )
 
     def test_iteration_log_structure(self, monaco_work):

@@ -686,42 +686,42 @@ def generate_braess_report(
     fig_gap = go.Figure()
     # MSA raw gap as faint markers
     fig_gap.add_trace(go.Scatter(
-        x=iters_w, y=[g if g > 0 else None for g in gap_with],
+        x=iters_w, y=[abs(g) if g != 0 else None for g in gap_with],
         mode="markers", name="MSA with shortcut (raw)",
         marker=dict(color="#F44336", size=4, opacity=0.3),
     ))
     fig_gap.add_trace(go.Scatter(
-        x=iters_wo, y=[g if g > 0 else None for g in gap_without],
+        x=iters_wo, y=[abs(g) if g != 0 else None for g in gap_without],
         mode="markers", name="MSA without shortcut (raw)",
         marker=dict(color="#2196F3", size=4, opacity=0.3),
     ))
-    # MSA envelope (rolling max) as dashed
+    # MSA envelope (rolling max of |gap|) as dashed
     fig_gap.add_trace(go.Scatter(
-        x=iters_w, y=_moving_max(gap_with, window=5),
+        x=iters_w, y=_moving_max([abs(g) for g in gap_with], window=5),
         mode="lines", name="MSA with shortcut (envelope)",
         line=dict(color="#F44336", width=1.5, dash="dash"),
     ))
     fig_gap.add_trace(go.Scatter(
-        x=iters_wo, y=_moving_max(gap_without, window=5),
+        x=iters_wo, y=_moving_max([abs(g) for g in gap_without], window=5),
         mode="lines", name="MSA without shortcut (envelope)",
         line=dict(color="#2196F3", width=1.5, dash="dash"),
     ))
     # FW gap as solid lines
     fig_gap.add_trace(go.Scatter(
-        x=iters_fw_w, y=[g if g > 0 else None for g in gap_fw_w],
+        x=iters_fw_w, y=[abs(g) if g != 0 else None for g in gap_fw_w],
         mode="lines+markers", name="FW with shortcut",
         line=dict(color="#D32F2F", width=2.5),
         marker=dict(size=5),
     ))
     fig_gap.add_trace(go.Scatter(
-        x=iters_fw_wo, y=[g if g > 0 else None for g in gap_fw_wo],
+        x=iters_fw_wo, y=[abs(g) if g != 0 else None for g in gap_fw_wo],
         mode="lines+markers", name="FW without shortcut",
         line=dict(color="#1565C0", width=2.5),
         marker=dict(size=5),
     ))
     fig_gap.update_layout(
         title="Wardrop Relative Gap: MSA vs Frank-Wolfe",
-        xaxis_title="Iteration", yaxis_title="Relative Gap",
+        xaxis_title="Iteration", yaxis_title="|Relative Gap|",
         yaxis_type="log",
         template="plotly_white",
         xaxis=dict(fixedrange=True),
