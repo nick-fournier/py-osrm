@@ -11,8 +11,11 @@ See docs/traffic_assignment_design.md §4 and §7 for full specification.
 from __future__ import annotations
 
 import logging
+import math
+import os
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,6 +80,7 @@ class IterationResult:
     route_time_s: float
     customize_time_s: float
     engine_time_s: float = 0.0
+    gap_time_s: float = 0.0
     step_size: float = 0.0
 
 
@@ -102,6 +106,7 @@ class AssignmentResult:
             "route_time_s": [r.route_time_s for r in self.iteration_log],
             "customize_time_s": [r.customize_time_s for r in self.iteration_log],
             "engine_time_s": [r.engine_time_s for r in self.iteration_log],
+            "gap_time_s": [r.gap_time_s for r in self.iteration_log],
         }
 
 
@@ -211,6 +216,10 @@ class AssignmentLoop:
     ) -> Tuple[np.ndarray, np.ndarray, float]:
         """Route all trips, accumulate link density and volume.
 
+        Routes OD pairs in parallel using a thread pool (OSRM releases
+        the GIL during C++ routing), then accumulates results
+        sequentially to safely mutate shared NetworkState.
+
         Returns two per-link arrays:
 
         * **aon_density** (supply-side): average density contribution
@@ -235,11 +244,30 @@ class AssignmentLoop:
         tstt = 0.0
         bin_width_hr = self.config.bin_width_s / 3600.0
 
-        for trip in trips:
-            result = self._route_single(engine, trip)
+        # Parallel routing phase: OSRM releases GIL so threads run concurrently
+        n_workers = min(os.cpu_count() or 1, len(trips))
+        route_results: List[Optional[dict]] = [None] * len(trips)
+
+        def _route_batch(indices: List[int]) -> List[Tuple[int, Optional[dict]]]:
+            return [(i, self._route_single(engine, trips[i])) for i in indices]
+
+        chunk_size = max(1, math.ceil(len(trips) / n_workers))
+        chunks = [
+            list(range(i, min(i + chunk_size, len(trips))))
+            for i in range(0, len(trips), chunk_size)
+        ]
+
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = [executor.submit(_route_batch, chunk) for chunk in chunks]
+            for future in as_completed(futures):
+                for idx, result in future.result():
+                    route_results[idx] = result
+
+        # Sequential accumulation phase: mutates state (edge registration)
+        for trip_idx, result in enumerate(route_results):
             if result is None:
                 continue
-
+            trip = trips[trip_idx]
             route = result["routes"][0]
             tstt += trip.volume * route["duration"]
 
@@ -254,10 +282,6 @@ class AssignmentLoop:
                     idx = state.edge_ordinal(from_id, to_id)
                     if idx is None:
                         dist = distances[i] if i < len(distances) else 0.0
-                        # Annotation speed is valid as freeflow here:
-                        # the segment-speed CSV only contains edges already
-                        # in NetworkState, so a never-seen edge still has
-                        # its original profile speed from OSM maxspeed.
                         spd = (speeds[i] * 3.6) if i < len(speeds) else 1.0
                         jam_d = (self.config.default_jam_density_per_lane
                                  * self.config.default_n_lanes)
@@ -265,19 +289,13 @@ class AssignmentLoop:
                             from_id, to_id, dist, spd, jam_d,
                             self.config.default_n_lanes,
                         )
-                        # Grow arrays to match
                         if idx >= len(new_density):
                             pad = state.n_edges - len(new_density)
                             new_density = np.append(new_density, np.zeros(pad))
                             new_volume = np.append(new_volume, np.zeros(pad))
 
-                    # Demand-side volume (always conserves)
                     new_volume[idx] += trip.volume
 
-                    # Density contribution: k = volume / (v × T)
-                    # OSRM can return speed=0 on phantom segments at snap
-                    # points.  Fall back to freeflow for density calculation
-                    # to avoid artificial jam density from a routing artifact.
                     seg_speed_kmh = (speeds[i] * 3.6) if i < len(speeds) else 0.0
                     if seg_speed_kmh < self.config.min_speed_kmh:
                         seg_speed_kmh = state.freeflow_kmh[idx]
@@ -293,17 +311,13 @@ class AssignmentLoop:
         blended_volume: np.ndarray,
         sample_frac: float = 1.0,
     ) -> float:
-        """Compute Wardrop relative gap.
+        """Compute Wardrop relative gap using the Table API.
 
         gap = Σ_a (V_a · t_a) / Σ_rs (d_rs · π_rs) − 1
 
-        where V_a is the demand-side volume on link a (always conserves
-        with total demand), t_a = L_a / v_a is the link travel time at
-        current density, and π_rs is the shortest-path cost on the
-        updated network.
-
-        Using demand volume (not MFD throughput) ensures the numerator
-        accounts for all vehicles, even on oversaturated links.
+        Uses OSRM Table for a single bulk query instead of routing each
+        OD pair individually, making gap computation essentially free
+        compared to the per-link annotation routing.
 
         Parameters
         ----------
@@ -330,16 +344,76 @@ class AssignmentLoop:
             sampled = trips
             scale = 1.0
 
-        # Denominator: demand × shortest path cost on current network
+        # Deduplicate coordinates: build index maps for sources/destinations
+        origin_map: Dict[Tuple[float, float], int] = {}
+        dest_map: Dict[Tuple[float, float], int] = {}
+        for trip in sampled:
+            o = tuple(trip.origin)
+            d = tuple(trip.destination)
+            if o not in origin_map:
+                origin_map[o] = len(origin_map)
+            if d not in dest_map:
+                dest_map[d] = len(dest_map)
+
+        # Build coordinate list: origins first, then destinations
+        n_origins = len(origin_map)
+        all_coords = list(origin_map.keys()) + list(dest_map.keys())
+        source_indices = list(range(n_origins))
+        dest_indices = list(range(n_origins, n_origins + len(dest_map)))
+
+        try:
+            table_result = engine.Table(
+                coordinates=all_coords,
+                sources=source_indices,
+                destinations=dest_indices,
+                annotations=["duration"],
+            )
+            durations = table_result.get("durations", [])
+        except Exception as e:
+            logger.warning("Table API failed, falling back to Route: %s", e)
+            return self._compute_relative_gap_route(
+                engine, sampled, state, blended_volume, scale,
+            )
+
+        # Sum demand × shortest-path duration
         denominator = 0.0
         for trip in sampled:
+            o_idx = origin_map[tuple(trip.origin)]
+            d_idx = dest_map[tuple(trip.destination)]
+            if o_idx < len(durations) and d_idx < len(durations[o_idx]):
+                dur = durations[o_idx][d_idx]
+                if dur is not None:
+                    denominator += trip.volume * dur
+
+        denominator *= scale
+
+        if denominator == 0:
+            return 0.0
+
+        return max(0.0, numerator / denominator - 1.0)
+
+    def _compute_relative_gap_route(
+        self,
+        engine: osrm_module.OSRM,
+        trips: List[DemandTrip],
+        state: NetworkState,
+        blended_volume: np.ndarray,
+        scale: float = 1.0,
+    ) -> float:
+        """Fallback gap computation using individual Route calls."""
+        link_time_s = state.length_m * 3.6 / np.maximum(state.speed_kmh, 1.0)
+        numerator = float(np.sum(blended_volume * link_time_s))
+        if numerator == 0:
+            return 0.0
+
+        denominator = 0.0
+        for trip in trips:
             result = self._route_single(engine, trip)
             if result and result.get("routes"):
                 shortest_time = result["routes"][0]["duration"]
                 denominator += trip.volume * shortest_time
 
         denominator *= scale
-
         if denominator == 0:
             return 0.0
 
@@ -427,7 +501,7 @@ class AssignmentLoop:
         trips: List[DemandTrip],
         progress_callback=None,
         state_patch=None,
-        gap_every: int = 5,
+        gap_every: int = 1,
         gap_sample_frac: float = 1.0,
     ) -> AssignmentResult:
         """Run the iterative assignment loop.
@@ -567,6 +641,7 @@ class AssignmentLoop:
             # 8. Compute gap (on updated network)
             is_last = n == self.config.max_iterations
             compute_gap = (n % gap_every == 0) or n == 1 or is_last
+            t_gap = time.monotonic()
             if compute_gap:
                 gap = self._compute_relative_gap(
                     engine, trips, state, blended_volume,
@@ -574,6 +649,7 @@ class AssignmentLoop:
                 )
             else:
                 gap = log[-1].relative_gap if log else float("nan")
+            gap_time = time.monotonic() - t_gap
 
             iter_result = IterationResult(
                 iteration=n,
@@ -584,15 +660,16 @@ class AssignmentLoop:
                 route_time_s=route_time,
                 customize_time_s=customize_time,
                 engine_time_s=engine_time,
+                gap_time_s=gap_time,
                 step_size=alpha,
             )
             log.append(iter_result)
 
             logger.info(
                 "Iter %d: gap=%.4f, TSTT=%.0f, alpha=%.4f, max_dk=%.1f, "
-                "oversat=%d, route=%.1fs, customize=%.1fs, engine=%.1fs",
+                "oversat=%d, route=%.3fs, gap=%.3fs, customize=%.3fs, engine=%.3fs",
                 n, gap, tstt, alpha, max_delta, n_oversat,
-                route_time, customize_time, engine_time,
+                route_time, gap_time, customize_time, engine_time,
             )
 
             if progress_callback:
