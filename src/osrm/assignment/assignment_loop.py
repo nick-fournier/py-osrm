@@ -10,6 +10,7 @@ See docs/traffic_assignment_design.md §4 and §7 for full specification.
 
 from __future__ import annotations
 
+import enum
 import logging
 import math
 import os
@@ -33,6 +34,13 @@ from osrm.assignment.vdf import BiParabolicVDF
 logger = logging.getLogger(__name__)
 
 
+class StopReason(enum.Enum):
+    """Why the assignment loop terminated."""
+    CONVERGED = "converged"
+    STAGNATED = "stagnated"
+    MAX_ITERATIONS = "max_iterations"
+
+
 @dataclass
 class AssignmentConfig:
     """Configuration for the assignment loop.
@@ -53,6 +61,14 @@ class AssignmentConfig:
         of full demand before the main FW/MSA loop begins.
         Default ``(0.25, 0.50, 0.75, 1.0)``.  Set to ``(1.0,)`` to
         disable (single full-demand loading, legacy behaviour).
+    stagnation_tol : float
+        Gap change threshold for stagnation detection.  If
+        ``|gap[n] - gap[n-1]| < stagnation_tol`` for
+        ``stagnation_window`` consecutive iterations, the loop stops
+        with ``StopReason.STAGNATED``.  Set to 0 to disable.
+    stagnation_window : int
+        Number of consecutive near-constant gap iterations before
+        declaring stagnation.
     """
 
     method: str = "msa"
@@ -72,6 +88,8 @@ class AssignmentConfig:
     fw_bisections: int = 20
     fw_line_search_tol: float = 1e-6
     incremental_steps: Tuple[float, ...] = (0.25, 0.50, 0.75, 1.0)
+    stagnation_tol: float = 0.001
+    stagnation_window: int = 3
 
 
 @dataclass
@@ -100,6 +118,7 @@ class AssignmentResult:
     network_state: NetworkState
     iteration_log: List[IterationResult]
     total_time_s: float
+    stop_reason: StopReason = StopReason.MAX_ITERATIONS
 
     def log_as_dict(self) -> Dict:
         """Convert iteration log to dict for plotting."""
@@ -590,6 +609,10 @@ class AssignmentLoop:
                 route_time,
             )
 
+        stop_reason: Optional[StopReason] = None
+        stagnation_count = 0
+        fw_zero_count = 0
+
         for n in range(1, self.config.max_iterations + 1):
             logger.info("=== Iteration %d ===", n)
 
@@ -703,10 +726,38 @@ class AssignmentLoop:
             if progress_callback:
                 progress_callback(n, gap, tstt)
 
-            # 9. Convergence check (only on freshly computed gap)
+            # 9. Convergence / stagnation checks
+            stop_reason: Optional[StopReason] = None
+
             if (compute_gap and self.config.convergence_gap > 0
                     and 0 <= gap < self.config.convergence_gap):
-                logger.info("Converged at iteration %d (gap=%.4f)", n, gap)
+                stop_reason = StopReason.CONVERGED
+
+            # Stagnation: gap delta below tolerance for N consecutive iters
+            if (stop_reason is None and compute_gap
+                    and self.config.stagnation_tol > 0 and len(log) >= 2):
+                prev_gap = log[-2].relative_gap
+                if abs(gap - prev_gap) < self.config.stagnation_tol:
+                    stagnation_count += 1
+                else:
+                    stagnation_count = 0
+                if stagnation_count >= self.config.stagnation_window:
+                    stop_reason = StopReason.STAGNATED
+
+            # FW-specific: alpha=0 means line search found no improvement
+            if (stop_reason is None
+                    and self.config.method == "fw" and alpha == 0.0):
+                fw_zero_count += 1
+                if fw_zero_count >= 2:
+                    stop_reason = StopReason.STAGNATED
+            else:
+                fw_zero_count = 0
+
+            if stop_reason is not None:
+                logger.info(
+                    "%s at iteration %d (gap=%.6f)",
+                    stop_reason.value.capitalize(), n, gap,
+                )
                 break
 
         total_time = time.monotonic() - t_start
@@ -715,13 +766,15 @@ class AssignmentLoop:
         # Cleanup CSV
         self.writer.cleanup()
 
+        if stop_reason is None:
+            stop_reason = StopReason.MAX_ITERATIONS
+
         return AssignmentResult(
-            converged=(log[-1].relative_gap >= 0
-                       and log[-1].relative_gap < self.config.convergence_gap)
-                      if log else False,
+            converged=stop_reason == StopReason.CONVERGED,
             iterations=len(log),
             final_gap=log[-1].relative_gap if log else float("inf"),
             network_state=state,
             iteration_log=log,
             total_time_s=total_time,
+            stop_reason=stop_reason,
         )

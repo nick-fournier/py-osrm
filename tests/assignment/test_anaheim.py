@@ -144,10 +144,10 @@ class TestAnaheim:
     """Anaheim structural validation."""
 
     def test_smoke_fw(self, tmp_path):
-        """Quick smoke: FW runs without error on Anaheim, 5 iterations."""
+        """Quick smoke: FW runs without error on Anaheim."""
         base, meta = _prepare_anaheim_network(tmp_path)
         result = _run_anaheim_assignment(base, meta, max_iter=5, method="fw")
-        assert result.iterations == 5
+        assert result.iterations >= 1
         assert result.network_state.n_edges > 0
 
     def test_flow_nonnegativity(self, tmp_path):

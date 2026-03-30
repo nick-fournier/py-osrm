@@ -10,7 +10,9 @@ from osrm.assignment.density_smoothing import DensitySmoothing, DensitySmoothing
 from osrm.assignment.fractional_loading import FractionalLoader
 from osrm.assignment.segment_speed_writer import SegmentSpeedWriter
 from osrm.assignment.od_matrix import ODMatrixAdapter, DemandTrip
-from osrm.assignment.assignment_loop import AssignmentLoop, AssignmentConfig, AssignmentResult
+from osrm.assignment.assignment_loop import (
+    AssignmentLoop, AssignmentConfig, AssignmentResult, StopReason,
+)
 from osrm.assignment import plots
 
 __all__ = [
@@ -25,5 +27,6 @@ __all__ = [
     "AssignmentLoop",
     "AssignmentConfig",
     "AssignmentResult",
+    "StopReason",
     "plots",
 ]
