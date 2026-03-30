@@ -916,6 +916,8 @@ def assigned_vs_published(
         xaxis_title="Published Flow (veh/hr)",
         yaxis_title="Assigned Flow (veh/hr)",
         template="plotly_white",
+        xaxis=dict(range=[0, max_val]),
+        yaxis=dict(range=[0, max_val], scaleanchor="x", scaleratio=1),
     )
     return _save_or_show(fig, path)
 
@@ -1461,12 +1463,19 @@ def _add_correlation_section(figs, descriptions, state, ref, link_attrs,
     flow_rho = 0.0
     if len(mfd_flows) >= 3:
         flow_rho, _ = spearmanr(bpr_flows, mfd_flows)
+    flow_max = max(max(bpr_flows, default=1), max(mfd_flows, default=1)) * 1.1
+    fig_flow.add_shape(
+        type="line", x0=0, x1=flow_max, y0=0, y1=flow_max,
+        line=dict(color="#999", dash="dash", width=1),
+    )
     fig_flow.update_layout(
         title=f"Link Flow: MFD ({detail_scale:.0%}) vs BPR (100%) — ρ={flow_rho:.3f}",
         xaxis_title="BPR Equilibrium Flow (vph, 100% demand)",
         yaxis_title=f"MFD Flow (vph, {detail_scale:.0%} demand)",
         template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+        xaxis=dict(fixedrange=True, range=[0, flow_max]),
+        yaxis=dict(fixedrange=True, range=[0, flow_max],
+                   scaleanchor="x", scaleratio=1),
     )
     figs.append(fig_flow)
     descriptions.append(
@@ -1505,7 +1514,10 @@ def _add_correlation_section(figs, descriptions, state, ref, link_attrs,
         xaxis_title="BPR Equilibrium Travel Time (min)",
         yaxis_title=f"MFD Travel Time (min, {detail_scale:.0%} demand)",
         template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
+        xaxis=dict(fixedrange=True, range=[0, tt_max] if tt_bpr_f else None),
+        yaxis=dict(fixedrange=True,
+                   range=[0, tt_max] if tt_bpr_f else None,
+                   scaleanchor="x", scaleratio=1),
     )
     figs.append(fig_tt)
     gridlock_note = (
