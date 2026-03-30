@@ -228,6 +228,83 @@ def _vdf_near_jam_detail(
     return fig
 
 
+def _vdf_smoothing_comparison(
+    v_f: float = 60.0,
+    k_j: float = 200.0,
+    vdf: BiParabolicVDF | None = None,
+) -> go.Figure:
+    """Compare sharp vs stretched VDF near jam density.
+
+    Shows how using k_j_eff = k_j × (1 + ε) in the congested branch
+    equation smooths the speed gradient near k_j without adding a
+    third piecewise segment.
+    """
+    vdf = vdf or BiParabolicVDF(min_speed_kmh=0.01)
+    k_c = vdf.kc_ratio * k_j
+    q_c = v_f * k_c / 2.0
+
+    # Range: 0 to 1.2 × k_j to show behaviour beyond jam
+    frac = np.linspace(0.0, 1.2, 1000)
+    k = frac * k_j
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=[
+            "Speed–Density (full range)",
+            "Cost gradient |dv/dk| near k_j",
+        ],
+    )
+
+    epsilons = [0.0, 0.05, 0.10, 0.20]
+    colors = ["#F44336", "#FF9800", "#4CAF50", "#2196F3"]
+    labels = ["ε=0 (current)", "ε=0.05", "ε=0.10", "ε=0.20"]
+
+    for eps, color, label in zip(epsilons, colors, labels):
+        k_j_eff = k_j * (1.0 + eps)
+
+        v = np.zeros_like(k)
+        for i in range(len(k)):
+            if k[i] <= k_c:
+                v[i] = q_c * (2.0 * k_c - k[i]) / k_c**2
+            elif k[i] > 0:
+                ratio = (k[i] - k_c)**2 / (k_j_eff - k_c)**2
+                v[i] = q_c * max(0.0, 1.0 - ratio) / k[i]
+            v[i] = max(v[i], vdf.min_speed_kmh)
+
+        fig.add_trace(go.Scatter(
+            x=frac, y=v, mode="lines",
+            line=dict(color=color, width=2),
+            name=label,
+        ), row=1, col=1)
+
+        # Numerical gradient |dv/dk|
+        dv = np.abs(np.gradient(v, k))
+        fig.add_trace(go.Scatter(
+            x=frac[1:], y=dv[1:], mode="lines",
+            line=dict(color=color, width=2),
+            name=label,
+            showlegend=False,
+        ), row=1, col=2)
+
+    # Mark physical k_j
+    fig.add_vline(x=1.0, line_dash="dash", line_color="gray",
+                  annotation_text="k_j", row=1, col=1)
+    fig.add_vline(x=1.0, line_dash="dash", line_color="gray",
+                  annotation_text="k_j", row=1, col=2)
+
+    fig.update_xaxes(title_text="k / k_j", row=1, col=1)
+    fig.update_yaxes(title_text="Speed (km/h)", row=1, col=1)
+    fig.update_xaxes(title_text="k / k_j", row=1, col=2)
+    fig.update_yaxes(title_text="|dv/dk| (km/h per veh/km)", type="log", row=1, col=2)
+    fig.update_layout(
+        title="VDF Smoothing: Stretched k_j_eff = k_j × (1 + ε)",
+        template="plotly_white",
+        height=450,
+        legend=dict(x=0.02, y=0.98),
+    )
+    return fig
+
+
 def vdf_inverse_accuracy(
     v_f: float = 60.0,
     k_j: float = 150.0,
@@ -352,6 +429,7 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
         vdf_speed_density(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_flow_density(v_f=v_f, k_j=k_j, vdf=vdf),
         _vdf_near_jam_detail(v_f=v_f, k_j=k_j, vdf=vdf),
+        _vdf_smoothing_comparison(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_inverse_accuracy(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_multi_class(vdf=vdf),
     ]
@@ -390,7 +468,21 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
         and prevent absorbing gridlock states?  Or remove the hard cap entirely and let the
         VDF's speed floor handle it?</p>""",
 
-        """<h2>4. Inverse Round-Trip Accuracy</h2>
+        f"""<h2>4. Proposed Smoothing: Stretched $k_j$</h2>
+        <p>Instead of adding a third piecewise segment, we can <b>stretch</b> the congested
+        branch by evaluating it at $k_{{j,eff}} = k_j \\cdot (1 + \\varepsilon)$.
+        The equation form stays identical — same 2-part bi-parabolic — but the parabola
+        reaches zero speed at $k_{{j,eff}}$ instead of $k_j$.</p>
+        <p>At physical $k_j$, the stretched model still returns a small positive speed
+        instead of hitting the floor. The <b>left panel</b> shows speed vs density for
+        several $\\varepsilon$ values. The <b>right panel</b> shows the cost gradient
+        $|dv/dk|$ — lower gradient near $k_j$ means smoother cost surface for Frank-Wolfe.</p>
+        <p>At $\\varepsilon = 0.10$, speed at $k = k_j$ ≈
+        {0.5 * v_f * k_c / (2 * k_j) * (1.0 - ((k_j - k_c) / (1.1*k_j - k_c))**2) :.1f} km/h
+        — slow enough to be unattractive for routing, but smooth enough for FW convergence.
+        The gradient at $k_j$ drops by roughly an order of magnitude vs $\\varepsilon = 0$.</p>""",
+
+        """<h2>5. Inverse Round-Trip Accuracy</h2>
         <p>A key advantage of this VDF over BPR: the flow-to-density inversion has a
         <b>closed-form solution</b> via the quadratic formula — no Newton solver needed.
         Left panel: q<sub>in</sub> vs q<sub>out</sub> after q → k(q) → q(k) round-trip
@@ -398,7 +490,7 @@ def vdf_theory(output_dir: str = "docs/plots") -> Path:
         be near machine epsilon (~10<sup>-10</sup>). This confirms the vectorized NumPy
         implementation is numerically exact.</p>""",
 
-        """<h2>5. Speed–Density by Road Class</h2>
+        """<h2>6. Speed–Density by Road Class</h2>
         <p>The bi-parabolic model is "parameter-light" — only v<sub>f</sub> (free-flow speed)
         and k<sub>j</sub> (jam density) are needed per link. k<sub>c</sub> = k<sub>j</sub>/3 is derived,
         not calibrated. This overlay shows how different road classes produce different
