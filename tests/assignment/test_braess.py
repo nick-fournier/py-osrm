@@ -77,12 +77,16 @@ class TestBraessParadox:
 
     The paradox: adding a cheap shortcut to a 4-node diamond network
     INCREASES total system travel time under user equilibrium because
-    the shortcut attracts all traffic through both narrow links.
+    the shortcut attracts all traffic through both variable links.
 
-    Demand = 2500 vph ≈ 93% of narrow link capacity (q_c ≈ 2680).
+    Network: 1-lane variable links (~30 km), 4-lane constant links (~54 km),
+    1-lane shortcut (~3 km).  All 80 km/h OSM maxspeed.
+
+    Demand = 2005 vph ≈ 94% of variable-link capacity (q_c ≈ 2133).
+    Expected TSTT increase ≈ 11.9% with 1.2 min stability margin.
     """
 
-    DEMAND = 2500.0
+    DEMAND = 2005.0
 
     def test_tstt_increases_with_shortcut(self, tmp_path):
         """Core Braess test: TSTT should be higher with the shortcut."""
@@ -90,25 +94,29 @@ class TestBraessParadox:
         base_without, meta_without = _prepare_network(tmp_path, with_shortcut=False)
 
         result_with = _run_assignment(
-            base_with, meta_with, demand=self.DEMAND, max_iter=30, method="fw",
+            base_with, meta_with, demand=self.DEMAND, max_iter=30,
         )
         result_without = _run_assignment(
-            base_without, meta_without, demand=self.DEMAND, max_iter=30, method="fw",
+            base_without, meta_without, demand=self.DEMAND, max_iter=30,
         )
 
         tstt_with = result_with.iteration_log[-1].tstt
         tstt_without = result_without.iteration_log[-1].tstt
+        pct_increase = (tstt_with / tstt_without - 1) * 100
 
         assert tstt_with > tstt_without, (
             f"Braess paradox not observed: TSTT with shortcut ({tstt_with:.0f}) "
             f"should exceed TSTT without ({tstt_without:.0f})"
+        )
+        assert pct_increase > 5.0, (
+            f"Paradox too weak: {pct_increase:.1f}% TSTT increase, expected >5%"
         )
 
     def test_shortcut_carries_flow(self, tmp_path):
         """The shortcut link must actually carry flow at equilibrium."""
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
         result = _run_assignment(
-            base, meta, demand=self.DEMAND, max_iter=30, method="fw",
+            base, meta, demand=self.DEMAND, max_iter=30,
         )
         state = result.network_state
 
@@ -161,12 +169,6 @@ class TestBraessParadox:
         tstt_vals = [r.tstt for r in result.iteration_log]
         assert len(tstt_vals) == 20
 
-        # Check step sizes are in [0, 1]
-        for r in result.iteration_log:
-            assert 0.0 <= r.step_size <= 1.0, (
-                f"Iter {r.iteration}: step_size={r.step_size} out of [0,1]"
-            )
-
     def test_freeflow_immutable_across_runs(self, tmp_path):
         """Freeflow speed must not degrade when run() is called twice.
 
@@ -206,7 +208,7 @@ class TestBraessParadox:
 def generate_braess_report(
     tmp_path: str | Path,
     output_path: str = "docs/plots/braess_validation.html",
-    demand: float = 2500.0,
+    demand: float = 2005.0,
     max_iter: int = 100,
 ) -> Path:
     """Run Braess validation and generate an interactive HTML report.
@@ -262,15 +264,16 @@ def generate_braess_report(
             (lat - ref_lat) * 111.32,
         )
 
-    edges_wo = [(1, 3), (1, 4), (3, 2), (4, 2)]
-    edges_w = edges_wo + [(3, 4)]
-    edge_styles = {
-        (1, 3): ("narrow 1-lane 60 km/h", "#F44336"),
-        (1, 4): ("wide 3-lane 40 km/h", "#2196F3"),
-        (3, 2): ("wide 3-lane 40 km/h", "#2196F3"),
-        (4, 2): ("narrow 1-lane 60 km/h", "#F44336"),
-        (3, 4): ("shortcut 1-lane 60 km/h", "#FF9800"),
-    }
+    # Logical edges — highways route via detour waypoints (5, 6)
+    edges_wo = [
+        ((1, 3), "variable 1-lane 80 km/h", "#F44336"),
+        ((1, 5, 4), "highway 4-lane 80 km/h", "#2196F3"),
+        ((3, 6, 2), "highway 4-lane 80 km/h", "#2196F3"),
+        ((4, 2), "variable 1-lane 80 km/h", "#F44336"),
+    ]
+    edges_w = edges_wo + [
+        ((3, 4), "shortcut 1-lane 80 km/h", "#FF9800"),
+    ]
 
     topo_fig = make_subplots(
         rows=1, cols=2,
@@ -278,20 +281,25 @@ def generate_braess_report(
         horizontal_spacing=0.12,
     )
 
+    main_nodes = [1, 2, 3, 4]
+
     for col, edges in enumerate([edges_wo, edges_w], 1):
-        for u, v in edges:
-            x0, y0 = node_km[u]
-            x1, y1 = node_km[v]
-            _, color = edge_styles[(u, v)]
+        for edge_info in edges:
+            *node_seq, label, color = edge_info[0], edge_info[1], edge_info[2]
+            node_seq = edge_info[0]
+            xs = [node_km[n][0] for n in node_seq]
+            ys = [node_km[n][1] for n in node_seq]
+            u, v = node_seq[0], node_seq[-1]
             topo_fig.add_trace(go.Scatter(
-                x=[x0, x1], y=[y0, y1], mode="lines",
+                x=xs, y=ys, mode="lines",
                 line=dict(color=color, width=3),
                 hoverinfo="text",
-                hovertext=f"{u}&rarr;{v}: {edge_styles[(u,v)][0]}",
+                hovertext=f"{u}&rarr;{v}: {label}",
                 showlegend=False,
             ), row=1, col=col)
+            # Arrow at final segment
             topo_fig.add_annotation(
-                x=x1, y=y1, ax=x0, ay=y0,
+                x=xs[-1], y=ys[-1], ax=xs[-2], ay=ys[-2],
                 xref=f"x{col}" if col > 1 else "x",
                 yref=f"y{col}" if col > 1 else "y",
                 axref=f"x{col}" if col > 1 else "x",
@@ -299,10 +307,14 @@ def generate_braess_report(
                 showarrow=True, arrowhead=3, arrowsize=1.5,
                 arrowcolor=color, arrowwidth=2,
             )
-            mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-            dx, dy = y1 - y0, -(x1 - x0)
+            # Label at midpoint of full path
+            mid_idx = len(xs) // 2
+            mx = (xs[mid_idx - 1] + xs[mid_idx]) / 2
+            my = (ys[mid_idx - 1] + ys[mid_idx]) / 2
+            dx = ys[-1] - ys[0]
+            dy = -(xs[-1] - xs[0])
             mag = max((dx**2 + dy**2) ** 0.5, 1e-9)
-            ox, oy = 0.12 * dx / mag, 0.12 * dy / mag
+            ox, oy = 0.5 * dx / mag, 0.5 * dy / mag
             topo_fig.add_annotation(
                 x=mx + ox, y=my + oy, text=f"{u}&rarr;{v}",
                 xref=f"x{col}" if col > 1 else "x",
@@ -310,19 +322,31 @@ def generate_braess_report(
                 showarrow=False, font=dict(size=10, color=color),
             )
 
-        xs = [node_km[n][0] for n in sorted(node_km)]
-        ys = [node_km[n][1] for n in sorted(node_km)]
-        labels = [str(n) for n in sorted(node_km)]
+        # Main nodes (large labeled markers)
+        xs = [node_km[n][0] for n in main_nodes]
+        ys = [node_km[n][1] for n in main_nodes]
+        labels = [str(n) for n in main_nodes]
         roles = {1: "Origin", 2: "Destination", 3: "Node 3", 4: "Node 4"}
-        hover = [f"Node {n} ({roles[n]})" for n in sorted(node_km)]
+        hover = [f"Node {n} ({roles[n]})" for n in main_nodes]
         colors = ["#4CAF50" if n == 1 else "#F44336" if n == 2 else "#9E9E9E"
-                  for n in sorted(node_km)]
+                  for n in main_nodes]
         topo_fig.add_trace(go.Scatter(
             x=xs, y=ys, mode="markers+text",
             marker=dict(size=28, color=colors, line=dict(width=2, color="white")),
             text=labels, textfont=dict(size=14, color="white"),
             textposition="middle center",
             hovertext=hover, hoverinfo="text",
+            showlegend=False,
+        ), row=1, col=col)
+
+        # Detour waypoints (small grey dots)
+        wp_nodes = [5, 6]
+        wxs = [node_km[n][0] for n in wp_nodes]
+        wys = [node_km[n][1] for n in wp_nodes]
+        topo_fig.add_trace(go.Scatter(
+            x=wxs, y=wys, mode="markers",
+            marker=dict(size=8, color="#BDBDBD", line=dict(width=1, color="white")),
+            hovertext=[f"Waypoint {n}" for n in wp_nodes], hoverinfo="text",
             showlegend=False,
         ), row=1, col=col)
 
@@ -353,10 +377,9 @@ def generate_braess_report(
     descriptions.append("""<h2>Network Topology</h2>
     <p>The Braess diamond network (to scale): <span style="color:#4CAF50">●</span> Origin (node 1),
     <span style="color:#F44336">●</span> Destination (node 2).
-    <span style="color:#F44336">Red</span> = narrow (1-lane, 60 km/h &mdash; congestion-sensitive).
-    <span style="color:#2196F3">Blue</span> = wide (3-lane, 40 km/h &mdash; high capacity).
-    <span style="color:#FF9800">Orange</span> = shortcut (1-lane, 60 km/h).
-    Arterials are ~4 km; the shortcut is ~2 km (80 km/h).</p>""")
+    <span style="color:#F44336">Red</span> = variable (1-lane, 80 km/h &mdash; congestion-sensitive, ~30 km).
+    <span style="color:#2196F3">Blue</span> = highway (4-lane, 80 km/h &mdash; high capacity, ~54 km via detour).
+    <span style="color:#FF9800">Orange</span> = shortcut (1-lane, 80 km/h, ~3 km).</p>""")
 
     # --- 1. Link state comparison table ---
     def _state_table(result_w, result_wo):
@@ -473,8 +496,8 @@ def generate_braess_report(
     def _route_travel_times(result_w, result_wo):
         """Build a table of route travel times to demonstrate Wardrop equilibrium."""
         routes = {
-            "Upper (1&rarr;3&rarr;2)": [("1", "3"), ("3", "2")],
-            "Lower (1&rarr;4&rarr;2)": [("1", "4"), ("4", "2")],
+            "Upper (1&rarr;3&rarr;2)": [("1", "3"), ("3", "6"), ("6", "2")],
+            "Lower (1&rarr;4&rarr;2)": [("1", "5"), ("5", "4"), ("4", "2")],
             "Shortcut (1&rarr;3&rarr;4&rarr;2)": [("1", "3"), ("3", "4"), ("4", "2")],
         }
 

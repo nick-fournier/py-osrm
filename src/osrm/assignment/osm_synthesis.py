@@ -329,21 +329,23 @@ def braess_network(
         ↓     ↓
         4 ──→ 2
 
-    Designed for the bi-parabolic MFD to produce a clear Braess paradox:
+    Designed for the bi-parabolic MFD to produce a clear Braess paradox.
 
-    - Links 1→3 and 4→2: **narrow** (1 lane, 80 km/h, ~4 km).
-      Congestion-sensitive — at demand D the cost doubles vs D/2.
-      q_c ≈ 2680 vph per the MFD (k_j=200, k_c=67).
-    - Links 1→4 and 3→2: **wide** (6 lanes, 40 km/h, ~4 km).
-      High-capacity (q_c ≈ 8000) — effectively constant cost.
-    - Shortcut 3→4: **cheap** (2 lanes, 80 km/h, ~0.45 km).
-      Travel time ≈ 0.34 min even at full demand.
+    The classical paradox requires two types of links:
 
-    At D ≈ 2500 vph (≈93% of narrow capacity):
-    - Without shortcut: traffic splits evenly, each narrow at 50% → fast.
-    - With shortcut: all traffic uses 1→3→4→2 because shortcut path is
-      cheapest. Both narrow links carry full D → heavy congestion.
-      TSTT increases ≈ 10-15% (the paradox).
+    - **Variable** (congestion-sensitive): 1→3 and 4→2.  1 lane, 80 km/h,
+      ~30 km.  At demand D, travel time grows significantly vs D/2.
+    - **Constant** (capacity-insensitive): 1→4 and 3→2.  4 lanes, 80 km/h,
+      ~54 km (1.8× variable, via detour waypoints).  High capacity means
+      travel time is nearly constant regardless of flow.
+    - **Shortcut** 3→4: 1 lane, 80 km/h, ~3 km (10% of variable length).
+
+    At D ≈ 2005 vph (94% of variable-link capacity at v_f ≈ 64 km/h):
+
+    - Without shortcut: traffic splits 50/50.  Path cost ≈ 84.8 min.
+    - With shortcut: all traffic uses 1→3→4→2.  Path cost ≈ 94.9 min.
+    - Alternative (skip shortcut): ≈ 95.8 min > 94.9, so stable.
+    - TSTT increases ~11.9%, margin ≈ 1.2 min against OSRM quantization.
 
     Origin = node 1, Destination = node 2.
 
@@ -358,69 +360,82 @@ def braess_network(
     -------
     (path, metadata) where metadata includes node coords and link info.
     """
-    # Diamond layout: nodes 3 and 4 are close together vertically
-    # so the shortcut is short (~0.45 km) while arterials are ~4 km.
+    # 6 nodes: 4 main + 2 detour waypoints for constant links.
+    # Variable links (1→3, 4→2): ~30 km direct.
+    # Constant links (1→4, 3→2): ~54 km via detour waypoints (1.8× ratio).
+    # Shortcut (3→4): ~3 km vertical (10% of variable length).
+    # 30 km scale maximizes stability margin (~1.2 min) against OSRM
+    # speed quantization while maintaining 11.9% paradox strength.
     nodes = {
-        1: (7.350, 43.735),    # west (origin)
-        3: (7.400, 43.737),    # center-north
-        4: (7.400, 43.733),    # center-south
-        2: (7.450, 43.735),    # east (destination)
+        1: (7.1000, 43.7400),   # west (origin)
+        3: (7.4725, 43.7535),   # center-north
+        4: (7.4725, 43.7265),   # center-south
+        2: (7.8451, 43.7400),   # east (destination)
+        5: (7.2863, 43.5315),   # detour south (for 1→4 highway)
+        6: (7.6588, 43.9485),   # detour north (for 3→2 highway)
     }
 
     ways = [
-        # 1→3: narrow, congestion-sensitive (fast freeflow, 1 lane)
+        # 1→3: variable, congestion-sensitive (1 lane, ~30 km)
         {
             "id": 101, "nodes": [1, 3],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "80", "lanes": "1", "name": "Link 1-3 (narrow)",
+                "maxspeed": "80", "lanes": "1",
+                "name": "Link 1-3 (variable)",
             },
         },
-        # 1→4: wide arterial, effectively constant cost (6 lanes)
+        # 1→5→4: constant cost highway (4 lanes, ~54 km via detour)
         {
-            "id": 102, "nodes": [1, 4],
+            "id": 102, "nodes": [1, 5, 4],
             "tags": {
-                "highway": "primary", "oneway": "yes",
-                "maxspeed": "40", "lanes": "6", "name": "Link 1-4 (wide)",
+                "highway": "motorway", "oneway": "yes",
+                "maxspeed": "80", "lanes": "4",
+                "name": "Link 1-4 (highway)",
             },
         },
-        # 3→2: wide arterial, effectively constant cost
+        # 3→6→2: constant cost highway (4 lanes, ~54 km via detour)
         {
-            "id": 103, "nodes": [3, 2],
+            "id": 103, "nodes": [3, 6, 2],
             "tags": {
-                "highway": "primary", "oneway": "yes",
-                "maxspeed": "40", "lanes": "6", "name": "Link 3-2 (wide)",
+                "highway": "motorway", "oneway": "yes",
+                "maxspeed": "80", "lanes": "4",
+                "name": "Link 3-2 (highway)",
             },
         },
-        # 4→2: narrow, congestion-sensitive
+        # 4→2: variable, congestion-sensitive (1 lane, ~30 km)
         {
             "id": 104, "nodes": [4, 2],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "80", "lanes": "1", "name": "Link 4-2 (narrow)",
+                "maxspeed": "80", "lanes": "1",
+                "name": "Link 4-2 (variable)",
             },
         },
     ]
 
     if with_shortcut:
-        # 3→4: shortcut — short, fast, enough capacity to not congest
+        # 3→4: shortcut — 10% of variable length (~3 km)
         ways.append({
             "id": 105, "nodes": [3, 4],
             "tags": {
                 "highway": "secondary", "oneway": "yes",
-                "maxspeed": "80", "lanes": "2", "name": "Shortcut 3-4",
+                "maxspeed": "80", "lanes": "1",
+                "name": "Shortcut 3-4",
             },
         })
 
     osm_path = write_osm(nodes, ways, path)
 
-    # Build direct lane map keyed by (from_osm_id, to_osm_id).
-    # OSRM annotations preserve OSM node IDs, so this maps directly
-    # to NetworkState edge_ids.
+    # Build lane map keyed by (from_osm_id, to_osm_id) for each segment.
+    # Multi-node ways produce multiple OSRM edges (one per consecutive
+    # node pair), so we map every segment, not just first→last.
     lane_map = {}
     for way in ways:
-        from_id, to_id = way["nodes"][0], way["nodes"][-1]
-        lane_map[(from_id, to_id)] = int(way["tags"].get("lanes", 1))
+        lanes = int(way["tags"].get("lanes", 1))
+        way_nodes = way["nodes"]
+        for j in range(len(way_nodes) - 1):
+            lane_map[(way_nodes[j], way_nodes[j + 1])] = lanes
 
     metadata = {
         "origin": nodes[1],
@@ -428,8 +443,8 @@ def braess_network(
         "nodes": nodes,
         "n_links": len(ways),
         "with_shortcut": with_shortcut,
-        "narrow_links": ["1→3", "4→2"],
-        "wide_links": ["1→4", "3→2"],
+        "variable_links": ["1→3", "4→2"],
+        "constant_links": ["1→4", "3→2"],
         "shortcut_link": "3→4" if with_shortcut else None,
         "lane_map": lane_map,
     }
