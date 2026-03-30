@@ -161,7 +161,7 @@ class TestAnaheim:
         base, meta = _prepare_anaheim_network(tmp_path)
         result = _run_anaheim_assignment(base, meta, max_iter=10)
         state = result.network_state
-        assert np.all(state.speed_kmh >= 0.01 - 1e-6)
+        assert np.all(state.speed_kmh >= 1.08 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
 
     def test_freeflow_immutable_across_runs(self, tmp_path):

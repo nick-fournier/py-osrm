@@ -76,7 +76,12 @@ class AssignmentConfig:
     convergence_gap: float = 0.01
     bin_width_s: float = 3600.0
     min_speed_kmh: float = 1.0
-    vdf_min_speed_kmh: float = 0.01
+    # OSRM stores speeds internally as integer decimetres/second
+    # (0.1 m/s = 0.36 km/h resolution).  Its effective floor is
+    # 0.3 m/s = 1.08 km/h — anything below is rounded up to this.
+    # We match the VDF floor so that the cost OSRM routes on and the
+    # cost the VDF reports are consistent for gridlocked links.
+    vdf_min_speed_kmh: float = 1.08
     smoothing: DensitySmoothingConfig = field(
         default_factory=DensitySmoothingConfig
     )

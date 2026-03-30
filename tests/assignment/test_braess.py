@@ -218,7 +218,7 @@ class TestBraessParadox:
         base, meta = _prepare_network(tmp_path, with_shortcut=True)
         result = _run_assignment(base, meta, demand=self.DEMAND)
         state = result.network_state
-        assert np.all(state.speed_kmh >= 0.01 - 1e-6)
+        assert np.all(state.speed_kmh >= 1.08 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
 
     def test_fw_monotone_tstt(self, tmp_path):
@@ -435,7 +435,7 @@ def generate_braess_report(
             state = result.network_state
             for i in range(state.n_edges):
                 label = f"{int(state.edge_ids[i,0])}&rarr;{int(state.edge_ids[i,1])}"
-                v = max(state.speed_kmh[i], 0.01)
+                v = max(state.speed_kmh[i], 1.08)
                 travel_time_s = state.length_m[i] / (v / 3.6)
                 rows.append((
                     label, scenario,
@@ -554,7 +554,7 @@ def generate_braess_report(
             for i in range(state.n_edges):
                 from_id = str(int(state.edge_ids[i, 0]))
                 to_id = str(int(state.edge_ids[i, 1]))
-                v = max(state.speed_kmh[i], 0.01)
+                v = max(state.speed_kmh[i], 1.08)
                 times[(from_id, to_id)] = state.length_m[i] / (v / 3.6)
             return times
 
