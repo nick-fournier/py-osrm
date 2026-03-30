@@ -42,10 +42,8 @@ class AssignmentConfig:
     ----------
     method : str
         Convergence method: ``"msa"`` (Method of Successive Averages,
-        fixed step 1/n), ``"fw"`` (Frank-Wolfe with Beckmann line
-        search), or ``"cfw"`` (Conjugate Frank-Wolfe — adds momentum
-        from prior search directions for faster convergence).
-        Default ``"msa"``.
+        fixed step 1/n) or ``"fw"`` (Frank-Wolfe with Beckmann line
+        search).  Default ``"msa"``.
     fw_bisections : int
         Maximum bisection iterations for the FW line search.
     fw_line_search_tol : float
@@ -62,7 +60,6 @@ class AssignmentConfig:
         default_factory=DensitySmoothingConfig
     )
     vdf_kc_ratio: float = 1.0 / 3.0
-    vdf_splice_ratio: float | None = 0.85
     default_jam_density_per_lane: float = 200.0
     default_n_lanes: int = 1
     speed_csv_dir: Optional[str] = None
@@ -141,7 +138,6 @@ class AssignmentLoop:
         self.vdf = BiParabolicVDF(
             kc_ratio=self.config.vdf_kc_ratio,
             min_speed_kmh=self.config.vdf_min_speed_kmh,
-            splice_ratio=self.config.vdf_splice_ratio,
         )
         self.smoother = DensitySmoothing(self.config.smoothing)
         self.loader = FractionalLoader(self.config.bin_width_s)
@@ -484,8 +480,6 @@ class AssignmentLoop:
         v_current: np.ndarray,
         v_aon: np.ndarray,
         state: NetworkState,
-        dk_override: np.ndarray | None = None,
-        dv_override: np.ndarray | None = None,
     ) -> float:
         """Find optimal step size via bisection on the Beckmann gradient.
 
@@ -496,15 +490,9 @@ class AssignmentLoop:
         the gradient (since AON minimizes volume-weighted cost), but
         density direction (dk) for evaluating costs:
             g(alpha) = sum_a c_a(k(alpha)) * dV_a
-
-        Parameters
-        ----------
-        dk_override, dv_override : np.ndarray, optional
-            If provided, use these as the search direction instead of
-            the vanilla FW direction (k_aon - k_current).  Used by CFW.
         """
-        dk = dk_override if dk_override is not None else (k_aon - k_current)
-        dv = dv_override if dv_override is not None else (v_aon - v_current)
+        dk = k_aon - k_current
+        dv = v_aon - v_current
         v_f = state.freeflow_kmh
         k_j = state.jam_density
         length_m = state.length_m
@@ -537,41 +525,6 @@ class AssignmentLoop:
                 hi = mid
 
         return (lo + hi) / 2.0
-
-    def _beckmann_gradient(self, state: NetworkState) -> np.ndarray:
-        """Compute Beckmann gradient: link cost vector t_a(k_a).
-
-        The gradient of the Beckmann objective w.r.t. volume is the
-        link travel time vector.
-        """
-        speed = np.maximum(state.speed_kmh, self.config.vdf_min_speed_kmh)
-        return state.length_m * 3.6 / speed
-
-    def _cfw_beta(
-        self,
-        grad: np.ndarray,
-        dv_fw: np.ndarray,
-        dv_prev: np.ndarray,
-    ) -> float:
-        """Compute conjugate direction weight β for CFW.
-
-        Uses the standard traffic assignment CFW formula
-        (Mitradjieva & Lindberg 2013):
-
-            β = max(0, ∇Z · dv_fw / (∇Z · (dv_fw − dv_prev)))
-
-        where ∇Z is the link cost (Beckmann gradient), dv_fw is the
-        vanilla FW volume direction, and dv_prev is the prior search
-        direction.  Capped to [0, 0.5] to prevent the conjugate
-        direction from dominating the FW direction on non-smooth
-        cost surfaces (e.g. MFD near jam density).
-        """
-        numer = float(np.dot(grad, dv_fw))
-        denom = float(np.dot(grad, dv_fw - dv_prev))
-        if abs(denom) < 1e-12:
-            return 0.0
-        beta = numer / denom
-        return np.clip(beta, 0.0, 0.5)
 
     def _update_state(self, state: NetworkState) -> None:
         """Update speed and flow from current density using VDF.
@@ -664,10 +617,6 @@ class AssignmentLoop:
         prev_density = np.zeros(state.n_edges, dtype=np.float64)
         prev_volume = np.zeros(state.n_edges, dtype=np.float64)
 
-        # CFW state: previous search directions
-        prev_dk: Optional[np.ndarray] = None
-        prev_dv: Optional[np.ndarray] = None
-
         for n in range(1, self.config.max_iterations + 1):
             logger.info("=== Iteration %d ===", n)
 
@@ -683,46 +632,16 @@ class AssignmentLoop:
                 pad = state.n_edges - len(prev_density)
                 prev_density = np.append(prev_density, np.zeros(pad))
                 prev_volume = np.append(prev_volume, np.zeros(pad))
-                if prev_dk is not None:
-                    prev_dk = np.append(prev_dk, np.zeros(pad))
-                    prev_dv = np.append(prev_dv, np.zeros(pad))
                 # Re-patch new edges (e.g. lane counts)
                 if state_patch:
                     state_patch(state)
                 self.smoother.build_adjacency(state.edge_ids, state.length_m)
 
-            # 3. Blending: MSA (fixed 1/n), FW (optimal step), or CFW (conjugate)
+            # 3. Blending: MSA (fixed 1/n) or FW (optimal step)
             if n == 1:
                 alpha = 1.0
                 state.density_vpkm = aon_density.copy()
                 blended_volume = aon_volume.copy()
-            elif self.config.method == "cfw":
-                # Conjugate Frank-Wolfe: build conjugate direction
-                dk_fw = aon_density - prev_density
-                dv_fw = aon_volume - prev_volume
-
-                if prev_dv is not None and n > 2:
-                    grad = self._beckmann_gradient(state)
-                    beta = self._cfw_beta(grad, dv_fw, prev_dv)
-                    dk = dk_fw + beta * prev_dk
-                    dv = dv_fw + beta * prev_dv
-                else:
-                    dk = dk_fw
-                    dv = dv_fw
-
-                alpha = self._fw_line_search(
-                    prev_density, aon_density,
-                    prev_volume, aon_volume,
-                    state,
-                    dk_override=dk,
-                    dv_override=dv,
-                )
-                state.density_vpkm = prev_density + alpha * dk
-                blended_volume = prev_volume + alpha * dv
-
-                # Store direction for next iteration's conjugate computation
-                prev_dk = dk.copy()
-                prev_dv = dv.copy()
             elif self.config.method == "fw":
                 alpha = self._fw_line_search(
                     prev_density, aon_density,
@@ -737,8 +656,7 @@ class AssignmentLoop:
                 blended_volume = prev_volume + alpha * (aon_volume - prev_volume)
 
             # Density is uncapped above k_j — the VDF's speed floor handles
-            # it.  But ensure non-negative (CFW conjugate directions could
-            # overshoot below zero).
+            # it.  But ensure non-negative.
             state.density_vpkm = np.maximum(state.density_vpkm, 0.0)
             blended_volume = np.maximum(blended_volume, 0.0)
 
