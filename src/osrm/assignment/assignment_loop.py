@@ -591,7 +591,9 @@ class AssignmentLoop:
                 self.smoother.build_adjacency(state.edge_ids, state.length_m)
 
             # Scale to fractional demand and replace state
-            state.density_vpkm = np.maximum(aon_density * step_frac, 0.0)
+            state.density_vpkm = np.clip(
+                aon_density * step_frac, 0.0, state.jam_density,
+            )
             blended_volume = np.maximum(aon_volume * step_frac, 0.0)
             prev_density = state.density_vpkm.copy()
             prev_volume = blended_volume.copy()
@@ -671,9 +673,12 @@ class AssignmentLoop:
                 state.density_vpkm = prev_density + alpha * (aon_density - prev_density)
                 blended_volume = prev_volume + alpha * (aon_volume - prev_volume)
 
-            # Density is uncapped above k_j — the VDF's speed floor handles
-            # it.  But ensure non-negative.
-            state.density_vpkm = np.maximum(state.density_vpkm, 0.0)
+            # Cap density at jam density — k > k_j is unphysical (road is
+            # full bumper-to-bumper).  Excess demand would queue upstream
+            # (spillback) which we don't model.
+            state.density_vpkm = np.clip(
+                state.density_vpkm, 0.0, state.jam_density,
+            )
             blended_volume = np.maximum(blended_volume, 0.0)
 
             max_delta = float(np.max(np.abs(state.density_vpkm - prev_density)))
