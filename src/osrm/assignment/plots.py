@@ -454,7 +454,16 @@ def _write_combined_report(
     fig_htmls = []
     for i, fig in enumerate(figures):
         if fig is not None:
-            fig.update_layout(margin=dict(l=60, r=40, t=50, b=50))
+            fig.update_layout(
+                margin=dict(l=60, r=40, t=50, b=50),
+                xaxis=dict(fixedrange=True),
+                yaxis=dict(fixedrange=True),
+                dragmode=False,
+            )
+            # Lock axes on subplots too
+            for key in list(fig.layout.to_plotly_json().keys()):
+                if key.startswith("xaxis") or key.startswith("yaxis"):
+                    fig.layout[key]["fixedrange"] = True
             fig_htmls.append(
                 fig.to_html(full_html=False, include_plotlyjs=False, div_id=f"fig-{i}")
             )

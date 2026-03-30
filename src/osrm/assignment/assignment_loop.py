@@ -661,10 +661,10 @@ class AssignmentLoop:
                 state.density_vpkm = prev_density + alpha * (aon_density - prev_density)
                 blended_volume = prev_volume + alpha * (aon_volume - prev_volume)
 
-            # Cap density at jam density — a link cannot hold more than k_j
-            state.density_vpkm = np.minimum(
-                state.density_vpkm, state.jam_density
-            )
+            # Density is uncapped — the VDF's speed floor (min_speed_kmh)
+            # handles k >= k_j gracefully, returning near-zero speed.
+            # Removing the hard cap lets FW overshoot and blend back,
+            # avoiding absorbing gridlock states.
 
             max_delta = float(np.max(np.abs(state.density_vpkm - prev_density)))
             prev_density = state.density_vpkm.copy()
