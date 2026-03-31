@@ -79,6 +79,8 @@ def run_hillclimber_case(
     bin_width_s: float = 3600.0,
     max_batch_size: int | None = None,
     state_patch_factory: Callable[[dict], Callable] | None = None,
+    max_epochs: int = 0,
+    gap_threshold: float = 0.01,
 ):
     """Run one shared hill-climber validation case from scenario metadata."""
     trips = trip_builder(meta, demand_scale)
@@ -104,6 +106,8 @@ def run_hillclimber_case(
         sliced_trips,
         max_batch_size=max_batch_size,
         state_patch=state_patch,
+        max_epochs=max_epochs,
+        gap_threshold=gap_threshold,
     )
     return HillClimberValidationCase(
         base_path=run_base,

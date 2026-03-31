@@ -298,7 +298,7 @@ class TestBraessParadox:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "with_run",
             demand_scale=1.0,
-            n_slices=8,
+            n_slices=10,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         case_without = run_hillclimber_case(
@@ -308,7 +308,7 @@ class TestBraessParadox:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "without_run",
             demand_scale=1.0,
-            n_slices=8,
+            n_slices=10,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
 
@@ -339,7 +339,7 @@ class TestBraessParadox:
                 volume=demand,
             )]
             sliced = slice_trips_by_departure(
-                trips, n_slices=8, bin_width_s=3600.0,
+                trips, n_slices=10, bin_width_s=3600.0,
             )
             config = AssignmentConfig(bin_width_s=3600.0, verbosity="NONE")
             hc = MatrixFreeHillClimber(base, config)
@@ -573,7 +573,7 @@ def generate_braess_report(
     result_fw_with = _run_assignment(base_fw_w, meta_fw_w, demand, max_iter, method="fw")
     result_fw_without = _run_assignment(base_fw_wo, meta_fw_wo, demand, max_iter, method="fw")
 
-    # HC greedy
+    # HC (greedy + reroute in a single run per scenario)
     base_hc_w, meta_hc_w = _prepare_network(tmp_path / "hc", with_shortcut=True)
     base_hc_wo, meta_hc_wo = _prepare_network(tmp_path / "hc", with_shortcut=False)
 
@@ -591,8 +591,10 @@ def generate_braess_report(
         trip_builder=_hc_trip_builder,
         run_dir=tmp_path / "hc_with_run",
         demand_scale=1.0,
-        n_slices=8,
+        n_slices=10,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+        max_epochs=10,
+        gap_threshold=0.001,
     )
     case_without = run_hillclimber_case(
         base_path=base_hc_wo,
@@ -601,30 +603,11 @@ def generate_braess_report(
         trip_builder=_hc_trip_builder,
         run_dir=tmp_path / "hc_without_run",
         demand_scale=1.0,
-        n_slices=8,
+        n_slices=10,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+        max_epochs=10,
+        gap_threshold=0.001,
     )
-
-    # HC reroute
-    def _run_reroute(base, meta_r):
-        trips = [DemandTrip(
-            origin=meta_r["origin"], destination=meta_r["destination"],
-            volume=demand,
-        )]
-        sliced = slice_trips_by_departure(trips, n_slices=8, bin_width_s=3600.0)
-        config = AssignmentConfig(bin_width_s=3600.0, verbosity="NONE")
-        hc = MatrixFreeHillClimber(base, config)
-        return hc.run_stream(
-            sliced,
-            state_patch=lambda s: patch_braess_lanes(s, meta_r),
-            max_epochs=5,
-            gap_threshold=0.001,
-        )
-
-    rr_base_w, rr_meta_w = _prepare_network(tmp_path / "rr_with", with_shortcut=True)
-    rr_base_wo, rr_meta_wo = _prepare_network(tmp_path / "rr_without", with_shortcut=False)
-    rr_result_w = _run_reroute(rr_base_w, rr_meta_w)
-    rr_result_wo = _run_reroute(rr_base_wo, rr_meta_wo)
 
     # Compute key metrics
     tstt_with_vals = [r.tstt for r in result_with.iteration_log]
@@ -636,17 +619,17 @@ def generate_braess_report(
     hc_tstt_w = sum(b.batch_tstt for b in case_with.result.batch_results)
     hc_pct = (hc_tstt_w / hc_tstt_wo - 1) * 100 if hc_tstt_wo else 0.0
 
-    rr_tstt_w = sum(e.tstt for e in rr_result_w.slice_ledger)
-    rr_tstt_wo = sum(e.tstt for e in rr_result_wo.slice_ledger)
+    rr_tstt_w = sum(e.tstt for e in case_with.result.slice_ledger)
+    rr_tstt_wo = sum(e.tstt for e in case_without.result.slice_ledger)
     rr_pct = (rr_tstt_w / rr_tstt_wo - 1) * 100 if rr_tstt_wo else 0.0
 
     fw_tstt_w = result_fw_with.iteration_log[-1].tstt
     fw_tstt_wo = result_fw_without.iteration_log[-1].tstt
     fw_pct = (fw_tstt_w / fw_tstt_wo - 1) * 100 if fw_tstt_wo else 0.0
 
-    n_epochs_w = len(rr_result_w.epoch_results)
-    rr_gap_w = rr_result_w.epoch_results[-1].gap if rr_result_w.epoch_results else None
-    rr_gap_wo = rr_result_wo.epoch_results[-1].gap if rr_result_wo.epoch_results else None
+    n_epochs_w = len(case_with.result.epoch_results)
+    rr_gap_w = case_with.result.epoch_results[-1].gap if case_with.result.epoch_results else None
+    rr_gap_wo = case_without.result.epoch_results[-1].gap if case_without.result.epoch_results else None
     rr_gap_w_str = f"{rr_gap_w:.6f}" if rr_gap_w is not None else "n/a"
     rr_gap_wo_str = f"{rr_gap_wo:.6f}" if rr_gap_wo is not None else "n/a"
 
@@ -771,17 +754,17 @@ def generate_braess_report(
     state_scenarios = [
         (result_without.network_state, "Without (MSA)"),
         (result_with.network_state, "With (MSA)"),
-        (case_with.result.network_state, "With (HC Greedy)"),
-        (rr_result_w.network_state, "With (HC Rerouted)"),
+        (result_fw_with.network_state, "With (FW)"),
+        (case_with.result.network_state, "With (HC Rerouted)"),
     ]
 
     figs.append(None)
     descriptions.append(
         """<h2>Link State Comparison</h2>
         <p>Four scenarios compared: MSA without and with shortcut,
-        HC Greedy with shortcut, and HC Rerouted with shortcut.
+        FW with shortcut, and HC Rerouted with shortcut.
         Density (k, veh/km), speed (v, km/h), flow (q = k&times;v, veh/hr), and travel
-        time (t = L/v) at the final state.
+        time (t = L/v) at the converged state.
         <span style="color:#F44336;font-weight:600;">Red density</span>
         = near jam (k/k<sub>j</sub> &gt; 0.9).
         <span style="color:#F44336">Red speed</span> = severe congestion (v/v<sub>f</sub> &lt; 0.1).
@@ -799,8 +782,8 @@ def generate_braess_report(
         """<h2>Route Travel Times</h2>
         <p>Total travel time for each OD route, summed from link-level t = L/v.
         At user equilibrium (Wardrop), all <i>used</i> routes between an OD pair
-        should have equal travel time.  Under HC Greedy, the upper route
-        (1&rarr;3&rarr;2) may be abandoned.</p>"""
+        should have equal travel time.  Comparing MSA, FW, and HC Rerouted
+        convergence toward this condition.</p>"""
         + _braess_route_tt_table(state_scenarios)
     )
 
@@ -1025,8 +1008,8 @@ def generate_braess_report(
     figs.append(None)
     descriptions.append(
         "<h2>Hill-Climber Convergence</h2>"
-        "<p>Convergence diagnostics for the matrix-free hill-climber. Demand is divided into 8 departure "
-        "slices loaded sequentially (HC Greedy), then refined via reroute epochs (HC Rerouted) that "
+        "<p>Convergence diagnostics for the matrix-free hill-climber. Demand is divided into 10 departure "
+        "slices loaded sequentially (greedy phase), then refined via reroute epochs that "
         "iterate through slices oldest-first, subtracting and re-routing each slice's demand.</p>"
     )
 
@@ -1050,9 +1033,11 @@ def generate_braess_report(
     # -------------------------------------------------------------------
     sweep_slices = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
     sweep_pcts: list[float] = []
+    sweep_base_w, sweep_meta_w = _prepare_network(tmp_path / "sweep_w", with_shortcut=True)
+    sweep_base_wo, sweep_meta_wo = _prepare_network(tmp_path / "sweep_wo", with_shortcut=False)
     for ns in sweep_slices:
         cw = run_hillclimber_case(
-            base_path=base_hc_w, meta=meta_hc_w,
+            base_path=sweep_base_w, meta=sweep_meta_w,
             copy_fn=lambda base, run_dir: base,
             trip_builder=_hc_trip_builder,
             run_dir=tmp_path / f"sweep_w_{ns}",
@@ -1060,7 +1045,7 @@ def generate_braess_report(
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         cwo = run_hillclimber_case(
-            base_path=base_hc_wo, meta=meta_hc_wo,
+            base_path=sweep_base_wo, meta=sweep_meta_wo,
             copy_fn=lambda base, run_dir: base,
             trip_builder=_hc_trip_builder,
             run_dir=tmp_path / f"sweep_wo_{ns}",
@@ -1116,8 +1101,8 @@ def generate_braess_report(
     # 7c. Reroute Epoch Gap Convergence
     # -------------------------------------------------------------------
     # Build gap-per-epoch chart for both with and without scenarios
-    epochs_w = rr_result_w.epoch_results
-    epochs_wo = rr_result_wo.epoch_results
+    epochs_w = case_with.result.epoch_results
+    epochs_wo = case_without.result.epoch_results
 
     fig_epoch = go.Figure()
     if epochs_w:
@@ -1159,7 +1144,7 @@ def generate_braess_report(
     )
     descriptions.append(
         "<h3>Reroute Epoch Convergence</h3>"
-        "<p>After greedy loading (slices S0S0&ndash;S4ndash;S7), reroute epochs iterate through all "
+        "<p>After greedy loading (slices S0&ndash;S9), reroute epochs iterate through all "
         "slices oldest-first. Each slice's density is subtracted, re-routed on the residual "
         "network, and re-added (notation: E1:S0 = epoch 1, slice 0). "
         "This Gauss-Seidel approach avoids full-network AON oscillation.</p>"
@@ -1181,7 +1166,7 @@ def generate_braess_report(
             "(HC Greedy, HC Rerouted).</p>"
             f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.  "
             f"FW: Beckmann line search, {max_iter} iterations.  "
-            "HC Greedy: 8 departure slices.  HC Rerouted: up to 5 epochs, gap &lt; 0.001.</p>"
+            "HC: 10 departure slices, up to 10 reroute epochs, gap &lt; 0.001.</p>"
             f"<p><b>Key finding:</b> MSA and FW confirm the Braess paradox (+{pct:.1f}%). "
             f"HC Greedy does <i>not</i> reproduce it ({hc_pct:+.1f}%). After reroute epochs, "
             f"HC Rerouted converges to approximate equilibrium ({rr_pct:+.1f}%).</p>"
