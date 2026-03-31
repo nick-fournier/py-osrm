@@ -3,17 +3,17 @@
 
 Usage::
 
-    uv run python scripts/generate_reports.py          # all reports
-    uv run python scripts/generate_reports.py vdf       # VDF theory only
-    uv run python scripts/generate_reports.py anaheim    # Anaheim matrix validation
-    uv run python scripts/generate_reports.py braess     # Braess unified validation
-    uv run python scripts/generate_reports.py sioux      # Sioux Falls matrix validation
-    uv run python scripts/generate_reports.py chi-sketch # Chicago Sketch matrix validation
-    uv run python scripts/generate_reports.py monaco-hc  # Monaco hill-climber validation
-    uv run python scripts/generate_reports.py sioux-hc   # Sioux Falls hill-climber validation
-    uv run python scripts/generate_reports.py anaheim-hc # Anaheim hill-climber validation
-    uv run python scripts/generate_reports.py chi-sketch-hc # Chicago hill-climber validation
+    uv run python scripts/generate_reports.py              # all default reports
+    uv run python scripts/generate_reports.py vdf           # VDF theory only
+    uv run python scripts/generate_reports.py braess        # Braess unified validation
+    uv run python scripts/generate_reports.py monaco        # Monaco hill-climber validation
+    uv run python scripts/generate_reports.py sioux         # Sioux Falls hill-climber validation
+    uv run python scripts/generate_reports.py anaheim       # Anaheim hill-climber validation
+    uv run python scripts/generate_reports.py chi-sketch    # Chicago Sketch hill-climber validation
     uv run python scripts/generate_reports.py slice-sweep   # Cross-network slice sweep
+    uv run python scripts/generate_reports.py sioux-matrix  # Sioux Falls matrix validation
+    uv run python scripts/generate_reports.py anaheim-matrix   # Anaheim matrix validation
+    uv run python scripts/generate_reports.py chi-sketch-matrix # Chicago Sketch matrix validation
 
 Reports are written to docs/plots/.
 """
@@ -46,50 +46,49 @@ def generate_braess() -> Path:
     return generate_braess_report(tempfile.mkdtemp())
 
 
-def generate_sioux_falls() -> Path:
-    """Generate Sioux Falls validation report."""
+def generate_sioux_falls_matrix() -> Path:
+    """Generate Sioux Falls matrix validation report."""
     from tests.assignment.test_sioux_falls import generate_sioux_falls_report
 
     return generate_sioux_falls_report(tempfile.mkdtemp())
 
 
-def generate_anaheim() -> Path:
-    """Generate Anaheim validation report."""
+def generate_anaheim_matrix() -> Path:
+    """Generate Anaheim matrix validation report."""
     from tests.assignment.test_anaheim import generate_anaheim_report
 
     return generate_anaheim_report(tempfile.mkdtemp())
 
 
-def generate_chicago() -> Path:
-    """Generate Chicago Sketch validation report."""
+def generate_chicago_matrix() -> Path:
+    """Generate Chicago Sketch matrix validation report."""
     from tests.assignment.test_chicago_sketch import generate_chicago_report
 
     return generate_chicago_report(tempfile.mkdtemp())
 
 
-def generate_monaco_hillclimber() -> Path:
+def generate_monaco() -> Path:
     """Generate Monaco hill-climber validation report."""
     from tests.assignment.test_assignment_loop import generate_monaco_hillclimber_report
 
     return generate_monaco_hillclimber_report(tempfile.mkdtemp())
 
 
-
-def generate_sioux_hillclimber() -> Path:
+def generate_sioux_falls() -> Path:
     """Generate Sioux Falls hill-climber validation report."""
     from tests.assignment.test_sioux_falls import generate_sioux_falls_hillclimber_report
 
     return generate_sioux_falls_hillclimber_report(tempfile.mkdtemp())
 
 
-def generate_anaheim_hillclimber() -> Path:
+def generate_anaheim() -> Path:
     """Generate Anaheim hill-climber validation report."""
     from tests.assignment.test_anaheim import generate_anaheim_hillclimber_report
 
     return generate_anaheim_hillclimber_report(tempfile.mkdtemp())
 
 
-def generate_chicago_hillclimber() -> Path:
+def generate_chicago() -> Path:
     """Generate Chicago Sketch hill-climber validation report."""
     from tests.assignment.test_chicago_sketch import generate_chicago_hillclimber_report
 
@@ -106,17 +105,17 @@ def generate_slice_sweep() -> Path:
 REPORTS = {
     "vdf": ("VDF Theory", generate_vdf),
     "braess": ("Braess Paradox Validation", generate_braess),
-    "sioux": ("Sioux Falls Matrix Validation", generate_sioux_falls),
-    "anaheim": ("Anaheim Matrix Validation", generate_anaheim),
-    "chi-sketch": ("Chicago Sketch Matrix Validation", generate_chicago),
-    "monaco-hc": ("Monaco Hill-Climber Validation", generate_monaco_hillclimber),
-    "sioux-hc": ("Sioux Falls Hill-Climber Validation", generate_sioux_hillclimber),
-    "anaheim-hc": ("Anaheim Hill-Climber Validation", generate_anaheim_hillclimber),
-    "chi-sketch-hc": ("Chicago Sketch Hill-Climber Validation", generate_chicago_hillclimber),
+    "monaco": ("Monaco Hill-Climber Validation", generate_monaco),
+    "sioux": ("Sioux Falls Hill-Climber Validation", generate_sioux_falls),
+    "anaheim": ("Anaheim Hill-Climber Validation", generate_anaheim),
+    "chi-sketch": ("Chicago Sketch Hill-Climber Validation", generate_chicago),
     "slice-sweep": ("Slice Convergence Sweep", generate_slice_sweep),
+    "sioux-matrix": ("Sioux Falls Matrix Validation", generate_sioux_falls_matrix),
+    "anaheim-matrix": ("Anaheim Matrix Validation", generate_anaheim_matrix),
+    "chi-sketch-matrix": ("Chicago Sketch Matrix Validation", generate_chicago_matrix),
 }
 
-DEFAULT_REPORTS = ["vdf", "braess", "sioux", "anaheim", "chi-sketch", "monaco-hc"]
+DEFAULT_REPORTS = ["vdf", "braess", "monaco", "sioux", "anaheim", "chi-sketch"]
 
 
 def main() -> None:
