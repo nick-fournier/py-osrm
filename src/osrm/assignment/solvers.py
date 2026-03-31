@@ -155,6 +155,17 @@ class HillClimberBatchResult:
 
 
 @dataclass
+class RerouteSliceSnapshot:
+    """Metrics captured after rerouting a single slice within an epoch."""
+
+    epoch: int
+    slice_index: int
+    tstt: float
+    max_k_over_kj: float
+    mean_speed_kmh: float
+
+
+@dataclass
 class RerouteEpochResult:
     """Metrics for one reroute epoch (full pass through all slices)."""
 
@@ -165,6 +176,7 @@ class RerouteEpochResult:
     gap: Optional[float]
     max_k_over_kj: float
     mean_speed_kmh: float
+    slice_snapshots: List["RerouteSliceSnapshot"] = field(default_factory=list)
 
 
 @dataclass
@@ -403,6 +415,7 @@ class MatrixFreeHillClimber:
         for epoch_idx in range(max_epochs):
             epoch_start = time.monotonic()
             routes_changed = 0
+            slice_snapshots: List[RerouteSliceSnapshot] = []
 
             for slice_idx in range(len(ledger)):
                 entry = ledger[slice_idx]
@@ -460,6 +473,19 @@ class MatrixFreeHillClimber:
                 loop.smoother.build_adjacency(state.edge_ids, state.length_m)
                 loop._update_state(state)
 
+                # Capture per-slice snapshot
+                snap_k = float(
+                    np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
+                )
+                snap_speed = float(np.mean(state.speed_kmh))
+                slice_snapshots.append(RerouteSliceSnapshot(
+                    epoch=epoch_idx + 1,
+                    slice_index=slice_idx,
+                    tstt=new_tstt,
+                    max_k_over_kj=snap_k,
+                    mean_speed_kmh=snap_speed,
+                ))
+
                 now = time.monotonic()
                 if now - _last_log >= _LOG_INTERVAL_S:
                     logger.info(
@@ -497,6 +523,7 @@ class MatrixFreeHillClimber:
                 gap=gap,
                 max_k_over_kj=max_k_over_kj,
                 mean_speed_kmh=mean_speed,
+                slice_snapshots=slice_snapshots,
             )
             epoch_results.append(epoch_result)
             gap_str = f"{gap:.6f}" if gap is not None else "n/a"

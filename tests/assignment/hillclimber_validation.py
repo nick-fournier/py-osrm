@@ -128,7 +128,7 @@ def _add_batch_sections(
 ) -> None:
     """Add hill-climber slice evolution plots."""
     result = case.result
-    slice_labels = [f"Slice {b.batch_index}" for b in result.batch_results]
+    slice_labels = [f"E0:S{b.batch_index}" for b in result.batch_results]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -164,58 +164,77 @@ def _add_batch_sections(
         "system travel time.</p>"
     )
 
+    # --- State Evolution: unified E0:S0 … E0:SN → E1:S0 … E1:SN timeline ---
     fig = go.Figure()
-    # Greedy slice phase
+
+    # Build unified x-axis labels and y-values
+    greedy_labels = [f"E0:S{b.batch_index}" for b in result.batch_results]
+    greedy_speeds = [b.mean_speed_kmh for b in result.batch_results]
+    greedy_k = [b.max_k_over_kj for b in result.batch_results]
+
+    epoch_results = getattr(result, "epoch_results", []) or []
+    reroute_labels: list[str] = []
+    reroute_speeds: list[float] = []
+    reroute_k: list[float] = []
+    gap_annotations: list[tuple[int, float]] = []  # (x_index, gap_value)
+
+    for er in epoch_results:
+        for snap in er.slice_snapshots:
+            reroute_labels.append(f"E{er.epoch}:S{snap.slice_index}")
+            reroute_speeds.append(snap.mean_speed_kmh)
+            reroute_k.append(snap.max_k_over_kj)
+        if er.gap is not None:
+            gap_annotations.append((
+                len(greedy_labels) + len(reroute_labels) - 1,
+                er.gap,
+            ))
+
+    all_labels = greedy_labels + reroute_labels
+    all_speeds = greedy_speeds + reroute_speeds
+    all_k = greedy_k + reroute_k
+
+    # Mean speed trace (continuous)
     fig.add_trace(go.Scatter(
-        x=slice_labels,
-        y=[b.mean_speed_kmh for b in result.batch_results],
+        x=all_labels,
+        y=all_speeds,
         mode="lines+markers",
         line=dict(color="#2E7D32", width=2.5),
-        marker=dict(size=8),
+        marker=dict(size=7),
         name="Mean speed",
     ))
+    # Max k/kj trace (continuous)
     fig.add_trace(go.Scatter(
-        x=slice_labels,
-        y=[b.max_k_over_kj for b in result.batch_results],
+        x=all_labels,
+        y=all_k,
         mode="lines+markers",
         line=dict(color="#FF9800", width=2.0),
-        marker=dict(size=7),
+        marker=dict(size=6),
         name="Max k/kj",
         yaxis="y2",
     ))
 
-    # Append epoch data if present
-    epoch_results = getattr(result, "epoch_results", []) or []
+    # Vertical separator between greedy and reroute phases
     if epoch_results:
-        epoch_labels = [f"E{e.epoch}" for e in epoch_results]
-        all_labels = slice_labels + epoch_labels
-        fig.add_trace(go.Scatter(
-            x=epoch_labels,
-            y=[e.mean_speed_kmh for e in epoch_results],
-            mode="lines+markers",
-            line=dict(color="#2E7D32", width=2.5, dash="dash"),
-            marker=dict(size=10, symbol="diamond"),
-            name="Mean speed (reroute)",
-        ))
-        fig.add_trace(go.Scatter(
-            x=epoch_labels,
-            y=[e.max_k_over_kj for e in epoch_results],
-            mode="lines+markers",
-            line=dict(color="#FF9800", width=2.0, dash="dash"),
-            marker=dict(size=9, symbol="diamond"),
-            name="Max k/kj (reroute)",
-            yaxis="y2",
-        ))
-        # Vertical line separating greedy from reroute
         fig.add_vline(
-            x=len(slice_labels) - 0.5,
+            x=len(greedy_labels) - 0.5,
             line_dash="dot", line_color="#666", line_width=1.5,
             annotation_text="⟵ greedy | reroute ⟶",
             annotation_position="top",
         )
+
+    # Gap annotations at epoch boundaries
+    for x_idx, gap_val in gap_annotations:
+        fig.add_annotation(
+            x=all_labels[x_idx], y=all_speeds[x_idx],
+            text=f"gap={gap_val:.4f}",
+            showarrow=True, arrowhead=2, arrowcolor="#999",
+            font=dict(size=9, color="#666"),
+            yshift=15,
+        )
+
     fig.update_layout(
-        title="State Evolution (Slices → Epochs)",
-        xaxis_title="Phase",
+        title="State Evolution",
+        xaxis_title="Slice (Epoch:Slice)",
         yaxis=dict(title="Mean speed (km/h)"),
         yaxis2=dict(title="Max k/kj", overlaying="y", side="right"),
         template="plotly_white",
@@ -223,9 +242,11 @@ def _add_batch_sections(
     figs.append(fig)
     epoch_note = ""
     if epoch_results:
+        n_reroute = sum(er.slices_rerouted for er in epoch_results)
         epoch_note = (
-            f" After greedy loading, {len(epoch_results)} reroute epoch(s) "
-            "refine the solution (dashed lines, diamond markers)."
+            f" After greedy loading (E0), {len(epoch_results)} reroute epoch(s) "
+            f"re-processed all {result.batch_results[-1].batch_index + 1} slices "
+            f"({n_reroute} total reroutes). Gap computed once per epoch."
         )
     descriptions.append(
         f"<h2>State Evolution</h2>"
