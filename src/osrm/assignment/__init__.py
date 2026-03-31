@@ -19,6 +19,8 @@ from osrm.assignment.solvers import (
     HillClimberResult,
     MatrixAssignmentSolver,
     MatrixFreeHillClimber,
+    SliceLedger,
+    SliceLedgerEntry,
 )
 from osrm.assignment import plots
 
@@ -41,5 +43,7 @@ __all__ = [
     "HillClimberResult",
     "MatrixAssignmentSolver",
     "MatrixFreeHillClimber",
+    "SliceLedger",
+    "SliceLedgerEntry",
     "plots",
 ]

@@ -14,7 +14,7 @@ instead of duplicating logic.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
@@ -28,6 +28,69 @@ from osrm.assignment.assignment_loop import (
 from osrm.assignment.network_state import NetworkState
 from osrm.assignment.od_matrix import DemandTrip, ODMatrixAdapter
 from osrm.assignment.trip_stream import TripBatch, TripStreamAdapter
+
+
+# ---------------------------------------------------------------------------
+# Slice ledger — tracks per-slice density contributions for rerouting
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SliceLedgerEntry:
+    """One slice's contribution to network state.
+
+    Stored after each HC batch so that reroute epochs can subtract the
+    old contribution, re-route trips, and add the new one.
+    """
+
+    batch_index: int
+    trips: List[DemandTrip]
+    density: np.ndarray    # per-edge density contribution (veh/km)
+    volume: np.ndarray     # per-edge volume contribution (vehicles)
+    tstt: float            # batch TSTT (veh-seconds)
+
+
+@dataclass
+class SliceLedger:
+    """Ordered collection of slice contributions.
+
+    Invariant: ``sum(entry.density for entry in entries)`` equals the
+    total density accumulated on the network (before clamping to k_j).
+    """
+
+    entries: List[SliceLedgerEntry] = field(default_factory=list)
+
+    def append(self, entry: SliceLedgerEntry) -> None:
+        self.entries.append(entry)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __iter__(self):
+        return iter(self.entries)
+
+    def __getitem__(self, idx):
+        return self.entries[idx]
+
+    @property
+    def total_density(self) -> Optional[np.ndarray]:
+        """Sum of all slice density contributions (unclamped)."""
+        if not self.entries:
+            return None
+        return sum(e.density for e in self.entries)
+
+    @property
+    def total_volume(self) -> Optional[np.ndarray]:
+        if not self.entries:
+            return None
+        return sum(e.volume for e in self.entries)
+
+    def pad_all(self, n_edges: int) -> None:
+        """Extend all entries to *n_edges* if the network grew."""
+        for entry in self.entries:
+            if len(entry.density) < n_edges:
+                pad = n_edges - len(entry.density)
+                entry.density = np.append(entry.density, np.zeros(pad))
+                entry.volume = np.append(entry.volume, np.zeros(pad))
 
 
 class MatrixAssignmentSolver:
@@ -92,6 +155,7 @@ class HillClimberResult:
     batch_results: List[HillClimberBatchResult]
     total_time_s: float
     n_trips: int
+    slice_ledger: Optional[SliceLedger] = None
 
     @property
     def n_batches(self) -> int:
@@ -224,6 +288,7 @@ class MatrixFreeHillClimber:
         loop.smoother.build_adjacency(state.edge_ids, state.length_m)
 
         batch_results: List[HillClimberBatchResult] = []
+        ledger = SliceLedger()
         for batch in snapped_stream.iter_time_slices(
             bin_width_s=self.config.bin_width_s,
             max_batch_size=max_batch_size,
@@ -240,9 +305,21 @@ class MatrixFreeHillClimber:
                 pad = state.n_edges - len(batch_density)
                 batch_density = np.append(batch_density, np.zeros(pad))
                 batch_volume = np.append(batch_volume, np.zeros(pad))
+            # Keep ledger entries aligned with any network growth
+            ledger.pad_all(state.n_edges)
             if state_patch:
                 state_patch(state)
             loop.smoother.build_adjacency(state.edge_ids, state.length_m)
+
+            # Record contribution BEFORE clamping (unclamped is the true
+            # additive contribution; clamping happens on the total).
+            ledger.append(SliceLedgerEntry(
+                batch_index=batch.batch_index,
+                trips=list(batch.trips),
+                density=batch_density.copy(),
+                volume=batch_volume.copy(),
+                tstt=batch_tstt,
+            ))
 
             state.density_vpkm = np.clip(
                 state.density_vpkm + batch_density,
@@ -288,6 +365,7 @@ class MatrixFreeHillClimber:
             batch_results=batch_results,
             total_time_s=time.monotonic() - started,
             n_trips=len(snapped_trips),
+            slice_ledger=ledger,
         )
 
     def iter_time_slices(
