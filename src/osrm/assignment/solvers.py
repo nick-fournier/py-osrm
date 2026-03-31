@@ -651,9 +651,15 @@ class MatrixFreeHillClimber:
                         assigned_time += state.length_m[idx] / (v / 3.6)
                     else:
                         # Edge not in state — use OSRM annotation speed
-                        speeds = ann.get("speed", [])
+                        try:
+                            speeds = ann["speed"]
+                        except (KeyError, IndexError):
+                            speeds = []
                         spd = (speeds[i] * 3.6) if i < len(speeds) and speeds[i] > 0 else 1.08
-                        dists = ann.get("distance", [])
+                        try:
+                            dists = ann["distance"]
+                        except (KeyError, IndexError):
+                            dists = []
                         dist = dists[i] if i < len(dists) else 0.0
                         assigned_time += dist / (spd / 3.6)
 
