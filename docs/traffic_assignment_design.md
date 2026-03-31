@@ -773,6 +773,17 @@ with continuous departure times, routed on time-appropriate congestion,
 with flow feedback updating congestion for the next iteration. The same
 OSRM engine instance serves all time periods concurrently.
 
+**Before that OSRM patch exists**, the MVP matrix-free solver should stay
+wrapper-side:
+
+- bucket trips into departure-time slices in Python
+- load batches sequentially on one mutable network state
+- update VDF speeds after each batch
+- re-customize and reload OSRM between batches
+
+This is slower than the patched end-state but is implementable entirely in
+`py-osrm` and provides a working hill-climber without touching OSRM core.
+
 
 ---
 

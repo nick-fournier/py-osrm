@@ -222,6 +222,7 @@ class AssignmentLoop:
                 origin=snapped[tuple(trip.origin)],
                 destination=snapped[tuple(trip.destination)],
                 volume=trip.volume,
+                departure_time_s=trip.departure_time_s,
             ))
 
         n_moved = sum(

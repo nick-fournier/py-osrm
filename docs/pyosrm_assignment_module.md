@@ -297,10 +297,32 @@ A new `src/osrm/assignment/` package containing:
 - `NetworkState` — per-edge state arrays, edge index, flow accumulation
 - `BiParabolicVDF` — vectorized VDF evaluation, flow-to-density solver ([Traffic Assignment Design](traffic_assignment_design.md) §3)
 - `DensitySmoothing` — neighbor-based smoothing ([Traffic Assignment Design](traffic_assignment_design.md) §3.8)
-- `AssignmentLoop` — outer loop, multi-period routing, convergence control
+- `AssignmentLoop` — shared assignment core, routing/customize/reload loop
 - `PeriodConfig` — user-defined period mappings ([OSRM Multi-Period Patch](osrm_multi_period_patch.md) §6)
-- `DemandAdapter` — abstract base, `ODMatrixAdapter`, `TripStreamAdapter`
+- `DemandAdapter` — abstract role currently realized by `ODMatrixAdapter` and `TripStreamAdapter`
 - `SegmentSpeedWriter` — generates CSV to tmpfs from `NetworkState`
+- `MatrixAssignmentSolver` — matrix / zone-based front door over the shared core
+- `MatrixFreeHillClimber` — matrix-free batching / time-slicing scaffold over the shared core
+
+### 4.2.1  Current hill-climber MVP vs. future OSRM period patch
+
+The current matrix-free MVP is deliberately **wrapper-side only**:
+
+- trips are grouped into departure-time slices in Python
+- one mutable `NetworkState` is updated batch-by-batch
+- `osrm.customize()` is called after each batch
+- the OSRM engine is recreated between batches
+
+This gives a working hill-climber without modifying OSRM core.
+
+Once the OSRM multi-period patch lands, this will change in three important ways:
+
+1. trips can route with `departure_time` / `departure_period` directly
+2. one engine instance can hold multiple period-specific metric sets
+3. Python-side slice orchestration and per-batch engine reloads can be reduced or removed
+
+So the MVP API is intended to remain stable, while the implementation underneath
+becomes much more efficient after the OSRM update.
 
 ### 4.3  Performance-critical path (candidate for C++ extension)
 
