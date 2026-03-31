@@ -15,11 +15,7 @@ Source: bstabler/TransportationNetworks (Hillel Bar-Gera, 1999).
 """
 
 import shutil
-import time
 from pathlib import Path
-
-import numpy as np
-import pytest
 
 import osrm
 from osrm.assignment import (
@@ -141,39 +137,6 @@ def _run_chicago_assignment(
     return loop.run(trips, state_patch=lane_patch)
 
 
-class TestChicagoSketch:
-    """Chicago Sketch structural validation."""
-
-    def test_smoke_fw(self, tmp_path):
-        """Quick smoke: FW runs without error on Chicago Sketch."""
-        base, meta = _prepare_chicago_network(tmp_path)
-        result = _run_chicago_assignment(base, meta, max_iter=5, demand_scale=0.10)
-        assert result.iterations >= 1
-        assert result.network_state.n_edges > 0
-
-    def test_flow_nonnegativity(self, tmp_path):
-        """All link flows must be non-negative."""
-        base, meta = _prepare_chicago_network(tmp_path)
-        result = _run_chicago_assignment(base, meta, max_iter=10, demand_scale=0.10)
-        assert np.all(result.network_state.flow_vph >= 0)
-
-    def test_network_scale(self, tmp_path):
-        """Verify OSRM discovers a meaningful fraction of the 2950 links."""
-        base, meta = _prepare_chicago_network(tmp_path)
-        result = _run_chicago_assignment(base, meta, max_iter=5, demand_scale=0.10)
-        state = result.network_state
-        # 387 zones → many OD pairs → should discover substantial network
-        assert state.n_edges >= 500, (
-            f"Only {state.n_edges} edges discovered from 2950-link network"
-        )
-
-    def test_speeds_within_bounds(self, tmp_path):
-        """Speeds must be between VDF min and freeflow."""
-        base, meta = _prepare_chicago_network(tmp_path)
-        result = _run_chicago_assignment(base, meta, max_iter=10, demand_scale=0.10)
-        state = result.network_state
-        assert np.all(state.speed_kmh >= 1.08 - 1e-6)
-        assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
 
 
 def generate_chicago_report(

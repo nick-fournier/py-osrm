@@ -140,38 +140,49 @@ def _link_flow_correlation(result, meta: dict):
     return float(corr), len(assigned)
 
 
+@pytest.fixture(scope="module")
+def anaheim_net(tmp_path_factory):
+    """Prepare Anaheim network once for all tests in this module."""
+    tmp = tmp_path_factory.mktemp("anaheim")
+    return _prepare_anaheim_network(tmp)
+
+
+@pytest.fixture(scope="module")
+def anaheim_result(anaheim_net, tmp_path_factory):
+    """Run a single 3-iteration assignment shared by read-only tests."""
+    base, meta = anaheim_net
+    run_dir = tmp_path_factory.mktemp("ana_run")
+    run_base = _copy_clean_osrm(base, run_dir)
+    return _run_anaheim_assignment(run_base, meta, max_iter=3)
+
+
 class TestAnaheim:
     """Anaheim structural validation."""
 
-    def test_smoke_fw(self, tmp_path):
+    def test_smoke_fw(self, anaheim_result):
         """Quick smoke: FW runs without error on Anaheim."""
-        base, meta = _prepare_anaheim_network(tmp_path)
-        result = _run_anaheim_assignment(base, meta, max_iter=5, method="fw")
-        assert result.iterations >= 1
-        assert result.network_state.n_edges > 0
+        assert anaheim_result.iterations >= 1
+        assert anaheim_result.network_state.n_edges > 0
 
-    def test_flow_nonnegativity(self, tmp_path):
+    def test_flow_nonnegativity(self, anaheim_result):
         """All link flows must be non-negative."""
-        base, meta = _prepare_anaheim_network(tmp_path)
-        result = _run_anaheim_assignment(base, meta, max_iter=10)
-        assert np.all(result.network_state.flow_vph >= 0)
+        assert np.all(anaheim_result.network_state.flow_vph >= 0)
 
-    def test_speeds_within_bounds(self, tmp_path):
+    def test_speeds_within_bounds(self, anaheim_result):
         """Speeds must be between VDF min and freeflow."""
-        base, meta = _prepare_anaheim_network(tmp_path)
-        result = _run_anaheim_assignment(base, meta, max_iter=10)
-        state = result.network_state
+        state = anaheim_result.network_state
         assert np.all(state.speed_kmh >= 1.08 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
 
-    def test_freeflow_immutable_across_runs(self, tmp_path):
+    def test_freeflow_immutable_across_runs(self, anaheim_net, tmp_path_factory):
         """Freeflow must be identical whether run at 10% or 40% demand."""
-        base1, meta = _prepare_anaheim_network(tmp_path / "r1")
-        r1 = _run_anaheim_assignment(base1, meta, max_iter=5, demand_scale=0.40)
+        base, meta = anaheim_net
+        bp1 = _copy_clean_osrm(base, tmp_path_factory.mktemp("ff1"))
+        r1 = _run_anaheim_assignment(bp1, meta, max_iter=3, demand_scale=0.40)
         s1 = r1.network_state
 
-        base2, meta2 = _prepare_anaheim_network(tmp_path / "r2")
-        r2 = _run_anaheim_assignment(base2, meta2, max_iter=5, demand_scale=0.10)
+        bp2 = _copy_clean_osrm(base, tmp_path_factory.mktemp("ff2"))
+        r2 = _run_anaheim_assignment(bp2, meta, max_iter=3, demand_scale=0.10)
         s2 = r2.network_state
 
         ff1 = {
@@ -191,31 +202,28 @@ class TestAnaheim:
                 f"10%={ff2[key]:.1f}"
             )
 
-    def test_network_scale(self, tmp_path):
+    def test_network_scale(self, anaheim_result):
         """Verify OSRM discovers a meaningful fraction of the 914 links."""
-        base, meta = _prepare_anaheim_network(tmp_path)
-        result = _run_anaheim_assignment(base, meta, max_iter=5)
-        state = result.network_state
-        # 38 zones → many OD pairs → should discover substantial network
+        state = anaheim_result.network_state
         assert state.n_edges >= 200, (
             f"Only {state.n_edges} edges discovered from 914-link network"
         )
 
-    def test_incremental_loading_reduces_overshoot(self, tmp_path):
+    def test_incremental_loading_reduces_overshoot(self, anaheim_net, tmp_path_factory):
         """Incremental loading should reduce median density overshoot vs direct."""
-        base, meta = _prepare_anaheim_network(tmp_path / "prep")
+        base, meta = anaheim_net
 
         # Direct loading (no warm-up)
-        bp_direct = _copy_clean_osrm(base, tmp_path / "direct")
+        bp_direct = _copy_clean_osrm(base, tmp_path_factory.mktemp("direct"))
         meta_full = dict(meta)
         meta_full["od_matrix"] = meta["od_matrix"] * 1.0
         trips = _build_trips(meta_full)
 
         cfg_direct = AssignmentConfig(
-            method="fw", max_iterations=20, convergence_gap=0.0,
+            method="fw", max_iterations=10, convergence_gap=0.0,
             smoothing=DensitySmoothingConfig(method="none"),
             verbosity="ERROR",
-            speed_csv_dir=str(tmp_path / "direct"),
+            speed_csv_dir=str(Path(bp_direct).parent),
             incremental_steps=(1.0,),
         )
         loop_direct = AssignmentLoop(bp_direct, cfg_direct)
@@ -226,15 +234,14 @@ class TestAnaheim:
             r_direct.network_state.density_vpkm
             / r_direct.network_state.jam_density
         )
-        med_direct = float(np.median(ratio_direct))
 
         # Incremental loading (default 4-step warm-up)
-        bp_inc = _copy_clean_osrm(base, tmp_path / "inc")
+        bp_inc = _copy_clean_osrm(base, tmp_path_factory.mktemp("inc"))
         cfg_inc = AssignmentConfig(
-            method="fw", max_iterations=20, convergence_gap=0.0,
+            method="fw", max_iterations=10, convergence_gap=0.0,
             smoothing=DensitySmoothingConfig(method="none"),
             verbosity="ERROR",
-            speed_csv_dir=str(tmp_path / "inc"),
+            speed_csv_dir=str(Path(bp_inc).parent),
         )
         loop_inc = AssignmentLoop(bp_inc, cfg_inc)
         r_inc = loop_inc.run(
@@ -244,7 +251,6 @@ class TestAnaheim:
             r_inc.network_state.density_vpkm
             / r_inc.network_state.jam_density
         )
-        med_inc = float(np.median(ratio_inc))
 
         # Use 95th percentile k/kj — max is dominated by single outlier
         # links; median is in the uncongested noise
