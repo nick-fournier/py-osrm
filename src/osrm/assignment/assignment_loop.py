@@ -96,7 +96,7 @@ class AssignmentConfig:
     default_jam_density_per_lane: float = 150.0
     default_n_lanes: int = 1
     speed_csv_dir: Optional[str] = None
-    verbosity: str = "ERROR"
+    verbosity: str = "INFO"
     fw_bisections: int = 20
     fw_line_search_tol: float = 1e-6
     incremental_steps: Tuple[float, ...] = (0.25, 0.50, 0.75, 1.0)
@@ -176,9 +176,19 @@ class AssignmentLoop:
         level = _VERBOSITY_LEVELS.get(
             self.config.verbosity.upper(), logging.ERROR,
         )
-        logger.setLevel(level)
-        logging.getLogger("osrm.assignment.plots").setLevel(level)
-        logging.getLogger("osrm.assignment.solvers").setLevel(level)
+        _assignment_loggers = [
+            logger,
+            logging.getLogger("osrm.assignment.plots"),
+            logging.getLogger("osrm.assignment.solvers"),
+        ]
+        for lg in _assignment_loggers:
+            lg.setLevel(level)
+            if not lg.handlers:
+                handler = logging.StreamHandler()
+                handler.setFormatter(logging.Formatter(
+                    "%(name)s %(levelname)s: %(message)s"
+                ))
+                lg.addHandler(handler)
         self.vdf = BiParabolicVDF(
             kc_ratio=self.config.vdf_kc_ratio,
             min_speed_kmh=self.config.vdf_min_speed_kmh,
