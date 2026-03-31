@@ -1064,6 +1064,12 @@ def generate_validation_report(
     logger.info("[%s] Building MFD scatter plots...", network_name)
     _add_mfd_section(figs, descriptions, state, detail_scale)
 
+    # --- 3b. Congestion map ---
+    logger.info("[%s] Building congestion map...", network_name)
+    _add_congestion_map_section(
+        figs, descriptions, network_name, node_coords, state, detail_scale,
+    )
+
     # --- 4. Flow and TT correlation ---
     if ref:
         logger.info("[%s] Building correlation plots...", network_name)
@@ -1087,7 +1093,7 @@ def generate_validation_report(
         f"Total TNTP demand: {total_demand:,.0f} vph. "
         f"Lanes: {min(lane_counts)}&ndash;{max(lane_counts)}. "
         f"Freeflow speeds: {', '.join(str(s) for s in speed_set)} km/h. "
-        f"VDF: bi-parabolic MFD (k<sub>j</sub>=200 veh/km/lane). "
+        f"VDF: bi-parabolic MFD (k<sub>j</sub>=150 veh/km/lane). "
         f"Detail analysis at {detail_scale:.0%} demand "
         f"({total_demand * detail_scale:,.0f} vph).</p>"
     )
@@ -1166,6 +1172,103 @@ def _add_topology_section(figs, descriptions, name, nodes, link_attrs,
         f'<span style="color:#2196F3"><b>{n_minor} links</b></span> '
         f"with &lt;3 lanes. "
         f"Total TNTP demand: {total_demand:,.0f} vph.</p>"
+    )
+
+
+def _add_congestion_map_section(figs, descriptions, name, nodes, state,
+                                 detail_scale):
+    """Network map with links colored by k/k_j density ratio."""
+    fig = go.Figure()
+
+    # Build node-id to state-index lookup
+    edge_map = {}
+    for i in range(state.n_edges):
+        u, v = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
+        edge_map[(u, v)] = i
+
+    # Colorscale breakpoints: green (free) → yellow (kc) → red (jam)
+    for (u, v), idx in edge_map.items():
+        if u not in nodes or v not in nodes:
+            continue
+        x0, y0 = nodes[u]
+        x1, y1 = nodes[v]
+
+        kj = state.jam_density[idx]
+        k = state.density_vpkm[idx]
+        k_ratio = k / kj if kj > 0 else 0
+        vf = state.freeflow_kmh[idx]
+        v_cong = state.speed_kmh[idx]
+        flow = state.flow_vph[idx]
+        lanes = int(state.n_lanes[idx])
+
+        # Color: green → yellow → orange → red
+        if k_ratio < 0.33:
+            color = "#4CAF50"
+        elif k_ratio < 0.66:
+            color = "#FF9800"
+        elif k_ratio < 0.90:
+            color = "#F44336"
+        else:
+            color = "#B71C1C"
+
+        width = max(1.5, lanes * 1.2)
+
+        hover = (
+            f"{u}→{v}<br>"
+            f"Lanes: {lanes}<br>"
+            f"Freeflow: {vf:.1f} km/h<br>"
+            f"Speed: {v_cong:.1f} km/h<br>"
+            f"Density: {k:.1f} veh/km (k/kj={k_ratio:.2f})<br>"
+            f"Flow: {flow:.0f} veh/hr"
+        )
+        fig.add_trace(go.Scatter(
+            x=[x0, x1], y=[y0, y1], mode="lines",
+            line=dict(color=color, width=width),
+            hoverinfo="text", hovertext=hover,
+            showlegend=False,
+        ))
+
+    # Node markers
+    xs = [nodes[n][0] for n in sorted(nodes)]
+    ys = [nodes[n][1] for n in sorted(nodes)]
+    show_labels = len(nodes) <= 50
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys,
+        mode="markers+text" if show_labels else "markers",
+        marker=dict(
+            size=12 if show_labels else 3,
+            color="white",
+            line=dict(width=1, color="#333"),
+        ),
+        text=[str(n) for n in sorted(nodes)] if show_labels else None,
+        textfont=dict(size=8, color="#333") if show_labels else None,
+        textposition="middle center" if show_labels else None,
+        hovertext=[f"Node {n}" for n in sorted(nodes)],
+        hoverinfo="text",
+        showlegend=False,
+    ))
+
+    fig.update_layout(
+        title=f"{name} Congestion Map ({detail_scale:.0%} demand)",
+        xaxis=dict(title="Longitude", scaleanchor="y", fixedrange=True),
+        yaxis=dict(title="Latitude", fixedrange=True),
+        template="plotly_white",
+        height=500,
+    )
+    figs.append(fig)
+
+    n_crit = int(np.sum(state.density_vpkm > state.jam_density / 3))
+    n_jam = int(np.sum(
+        state.density_vpkm >= state.jam_density * 0.9
+    ))
+    descriptions.append(
+        f"<h2>Congestion Map ({detail_scale:.0%} demand)</h2>"
+        f"<p>Links colored by density ratio k/k<sub>j</sub>: "
+        f'<span style="color:#4CAF50"><b>green</b></span> (k/k<sub>j</sub> &lt; 0.33), '
+        f'<span style="color:#FF9800"><b>yellow</b></span> (0.33–0.66), '
+        f'<span style="color:#F44336"><b>red</b></span> (0.66–0.90), '
+        f'<span style="color:#B71C1C"><b>dark red</b></span> (&ge; 0.90). '
+        f"{n_crit} links above k<sub>c</sub>, {n_jam} near jam.</p>"
     )
 
 
