@@ -164,4 +164,5 @@ def generate_chicago_report(
         detail_scale=1.00,
         sweep_scales=[1.00],
         vc_scales=[],
+        methods=["fw"],
     )

@@ -970,6 +970,7 @@ def generate_validation_report(
     detail_scale: float = 0.15,
     sweep_scales: Sequence[float] | None = None,
     vc_scales: Sequence[float] | None = None,
+    methods: Sequence[str] | None = None,
     intro_html: str = "",
 ) -> Path:
     """Generate a standard validation report for any TNTP network.
@@ -1045,13 +1046,14 @@ def generate_validation_report(
         )
 
     # --- 2. FW vs MSA convergence ---
+    run_methods = list(methods) if methods else ["fw", "msa"]
     logger.info(
-        "[%s] Running convergence comparison (FW + MSA, %d iters)...",
-        network_name, max_iter,
+        "[%s] Running convergence comparison (%s, %d iters)...",
+        network_name, "+".join(run_methods), max_iter,
     )
     result_fw = _add_convergence_section(
         figs, descriptions, base, meta, copy_fn, prepare_fn, run_fn,
-        tmp_path, detail_scale, total_demand, max_iter,
+        tmp_path, detail_scale, total_demand, max_iter, run_methods,
     )
 
     # --- 3. MFD scatter ---
@@ -1459,34 +1461,36 @@ def _add_sweep_section(figs, descriptions, base, meta, copy_fn, run_fn,
 
 def _add_convergence_section(figs, descriptions, base, meta, copy_fn,
                               prepare_fn, run_fn, tmp_path,
-                              detail_scale, total_demand, max_iter):
-    """Section 2: FW vs MSA convergence. Returns FW result."""
-    logger.info("  Running FW at %.0f%% demand...", detail_scale * 100)
-    base_fw = copy_fn(base, tmp_path / "fw_detail")
-    result_fw = run_fn(base_fw, meta, max_iter, "fw", detail_scale)
+                              detail_scale, total_demand, max_iter, methods):
+    """Section 2: convergence plot. Returns first method's result."""
+    colors = {"fw": "#D32F2F", "msa": "#1565C0"}
+    labels = {"fw": "Frank-Wolfe", "msa": "MSA (1/n)"}
+    dashes = {"fw": "solid", "msa": "dash"}
+    results = {}
 
-    logger.info("  Running MSA at %.0f%% demand...", detail_scale * 100)
-    base_msa, meta_msa = prepare_fn(tmp_path / "msa")
-    result_msa = run_fn(base_msa, meta_msa, max_iter, "msa", detail_scale)
-
-    iters_fw = [r.iteration for r in result_fw.iteration_log]
-    gap_fw = [r.relative_gap for r in result_fw.iteration_log]
-    iters_msa = [r.iteration for r in result_msa.iteration_log]
-    gap_msa = [r.relative_gap for r in result_msa.iteration_log]
+    for method in methods:
+        logger.info("  Running %s at %.0f%% demand...", method.upper(), detail_scale * 100)
+        if method == methods[0]:
+            run_base = copy_fn(base, tmp_path / f"{method}_detail")
+            results[method] = run_fn(run_base, meta, max_iter, method, detail_scale)
+        else:
+            base_m, meta_m = prepare_fn(tmp_path / method)
+            results[method] = run_fn(base_m, meta_m, max_iter, method, detail_scale)
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=iters_fw, y=[abs(g) if g != 0 else None for g in gap_fw],
-        mode="lines+markers", name="Frank-Wolfe",
-        line=dict(color="#D32F2F", width=2.5), marker=dict(size=4),
-    ))
-    fig.add_trace(go.Scatter(
-        x=iters_msa, y=[abs(g) if g != 0 else None for g in gap_msa],
-        mode="lines+markers", name="MSA (1/n)",
-        line=dict(color="#1565C0", width=1.5, dash="dash"), marker=dict(size=3),
-    ))
+    for method in methods:
+        iters = [r.iteration for r in results[method].iteration_log]
+        gaps = [r.relative_gap for r in results[method].iteration_log]
+        fig.add_trace(go.Scatter(
+            x=iters, y=[abs(g) if g != 0 else None for g in gaps],
+            mode="lines+markers", name=labels.get(method, method),
+            line=dict(color=colors.get(method, "#666"), width=2.5 if method == methods[0] else 1.5,
+                      dash=dashes.get(method, "solid")),
+            marker=dict(size=4),
+        ))
+
     fig.update_layout(
-        title=f"Wardrop Gap: FW vs MSA ({detail_scale:.0%} Demand)",
+        title=f"Wardrop Gap: {' vs '.join(labels.get(m, m) for m in methods)} ({detail_scale:.0%} Demand)",
         xaxis_title="Iteration", yaxis_title="|Relative Gap|",
         yaxis_type="log",
         template="plotly_white",
@@ -1495,17 +1499,18 @@ def _add_convergence_section(figs, descriptions, base, meta, copy_fn,
     )
     figs.append(fig)
 
-    fw_final = result_fw.iteration_log[-1]
-    msa_final = result_msa.iteration_log[-1]
+    parts = []
+    for method in methods:
+        final = results[method].iteration_log[-1]
+        parts.append(f"{labels.get(method, method)} gap: {final.relative_gap:.4f}")
     descriptions.append(
         f"<h2>Convergence at {detail_scale:.0%} Demand</h2>"
-        f"<p>FW gap: {fw_final.relative_gap:.4f}, "
-        f"MSA gap: {msa_final.relative_gap:.4f} ({max_iter} iterations). "
+        f"<p>{', '.join(parts)} ({max_iter} iterations). "
         f"Demand: {total_demand * detail_scale:,.0f} vph "
         f"({detail_scale:.0%} of TNTP).</p>"
     )
 
-    return result_fw
+    return results[methods[0]]
 
 
 def _add_link_table_section(figs, descriptions, state, link_attrs, nodes,
