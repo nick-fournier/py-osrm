@@ -319,6 +319,121 @@ class TestBraessParadox:
         )
 
 
+def _braess_state_table(state_w, state_wo):
+    """Build a side-by-side link state table for the Braess diamond.
+
+    Works with any pair of NetworkState objects (matrix or hill-climber).
+    """
+    from collections import OrderedDict
+
+    rows = []
+    for state, scenario in [(state_w, "With"), (state_wo, "Without")]:
+        for i in range(state.n_edges):
+            label = f"{int(state.edge_ids[i,0])}&rarr;{int(state.edge_ids[i,1])}"
+            v = max(state.speed_kmh[i], 1.08)
+            travel_time_s = state.length_m[i] / (v / 3.6)
+            rows.append((
+                label, scenario,
+                state.density_vpkm[i],
+                state.speed_kmh[i],
+                state.freeflow_kmh[i],
+                state.flow_vph[i],
+                state.jam_density[i],
+                state.n_lanes[i],
+                state.length_m[i],
+                travel_time_s,
+            ))
+
+    pivot: dict[str, dict[str, tuple]] = OrderedDict()
+    for label, scenario, k, v, vf, q, kj, lanes, length, tt in rows:
+        pivot.setdefault(label, {
+            "lanes": lanes, "kj": kj, "vf": vf, "length": length,
+        })[scenario] = (k, v, q, tt)
+
+    html = (
+        '<table style="border-collapse:collapse; width:100%; max-width:1100px; '
+        'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.85em;">'
+        '<thead><tr style="border-bottom:2px solid #333;">'
+        '<th style="text-align:left;padding:8px;">Link</th>'
+        '<th style="padding:8px;">Length</th>'
+        '<th style="padding:8px;">Lanes</th>'
+        '<th style="padding:8px;">k<sub>j</sub></th>'
+        '<th style="padding:8px;">v<sub>f</sub></th>'
+        '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">Without Shortcut</th>'
+        '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">With Shortcut</th>'
+        '</tr><tr style="border-bottom:1px solid #999;">'
+        '<th></th><th></th><th></th><th></th><th></th>'
+        '<th style="padding:4px 6px;border-left:2px solid #ccc;">k</th>'
+        '<th style="padding:4px 6px;">v</th>'
+        '<th style="padding:4px 6px;">q</th>'
+        '<th style="padding:4px 6px;">t</th>'
+        '<th style="padding:4px 6px;border-left:2px solid #ccc;">k</th>'
+        '<th style="padding:4px 6px;">v</th>'
+        '<th style="padding:4px 6px;">q</th>'
+        '<th style="padding:4px 6px;">t</th>'
+        '</tr></thead><tbody>'
+    )
+
+    def _v_color(v, vf):
+        ratio = v / vf if vf > 0 else 1
+        if ratio < 0.1:
+            return "#F44336"
+        elif ratio < 0.5:
+            return "#FF9800"
+        return "#4CAF50"
+
+    def _k_style(k, kj):
+        ratio = k / kj if kj > 0 else 0
+        if ratio > 0.9:
+            return "font-weight:700;color:#F44336;"
+        elif ratio > 0.5:
+            return "color:#FF9800;"
+        return ""
+
+    def _fmt_time(s):
+        if s >= 3600:
+            return f"{s/3600:.1f}h"
+        return f"{s:.0f}s"
+
+    for link, info in pivot.items():
+        lanes = info["lanes"]
+        kj = info["kj"]
+        vf = info["vf"]
+        length_km = info["length"] / 1000.0
+        ff_time_s = info["length"] / (vf / 3.6)
+        w = info.get("With")
+        wo = info.get("Without")
+
+        def _cells(vals):
+            if vals is None:
+                return ('<td style="text-align:right;padding:4px 6px;border-left:2px solid #ccc;">&mdash;</td>'
+                        '<td style="text-align:right;padding:4px 6px;">&mdash;</td>'
+                        '<td style="text-align:right;padding:4px 6px;">&mdash;</td>'
+                        '<td style="text-align:right;padding:4px 6px;">&mdash;</td>')
+            k, v, q, tt = vals
+            tt_ratio = tt / ff_time_s if ff_time_s > 0 else 1
+            tt_color = "#F44336" if tt_ratio > 2 else "#FF9800" if tt_ratio > 1.3 else "#4CAF50"
+            return (
+                f'<td style="text-align:right;padding:4px 6px;border-left:2px solid #ccc;{_k_style(k, kj)}">{k:.1f}</td>'
+                f'<td style="text-align:right;padding:4px 6px;color:{_v_color(v, vf)};">{v:.1f}</td>'
+                f'<td style="text-align:right;padding:4px 6px;">{q:.0f}</td>'
+                f'<td style="text-align:right;padding:4px 6px;color:{tt_color};">{_fmt_time(tt)}</td>'
+            )
+
+        html += (
+            f'<tr style="border-bottom:1px solid #e0e0e0;">'
+            f'<td style="padding:4px 6px;font-weight:600;">{link}</td>'
+            f'<td style="text-align:center;padding:4px 6px;">{length_km:.1f} km</td>'
+            f'<td style="text-align:center;padding:4px 6px;">{lanes}</td>'
+            f'<td style="text-align:center;padding:4px 6px;">{kj:.0f}</td>'
+            f'<td style="text-align:center;padding:4px 6px;">{vf:.0f}</td>'
+            f'{_cells(wo)}{_cells(w)}'
+            f'</tr>'
+        )
+    html += '</tbody></table>'
+    return html
+
+
 def _braess_route_tt_table(state_w, state_wo):
     """Build an HTML table of route travel times for the Braess diamond.
 
@@ -538,114 +653,7 @@ def generate_braess_report(
     # --- 1. Link state comparison table ---
     def _state_table(result_w, result_wo):
         """Build an HTML table comparing link state between scenarios."""
-        from collections import OrderedDict
-        rows = []
-        for result, scenario in [(result_w, "With"), (result_wo, "Without")]:
-            state = result.network_state
-            for i in range(state.n_edges):
-                label = f"{int(state.edge_ids[i,0])}&rarr;{int(state.edge_ids[i,1])}"
-                v = max(state.speed_kmh[i], 1.08)
-                travel_time_s = state.length_m[i] / (v / 3.6)
-                rows.append((
-                    label, scenario,
-                    state.density_vpkm[i],
-                    state.speed_kmh[i],
-                    state.freeflow_kmh[i],
-                    state.flow_vph[i],
-                    state.jam_density[i],
-                    state.n_lanes[i],
-                    state.length_m[i],
-                    travel_time_s,
-                ))
-
-        pivot: dict[str, dict[str, tuple]] = OrderedDict()
-        for label, scenario, k, v, vf, q, kj, lanes, length, tt in rows:
-            pivot.setdefault(label, {
-                "lanes": lanes, "kj": kj, "vf": vf, "length": length,
-            })[scenario] = (k, v, q, tt)
-
-        html = (
-            '<table style="border-collapse:collapse; width:100%; max-width:1100px; '
-            'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.85em;">'
-            '<thead><tr style="border-bottom:2px solid #333;">'
-            '<th style="text-align:left;padding:8px;">Link</th>'
-            '<th style="padding:8px;">Length</th>'
-            '<th style="padding:8px;">Lanes</th>'
-            '<th style="padding:8px;">k<sub>j</sub></th>'
-            '<th style="padding:8px;">v<sub>f</sub></th>'
-            '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">Without Shortcut</th>'
-            '<th colspan="4" style="text-align:center;padding:8px;border-left:2px solid #ccc;">With Shortcut</th>'
-            '</tr><tr style="border-bottom:1px solid #999;">'
-            '<th></th><th></th><th></th><th></th><th></th>'
-            '<th style="padding:4px 6px;border-left:2px solid #ccc;">k</th>'
-            '<th style="padding:4px 6px;">v</th>'
-            '<th style="padding:4px 6px;">q</th>'
-            '<th style="padding:4px 6px;">t</th>'
-            '<th style="padding:4px 6px;border-left:2px solid #ccc;">k</th>'
-            '<th style="padding:4px 6px;">v</th>'
-            '<th style="padding:4px 6px;">q</th>'
-            '<th style="padding:4px 6px;">t</th>'
-            '</tr></thead><tbody>'
-        )
-
-        def _v_color(v, vf):
-            ratio = v / vf if vf > 0 else 1
-            if ratio < 0.1:
-                return "#F44336"
-            elif ratio < 0.5:
-                return "#FF9800"
-            return "#4CAF50"
-
-        def _k_style(k, kj):
-            ratio = k / kj if kj > 0 else 0
-            if ratio > 0.9:
-                return "font-weight:700;color:#F44336;"
-            elif ratio > 0.5:
-                return "color:#FF9800;"
-            return ""
-
-        def _fmt_time(s):
-            if s >= 3600:
-                return f"{s/3600:.1f}h"
-            return f"{s:.0f}s"
-
-        for link, info in pivot.items():
-            lanes = info["lanes"]
-            kj = info["kj"]
-            vf = info["vf"]
-            length_km = info["length"] / 1000.0
-            ff_time_s = info["length"] / (vf / 3.6)
-            w = info.get("With")
-            wo = info.get("Without")
-
-            def _cells(vals):
-                if vals is None:
-                    return ('<td style="text-align:right;padding:4px 6px;border-left:2px solid #ccc;">&mdash;</td>'
-                            '<td style="text-align:right;padding:4px 6px;">&mdash;</td>'
-                            '<td style="text-align:right;padding:4px 6px;">&mdash;</td>'
-                            '<td style="text-align:right;padding:4px 6px;">&mdash;</td>')
-                k, v, q, tt = vals
-                tt_ratio = tt / ff_time_s if ff_time_s > 0 else 1
-                tt_color = "#F44336" if tt_ratio > 2 else "#FF9800" if tt_ratio > 1.3 else "#4CAF50"
-                return (
-                    f'<td style="text-align:right;padding:4px 6px;border-left:2px solid #ccc;{_k_style(k, kj)}">{k:.1f}</td>'
-                    f'<td style="text-align:right;padding:4px 6px;color:{_v_color(v, vf)};">{v:.1f}</td>'
-                    f'<td style="text-align:right;padding:4px 6px;">{q:.0f}</td>'
-                    f'<td style="text-align:right;padding:4px 6px;color:{tt_color};">{_fmt_time(tt)}</td>'
-                )
-
-            html += (
-                f'<tr style="border-bottom:1px solid #e0e0e0;">'
-                f'<td style="padding:4px 6px;font-weight:600;">{link}</td>'
-                f'<td style="text-align:center;padding:4px 6px;">{length_km:.1f} km</td>'
-                f'<td style="text-align:center;padding:4px 6px;">{lanes}</td>'
-                f'<td style="text-align:center;padding:4px 6px;">{kj:.0f}</td>'
-                f'<td style="text-align:center;padding:4px 6px;">{vf:.0f}</td>'
-                f'{_cells(wo)}{_cells(w)}'
-                f'</tr>'
-            )
-        html += '</tbody></table>'
-        return html
+        return _braess_state_table(result_w.network_state, result_wo.network_state)
 
     def _route_travel_times(result_w, result_wo):
         """Build a table of route travel times to demonstrate Wardrop equilibrium."""
@@ -899,6 +907,24 @@ def generate_braess_hillclimber_report(
         network_name="Braess",
         case=case_with,
         detail_scale=1.0,
+    )
+
+    # Replace the generic link table (index 1) with side-by-side with/without
+    figs[1] = None
+    descriptions[1] = (
+        """<h2>Link State After Loading</h2>
+        <p>Density (k, veh/km), speed (v, km/h), flow (q = k&times;v, veh/hr), and travel
+        time (t = L/v) at the final network state after all batches.
+        <span style="color:#F44336;font-weight:600;">Red density</span>
+        = near jam (k/k<sub>j</sub> &gt; 0.9).
+        <span style="color:#F44336">Red speed</span> = severe congestion (v/v<sub>f</sub> &lt; 0.1).
+        <span style="color:#F44336">Red time</span> = &gt;2&times; freeflow.
+        <span style="color:#FF9800">Orange</span> = moderate.
+        <span style="color:#4CAF50">Green</span> = uncongested.</p>"""
+        + _braess_state_table(
+            case_with.result.network_state,
+            case_without.result.network_state,
+        )
     )
 
     # --- Route travel time table (insert after link table, index 2) ---
