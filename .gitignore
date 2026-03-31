@@ -6,3 +6,6 @@ __pycache__
 /tests/data/ch
 /tests/data/mld
 /tests/data/monaco.osrm*
+
+# compiled extensions
+*.so
