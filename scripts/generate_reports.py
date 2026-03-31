@@ -10,6 +10,10 @@ Usage::
     uv run python scripts/generate_reports.py sioux      # Sioux Falls matrix validation
     uv run python scripts/generate_reports.py chi-sketch # Chicago Sketch matrix validation
     uv run python scripts/generate_reports.py monaco-hc  # Monaco hill-climber validation
+    uv run python scripts/generate_reports.py braess-hc  # Braess hill-climber validation
+    uv run python scripts/generate_reports.py sioux-hc   # Sioux Falls hill-climber validation
+    uv run python scripts/generate_reports.py anaheim-hc # Anaheim hill-climber validation
+    uv run python scripts/generate_reports.py chi-sketch-hc # Chicago hill-climber validation
 
 Reports are written to docs/plots/.
 """
@@ -70,6 +74,34 @@ def generate_monaco_hillclimber() -> Path:
     return generate_monaco_hillclimber_report(tempfile.mkdtemp())
 
 
+def generate_braess_hillclimber() -> Path:
+    """Generate Braess hill-climber validation report."""
+    from tests.assignment.test_braess import generate_braess_hillclimber_report
+
+    return generate_braess_hillclimber_report(tempfile.mkdtemp())
+
+
+def generate_sioux_hillclimber() -> Path:
+    """Generate Sioux Falls hill-climber validation report."""
+    from tests.assignment.test_sioux_falls import generate_sioux_falls_hillclimber_report
+
+    return generate_sioux_falls_hillclimber_report(tempfile.mkdtemp())
+
+
+def generate_anaheim_hillclimber() -> Path:
+    """Generate Anaheim hill-climber validation report."""
+    from tests.assignment.test_anaheim import generate_anaheim_hillclimber_report
+
+    return generate_anaheim_hillclimber_report(tempfile.mkdtemp())
+
+
+def generate_chicago_hillclimber() -> Path:
+    """Generate Chicago Sketch hill-climber validation report."""
+    from tests.assignment.test_chicago_sketch import generate_chicago_hillclimber_report
+
+    return generate_chicago_hillclimber_report(tempfile.mkdtemp())
+
+
 REPORTS = {
     "vdf": ("VDF Theory", generate_vdf),
     "braess": ("Braess Matrix Validation", generate_braess),
@@ -77,11 +109,17 @@ REPORTS = {
     "anaheim": ("Anaheim Matrix Validation", generate_anaheim),
     "chi-sketch": ("Chicago Sketch Matrix Validation", generate_chicago),
     "monaco-hc": ("Monaco Hill-Climber Validation", generate_monaco_hillclimber),
+    "braess-hc": ("Braess Hill-Climber Validation", generate_braess_hillclimber),
+    "sioux-hc": ("Sioux Falls Hill-Climber Validation", generate_sioux_hillclimber),
+    "anaheim-hc": ("Anaheim Hill-Climber Validation", generate_anaheim_hillclimber),
+    "chi-sketch-hc": ("Chicago Sketch Hill-Climber Validation", generate_chicago_hillclimber),
 }
+
+DEFAULT_REPORTS = ["vdf", "braess", "sioux", "anaheim", "chi-sketch", "monaco-hc"]
 
 
 def main() -> None:
-    targets = sys.argv[1:] if len(sys.argv) > 1 else list(REPORTS.keys())
+    targets = sys.argv[1:] if len(sys.argv) > 1 else DEFAULT_REPORTS
 
     for key in targets:
         if key not in REPORTS:

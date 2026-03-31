@@ -424,22 +424,42 @@ def braess_network(
     # Multi-node ways produce multiple OSRM edges (one per consecutive
     # node pair), so we map every segment, not just first→last.
     lane_map = {}
+    link_attrs = {}
     for way in ways:
         lanes = int(way["tags"].get("lanes", 1))
+        speed_kmh = float(way["tags"].get("maxspeed", 50))
         way_nodes = way["nodes"]
         for j in range(len(way_nodes) - 1):
-            lane_map[(way_nodes[j], way_nodes[j + 1])] = lanes
+            u, v = way_nodes[j], way_nodes[j + 1]
+            lane_map[(u, v)] = lanes
+            lon1, lat1 = nodes[u]
+            lon2, lat2 = nodes[v]
+            mean_lat = np.radians((lat1 + lat2) / 2.0)
+            dx_m = (lon2 - lon1) * 111_320.0 * np.cos(mean_lat)
+            dy_m = (lat2 - lat1) * 111_320.0
+            dist_m = float((dx_m**2 + dy_m**2) ** 0.5)
+            link_attrs[(u, v)] = {
+                "n_lanes": lanes,
+                "distance_m": dist_m,
+                "ff_speed_kmh": speed_kmh,
+                "highway": way["tags"].get("highway", "secondary"),
+                "name": way["tags"].get("name", f"{u}->{v}"),
+            }
 
     metadata = {
         "origin": nodes[1],
         "destination": nodes[2],
         "nodes": nodes,
+        "n_zones": 1,
         "n_links": len(ways),
+        "od_matrix": np.array([[2500.0]], dtype=np.float64),
+        "zone_centroids": {1: nodes[1]},
         "with_shortcut": with_shortcut,
         "variable_links": ["1→3", "4→2"],
         "constant_links": ["1→4", "3→2"],
         "shortcut_link": "3→4" if with_shortcut else None,
         "lane_map": lane_map,
+        "link_attrs": link_attrs,
     }
 
     return osm_path, metadata

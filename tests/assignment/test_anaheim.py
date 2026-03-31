@@ -25,6 +25,10 @@ from osrm.assignment import (
 from osrm.assignment.od_matrix import DemandTrip, ODMatrixAdapter
 from osrm.assignment.osm_synthesis import tntp_to_osm, patch_lanes
 from osrm.assignment.tntp import parse_net, parse_trips, load_node_coords, parse_flow
+from .hillclimber_validation import (
+    generate_hillclimber_validation_report,
+    run_hillclimber_case,
+)
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "anaheim"
 
@@ -79,6 +83,12 @@ def _build_trips(meta: dict) -> list:
                         volume=od[i, j],
                     ))
     return trips
+
+
+def _build_hillclimber_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
+    meta_scaled = dict(meta)
+    meta_scaled["od_matrix"] = meta["od_matrix"] * demand_scale
+    return _build_trips(meta_scaled)
 
 
 def _run_anaheim_assignment(
@@ -261,6 +271,26 @@ class TestAnaheim:
             f"than direct ({p95_direct:.3f})"
         )
 
+    def test_hillclimber_smoke(self, anaheim_net, tmp_path_factory):
+        """Hill-climber loads Anaheim across multiple slices."""
+        base, meta = anaheim_net
+        case = run_hillclimber_case(
+            base_path=base,
+            meta=meta,
+            copy_fn=_copy_clean_osrm,
+            trip_builder=_build_hillclimber_trips,
+            run_dir=tmp_path_factory.mktemp("ana_hc"),
+            demand_scale=1.00,
+            n_slices=4,
+            state_patch_factory=lambda m: lambda s: patch_lanes(s, m),
+        )
+        state = case.result.network_state
+        assert state is not None
+        assert case.result.n_batches == 4
+        assert state.n_edges >= 200
+        assert np.all(state.flow_vph >= 0)
+        assert np.all(state.speed_kmh > 0)
+
 
 def generate_anaheim_report(
     tmp_path: str | Path,
@@ -287,4 +317,27 @@ def generate_anaheim_report(
         detail_scale=1.00,
         sweep_scales=[0.30, 0.50, 0.75, 1.00],
         vc_scales=[0.10, 0.20, 0.30, 0.50],
+    )
+
+
+def generate_anaheim_hillclimber_report(
+    tmp_path: str | Path,
+    output_path: str = "docs/plots/anaheim_hillclimber_validation.html",
+) -> Path:
+    """Generate Anaheim hill-climber validation report."""
+    return generate_hillclimber_validation_report(
+        network_name="Anaheim",
+        prepare_fn=_prepare_anaheim_network,
+        copy_fn=_copy_clean_osrm,
+        trip_builder=_build_hillclimber_trips,
+        tmp_path=tmp_path,
+        output_path=output_path,
+        detail_scale=1.00,
+        n_slices=4,
+        bin_width_s=3600.0,
+        state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
+        intro_html=(
+            "<p>Hill-climber validation uses <b>100% Anaheim demand</b>, matching the "
+            "matrix validation target rather than a reduced detail slice.</p>"
+        ),
     )

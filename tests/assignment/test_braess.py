@@ -21,6 +21,10 @@ from osrm.assignment import (
 )
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import braess_network
+from .hillclimber_validation import (
+    build_hillclimber_report_sections,
+    run_hillclimber_case,
+)
 
 
 def _prepare_network(tmp_path: Path, with_shortcut: bool):
@@ -70,6 +74,15 @@ def _run_assignment(
         patch_braess_lanes(state, meta)
 
     return loop.run(trips, state_patch=lane_patch)
+
+
+def _build_hillclimber_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
+    demand = 2500.0 * demand_scale
+    return [DemandTrip(
+        origin=meta["origin"],
+        destination=meta["destination"],
+        volume=demand,
+    )]
 
 
 class TestBraessParadox:
@@ -262,6 +275,104 @@ class TestBraessParadox:
                 f"Freeflow mismatch on {key}: run1={ff1[key]:.1f}, "
                 f"run2={ff2[key]:.1f}"
             )
+
+    def test_hillclimber_shortcut_reduces_tstt(self, tmp_path):
+        """Under hill-climber (incremental) loading the shortcut HELPS.
+
+        Unlike equilibrium assignment, the hill-climber loads demand in
+        sequential batches without global rerouting.  The shortcut provides
+        genuine relief under greedy loading because no single batch
+        overloads it.  This is the expected (correct) behaviour — the
+        Braess paradox is an equilibrium phenomenon.
+        """
+        from osrm.assignment.osm_synthesis import patch_braess_lanes
+
+        base_with, meta_with = _prepare_network(tmp_path / "with", with_shortcut=True)
+        base_without, meta_without = _prepare_network(tmp_path / "without", with_shortcut=False)
+        case_with = run_hillclimber_case(
+            base_path=base_with,
+            meta=meta_with,
+            copy_fn=lambda base, run_dir: base,
+            trip_builder=_build_hillclimber_trips,
+            run_dir=tmp_path / "with_run",
+            demand_scale=1.0,
+            n_slices=4,
+            state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+        )
+        case_without = run_hillclimber_case(
+            base_path=base_without,
+            meta=meta_without,
+            copy_fn=lambda base, run_dir: base,
+            trip_builder=_build_hillclimber_trips,
+            run_dir=tmp_path / "without_run",
+            demand_scale=1.0,
+            n_slices=4,
+            state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+        )
+
+        with_tstt = sum(b.batch_tstt for b in case_with.result.batch_results)
+        without_tstt = sum(b.batch_tstt for b in case_without.result.batch_results)
+        # Shortcut reduces TSTT under incremental loading (opposite of equilibrium)
+        assert with_tstt < without_tstt, (
+            f"Expected shortcut to REDUCE TSTT under hill-climber loading, "
+            f"but with={with_tstt:,.0f} >= without={without_tstt:,.0f}"
+        )
+
+
+def _braess_route_tt_table(state_w, state_wo):
+    """Build an HTML table of route travel times for the Braess diamond.
+
+    Works with any pair of NetworkState objects (matrix or hill-climber).
+    """
+    routes = {
+        "Upper (1&rarr;3&rarr;2)": [("1", "3"), ("3", "2")],
+        "Lower (1&rarr;4&rarr;2)": [("1", "4"), ("4", "2")],
+        "Shortcut (1&rarr;3&rarr;4&rarr;2)": [("1", "3"), ("3", "4"), ("4", "2")],
+    }
+
+    def _link_times(state):
+        times = {}
+        for i in range(state.n_edges):
+            from_id = str(int(state.edge_ids[i, 0]))
+            to_id = str(int(state.edge_ids[i, 1]))
+            v = max(state.speed_kmh[i], 1.08)
+            times[(from_id, to_id)] = state.length_m[i] / (v / 3.6)
+        return times
+
+    times_w = _link_times(state_w)
+    times_wo = _link_times(state_wo)
+
+    html = (
+        '<table style="border-collapse:collapse; width:100%; max-width:700px; '
+        'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.85em;">'
+        '<thead><tr style="border-bottom:2px solid #333;">'
+        '<th style="text-align:left;padding:8px;">Route</th>'
+        '<th style="text-align:right;padding:8px;">Without Shortcut</th>'
+        '<th style="text-align:right;padding:8px;">With Shortcut</th>'
+        '</tr></thead><tbody>'
+    )
+
+    for route_name, links in routes.items():
+        wo_total = None
+        if all(lk in times_wo for lk in links):
+            wo_total = sum(times_wo[lk] for lk in links)
+        w_total = None
+        if all(lk in times_w for lk in links):
+            w_total = sum(times_w[lk] for lk in links)
+
+        wo_str = f"{wo_total:.1f}s" if wo_total is not None else "&mdash;"
+        w_str = f"{w_total:.1f}s" if w_total is not None else "&mdash;"
+
+        html += (
+            f'<tr style="border-bottom:1px solid #e0e0e0;">'
+            f'<td style="padding:6px 8px;font-weight:600;">{route_name}</td>'
+            f'<td style="text-align:right;padding:6px 8px;">{wo_str}</td>'
+            f'<td style="text-align:right;padding:6px 8px;">{w_str}</td>'
+            f'</tr>'
+        )
+
+    html += '</tbody></table>'
+    return html
 
 
 def generate_braess_report(
@@ -538,60 +649,7 @@ def generate_braess_report(
 
     def _route_travel_times(result_w, result_wo):
         """Build a table of route travel times to demonstrate Wardrop equilibrium."""
-        # Simple 4-node edges — no multi-segment highways
-        routes = {
-            "Upper (1&rarr;3&rarr;2)": [("1", "3"), ("3", "2")],
-            "Lower (1&rarr;4&rarr;2)": [("1", "4"), ("4", "2")],
-            "Shortcut (1&rarr;3&rarr;4&rarr;2)": [("1", "3"), ("3", "4"), ("4", "2")],
-        }
-
-        def _link_times(result):
-            """Return {(from, to): travel_time_s} for each edge."""
-            state = result.network_state
-            times = {}
-            for i in range(state.n_edges):
-                from_id = str(int(state.edge_ids[i, 0]))
-                to_id = str(int(state.edge_ids[i, 1]))
-                v = max(state.speed_kmh[i], 1.08)
-                times[(from_id, to_id)] = state.length_m[i] / (v / 3.6)
-            return times
-
-        times_w = _link_times(result_w)
-        times_wo = _link_times(result_wo)
-
-        html = (
-            '<table style="border-collapse:collapse; width:100%; max-width:700px; '
-            'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.85em;">'
-            '<thead><tr style="border-bottom:2px solid #333;">'
-            '<th style="text-align:left;padding:8px;">Route</th>'
-            '<th style="text-align:right;padding:8px;">Without Shortcut</th>'
-            '<th style="text-align:right;padding:8px;">With Shortcut</th>'
-            '</tr></thead><tbody>'
-        )
-
-        for route_name, links in routes.items():
-            # Without shortcut
-            wo_total = None
-            if all(lk in times_wo for lk in links):
-                wo_total = sum(times_wo[lk] for lk in links)
-            # With shortcut
-            w_total = None
-            if all(lk in times_w for lk in links):
-                w_total = sum(times_w[lk] for lk in links)
-
-            wo_str = f"{wo_total:.1f}s" if wo_total is not None else "&mdash;"
-            w_str = f"{w_total:.1f}s" if w_total is not None else "&mdash;"
-
-            html += (
-                f'<tr style="border-bottom:1px solid #e0e0e0;">'
-                f'<td style="padding:6px 8px;font-weight:600;">{route_name}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">{wo_str}</td>'
-                f'<td style="text-align:right;padding:6px 8px;">{w_str}</td>'
-                f'</tr>'
-            )
-
-        html += '</tbody></table>'
-        return html
+        return _braess_route_tt_table(result_w.network_state, result_wo.network_state)
 
     figs.append(None)
     descriptions.append(
@@ -786,6 +844,112 @@ def generate_braess_report(
         <b>{max_iter}</b> iterations per scenario.
         VDF: bi-parabolic speed-density (Fournier et al.), k<sub>c</sub> = k<sub>j</sub>/3.
         Methods compared: MSA (&alpha; = 1/n) and Frank-Wolfe (Beckmann line search).</p>""",
+        figures=figs,
+        descriptions=descriptions,
+        path=Path(output_path),
+    )
+    return Path(output_path)
+
+
+def generate_braess_hillclimber_report(
+    tmp_path: str | Path,
+    output_path: str = "docs/plots/braess_hillclimber_validation.html",
+    demand: float = 2500.0,
+) -> Path:
+    """Generate a Braess hill-climber report comparing with/without shortcut."""
+    import plotly.graph_objects as go
+    from osrm.assignment.osm_synthesis import patch_braess_lanes
+    from osrm.assignment.plots import _write_combined_report
+
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    base_with, meta_with = _prepare_network(tmp_path / "with", with_shortcut=True)
+    base_without, meta_without = _prepare_network(tmp_path / "without", with_shortcut=False)
+    case_with = run_hillclimber_case(
+        base_path=base_with,
+        meta=meta_with,
+        copy_fn=lambda base, run_dir: base,
+        trip_builder=lambda meta, scale: [DemandTrip(
+            origin=meta["origin"],
+            destination=meta["destination"],
+            volume=demand * scale,
+        )],
+        run_dir=tmp_path / "with_run",
+        demand_scale=1.0,
+        n_slices=4,
+        state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+    )
+    case_without = run_hillclimber_case(
+        base_path=base_without,
+        meta=meta_without,
+        copy_fn=lambda base, run_dir: base,
+        trip_builder=lambda meta, scale: [DemandTrip(
+            origin=meta["origin"],
+            destination=meta["destination"],
+            volume=demand * scale,
+        )],
+        run_dir=tmp_path / "without_run",
+        demand_scale=1.0,
+        n_slices=4,
+        state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+    )
+
+    figs, descriptions = build_hillclimber_report_sections(
+        network_name="Braess",
+        case=case_with,
+        detail_scale=1.0,
+    )
+
+    fig = go.Figure()
+    labels = ["Without shortcut", "With shortcut"]
+    total_tstt = [
+        sum(b.batch_tstt for b in case_without.result.batch_results),
+        sum(b.batch_tstt for b in case_with.result.batch_results),
+    ]
+    fig.add_trace(go.Bar(
+        x=labels,
+        y=total_tstt,
+        marker_color=["#1565C0", "#D32F2F"],
+        hovertext=[f"TSTT={v:,.0f}" for v in total_tstt],
+        hoverinfo="text",
+    ))
+    fig.update_layout(
+        title="Braess Hill-Climber Total System Travel Time",
+        xaxis_title="Scenario",
+        yaxis_title="Cumulative batch TSTT (veh-seconds)",
+        template="plotly_white",
+        showlegend=False,
+    )
+    figs.append(fig)
+    pct = (total_tstt[1] / total_tstt[0] - 1) * 100 if total_tstt[0] else 0.0
+    descriptions.append(
+        "<h2>Braess comparison</h2>"
+        f"<p>Hill-climber cumulative TSTT is <b>{pct:+.1f}%</b> relative to the "
+        "without-shortcut case.  Under incremental loading the shortcut provides "
+        "genuine relief (opposite of the equilibrium paradox) because no single "
+        "batch overloads it.</p>"
+    )
+
+    # --- Route travel time table ---
+    figs.append(None)
+    descriptions.append(
+        "<h2>Route Travel Times</h2>"
+        "<p>Total travel time for each OD route, summed from link-level "
+        "t&nbsp;=&nbsp;L/v at the final network state after all batches.</p>"
+        + _braess_route_tt_table(
+            case_with.result.network_state,
+            case_without.result.network_state,
+        )
+    )
+
+    _write_combined_report(
+        title="Braess Hill-Climber Validation",
+        intro=(
+            "<p>Matrix-free hill-climber validation on the Braess diamond. The same "
+            "demand is distributed across four deterministic departure slices for "
+            "both with-shortcut and without-shortcut scenarios.</p>"
+        ),
         figures=figs,
         descriptions=descriptions,
         path=Path(output_path),

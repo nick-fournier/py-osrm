@@ -32,6 +32,10 @@ from osrm.assignment import (
 )
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import sioux_falls_network, patch_sioux_falls_lanes
+from .hillclimber_validation import (
+    generate_hillclimber_validation_report,
+    run_hillclimber_case,
+)
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "sioux_falls"
 
@@ -80,6 +84,12 @@ def _build_trips(meta: dict) -> list:
                     volume=od[i, j],
                 ))
     return trips
+
+
+def _build_hillclimber_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
+    meta_scaled = dict(meta)
+    meta_scaled["od_matrix"] = meta["od_matrix"] * demand_scale
+    return _build_trips(meta_scaled)
 
 
 def _run_sf_assignment(
@@ -199,6 +209,26 @@ class TestSiouxFalls:
                 f"5%={ff2[key]:.1f}"
             )
 
+    def test_hillclimber_smoke(self, tmp_path):
+        """Hill-climber loads Sioux Falls across multiple slices."""
+        base, meta = _prepare_sf_network(tmp_path)
+        case = run_hillclimber_case(
+            base_path=base,
+            meta=meta,
+            copy_fn=_copy_clean_osrm,
+            trip_builder=_build_hillclimber_trips,
+            run_dir=tmp_path / "hc_run",
+            demand_scale=0.15,
+            n_slices=4,
+            state_patch_factory=lambda m: lambda s: patch_sioux_falls_lanes(s, m),
+        )
+        state = case.result.network_state
+        assert state is not None
+        assert case.result.n_batches == 4
+        assert state.n_edges > 0
+        assert np.all(state.flow_vph >= 0)
+        assert np.all(state.speed_kmh > 0)
+
 
 def generate_sioux_falls_report(
     tmp_path: str | Path,
@@ -229,5 +259,29 @@ def generate_sioux_falls_report(
             "arterials (2 lanes, 65 km/h). "
             "TNTP &lsquo;capacity&rsquo; values are BPR math artifacts, "
             "<b>not</b> physical road capacity.</p>"
+        ),
+    )
+
+
+def generate_sioux_falls_hillclimber_report(
+    tmp_path: str | Path,
+    output_path: str = "docs/plots/sioux_falls_hillclimber_validation.html",
+) -> Path:
+    """Generate Sioux Falls hill-climber validation report."""
+    return generate_hillclimber_validation_report(
+        network_name="Sioux Falls",
+        prepare_fn=_prepare_sf_network,
+        copy_fn=_copy_clean_osrm,
+        trip_builder=_build_hillclimber_trips,
+        tmp_path=tmp_path,
+        output_path=output_path,
+        detail_scale=0.15,
+        n_slices=4,
+        bin_width_s=3600.0,
+        state_patch_factory=lambda meta: lambda state: patch_sioux_falls_lanes(state, meta),
+        intro_html=(
+            "<p>Hill-climber validation uses the same 15% Sioux Falls demand level as "
+            "matrix validation, but distributes that demand across deterministic "
+            "departure slices instead of solving a matrix equilibrium loop.</p>"
         ),
     )
