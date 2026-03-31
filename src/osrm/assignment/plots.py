@@ -1089,13 +1089,17 @@ def generate_validation_report(
     # Compose intro
     lane_counts = [a["n_lanes"] for a in link_attrs.values()]
     speed_set = sorted(set(round(a["ff_speed_kmh"]) for a in link_attrs.values()))
+    if len(speed_set) <= 5:
+        speed_desc = ", ".join(str(s) for s in speed_set)
+    else:
+        speed_desc = f"{speed_set[0]}&ndash;{speed_set[-1]} ({len(speed_set)} unique)"
     auto_intro = (
         f"<p>Validation of density-based traffic assignment on the "
         f"<b>{network_name}</b> benchmark "
         f"({len(node_coords)} nodes, {n_links} links, {n_zones} zones). "
         f"Total TNTP demand: {total_demand:,.0f} vph. "
         f"Lanes: {min(lane_counts)}&ndash;{max(lane_counts)}. "
-        f"Freeflow speeds: {', '.join(str(s) for s in speed_set)} km/h. "
+        f"Freeflow speeds: {speed_desc} km/h. "
         f"VDF: bi-parabolic MFD (k<sub>j</sub>=150 veh/km/lane). "
         f"Detail analysis at {detail_scale:.0%} demand "
         f"({total_demand * detail_scale:,.0f} vph).</p>"

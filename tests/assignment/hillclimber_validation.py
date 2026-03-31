@@ -397,6 +397,10 @@ def generate_hillclimber_validation_report(
 
     lane_counts = [a["n_lanes"] for a in link_attrs.values()]
     speed_set = sorted(set(round(a["ff_speed_kmh"]) for a in link_attrs.values()))
+    if len(speed_set) <= 5:
+        speed_desc = ", ".join(str(s) for s in speed_set)
+    else:
+        speed_desc = f"{speed_set[0]}&ndash;{speed_set[-1]} ({len(speed_set)} unique)"
     intro = (
         f"<p>Validation of the <b>matrix-free hill-climber MVP</b> on "
         f"<b>{network_name}</b>. Final loaded demand: {case.total_demand:,.0f} vph "
@@ -405,7 +409,7 @@ def generate_hillclimber_validation_report(
         f"Trips: {len(case.trips):,} OD movements materialized as "
         f"{len(case.sliced_trips):,} departure-sliced loads. "
         f"Lanes: {min(lane_counts)}&ndash;{max(lane_counts)}. "
-        f"Freeflow speeds: {', '.join(str(s) for s in speed_set)} km/h. "
+        f"Freeflow speeds: {speed_desc} km/h. "
         f"Total runtime: {case.result.total_time_s:.2f}s.</p>"
     )
     if intro_html:
