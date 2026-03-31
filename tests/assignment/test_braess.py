@@ -812,25 +812,25 @@ def generate_braess_report(
         name="MSA",
         x=["Without Shortcut", "With Shortcut"],
         y=[tstt_without_vals[-1], tstt_with_vals[-1]],
-        marker_color=["#90CAF9", "#EF9A9A"],
+        marker_color="#64B5F6",
     ))
     fig_bar.add_trace(go.Bar(
         name="FW",
         x=["Without Shortcut", "With Shortcut"],
         y=[fw_tstt_wo, fw_tstt_w],
-        marker_color=["#64B5F6", "#E57373"],
+        marker_color="#1565C0",
     ))
     fig_bar.add_trace(go.Bar(
         name="HC Greedy",
         x=["Without Shortcut", "With Shortcut"],
         y=[hc_tstt_wo, hc_tstt_w],
-        marker_color=["#42A5F5", "#EF5350"],
+        marker_color="#FFB74D",
     ))
     fig_bar.add_trace(go.Bar(
         name="HC Rerouted",
         x=["Without Shortcut", "With Shortcut"],
         y=[rr_tstt_wo, rr_tstt_w],
-        marker_color=["#1565C0", "#D32F2F"],
+        marker_color="#E65100",
     ))
     fig_bar.update_layout(
         title="TSTT by Method and Scenario",
@@ -1025,21 +1025,21 @@ def generate_braess_report(
     figs.append(None)
     descriptions.append(
         "<h2>Hill-Climber Convergence</h2>"
-        "<p>Convergence diagnostics for the matrix-free hill-climber. Demand is sliced into 20 departure "
-        "batches loaded sequentially (HC Greedy), then refined via reroute epochs (HC Rerouted) that "
+        "<p>Convergence diagnostics for the matrix-free hill-climber. Demand is divided into 20 departure "
+        "slices loaded sequentially (HC Greedy), then refined via reroute epochs (HC Rerouted) that "
         "iterate through slices oldest-first, subtracting and re-routing each slice's demand.</p>"
     )
 
     # -------------------------------------------------------------------
-    # 7a. Batch Timeline / State / Runtime
+    # 7a. Slice Timeline / State / Runtime
     # -------------------------------------------------------------------
     hc_figs, hc_descriptions = build_hillclimber_report_sections(
         network_name="Braess",
         case=case_with,
         detail_scale=1.0,
     )
-    # [0]=congestion map, [1]=link table, [2]=batch timeline, [3]=state evolution,
-    # [4]=batch runtime, [5:]=MFD (handled separately above)
+    # [0]=congestion map, [1]=link table, [2]=slice timeline, [3]=state evolution,
+    # [4]=slice runtime, [5:]=MFD (handled separately above)
     for i in range(2, 5):
         hc_descriptions[i] = hc_descriptions[i].replace("<h2>", "<h3>").replace("</h2>", "</h3>")
     figs.extend(hc_figs[2:5])
@@ -1104,7 +1104,7 @@ def generate_braess_report(
         "<p>Two regimes are visible: a <b>rapid convergence</b> phase "
         "(1&ndash;8 slices) where the delta drops from &minus;19% to "
         "&minus;4%, and a <b>plateau</b> beyond ~8 slices where additional "
-        "batching barely changes the result (asymptoting to ~&minus;3%).  "
+        "slicing barely changes the result (asymptoting to ~&minus;3%).  "
         "This suggests 8&ndash;16 slices is a practical sweet spot for "
         "hill-climber accuracy on small networks.  The paradox is an "
         "equilibrium phenomenon that requires global re-routing; greedy "

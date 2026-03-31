@@ -122,36 +122,31 @@ def _add_batch_sections(
     *,
     detail_scale: float,
 ) -> None:
-    """Add hill-climber batch evolution plots."""
+    """Add hill-climber slice evolution plots."""
     result = case.result
-    batch_labels = [
-        f"batch {b.batch_index}<br>bin {b.departure_bin}"
-        if b.departure_bin is not None
-        else f"batch {b.batch_index}"
-        for b in result.batch_results
-    ]
+    slice_labels = [f"Slice {b.batch_index}" for b in result.batch_results]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=batch_labels,
+        x=slice_labels,
         y=[b.n_trips for b in result.batch_results],
         name="Trips",
         marker_color="#1976D2",
     ))
     fig.add_trace(go.Scatter(
-        x=batch_labels,
+        x=slice_labels,
         y=[b.batch_tstt for b in result.batch_results],
-        name="Batch TSTT",
+        name="Slice TSTT",
         yaxis="y2",
         mode="lines+markers",
         line=dict(color="#D32F2F", width=2.5),
     ))
     fig.update_layout(
-        title="Hill-Climber Batch Timeline",
-        xaxis_title="Departure slice / batch",
+        title="Slice Timeline",
+        xaxis_title="Slice",
         yaxis=dict(title="Trips"),
         yaxis2=dict(
-            title="Batch TSTT (veh-seconds)",
+            title="Slice TSTT (veh-seconds)",
             overlaying="y",
             side="right",
         ),
@@ -159,15 +154,15 @@ def _add_batch_sections(
     )
     figs.append(fig)
     descriptions.append(
-        "<h2>Batch timeline</h2>"
+        "<h2>Slice Timeline</h2>"
         "<p>Trips are loaded sequentially by departure slice on a shared mutable "
-        "network state. Bars show trips per batch; the line shows batch total "
+        "network state. Bars show trips per slice; the line shows per-slice total "
         "system travel time.</p>"
     )
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=batch_labels,
+        x=slice_labels,
         y=[b.mean_speed_kmh for b in result.batch_results],
         mode="lines+markers",
         line=dict(color="#2E7D32", width=2.5),
@@ -175,7 +170,7 @@ def _add_batch_sections(
         name="Mean speed",
     ))
     fig.add_trace(go.Scatter(
-        x=batch_labels,
+        x=slice_labels,
         y=[b.max_k_over_kj for b in result.batch_results],
         mode="lines+markers",
         line=dict(color="#FF9800", width=2.0),
@@ -184,24 +179,23 @@ def _add_batch_sections(
         yaxis="y2",
     ))
     fig.update_layout(
-        title="Hill-Climber State Evolution",
-        xaxis_title="Departure slice / batch",
+        title="Slice State Evolution",
+        xaxis_title="Slice",
         yaxis=dict(title="Mean speed (km/h)"),
         yaxis2=dict(title="Max k/kj", overlaying="y", side="right"),
         template="plotly_white",
     )
     figs.append(fig)
     descriptions.append(
-        f"<h2>State evolution</h2>"
+        f"<h2>State Evolution</h2>"
         f"<p>Final loaded demand is {case.total_demand:,.0f} "
         "vph, distributed deterministically across departure slices so total demand "
-        "is preserved. This keeps hill-climber validation comparable to the existing "
-        "scenario demand assumptions.</p>"
+        "is preserved.</p>"
     )
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=batch_labels,
+        x=slice_labels,
         y=[b.route_time_s for b in result.batch_results],
         mode="lines+markers",
         line=dict(color="#1565C0", width=2.0),
@@ -209,7 +203,7 @@ def _add_batch_sections(
         name="Route time",
     ))
     fig.add_trace(go.Scatter(
-        x=batch_labels,
+        x=slice_labels,
         y=[b.customize_time_s for b in result.batch_results],
         mode="lines+markers",
         line=dict(color="#8E24AA", width=2.0),
@@ -217,7 +211,7 @@ def _add_batch_sections(
         name="Customize time",
     ))
     fig.add_trace(go.Scatter(
-        x=batch_labels,
+        x=slice_labels,
         y=[b.engine_time_s for b in result.batch_results],
         mode="lines+markers",
         line=dict(color="#6D4C41", width=2.0),
@@ -225,16 +219,15 @@ def _add_batch_sections(
         name="Engine reload time",
     ))
     fig.update_layout(
-        title="Hill-Climber Batch Runtime",
-        xaxis_title="Departure slice / batch",
+        title="Slice Runtime",
+        xaxis_title="Slice",
         yaxis_title="Time (s)",
         template="plotly_white",
     )
     figs.append(fig)
     descriptions.append(
-        "<h2>Batch runtime</h2>"
-        "<p>Per-batch routing, customize, and engine reload timings. This is the "
-        "current wrapper-side cost before any future OSRM multi-period patch.</p>"
+        "<h2>Slice Runtime</h2>"
+        "<p>Per-slice routing, customize, and engine reload timings.</p>"
     )
 
 
