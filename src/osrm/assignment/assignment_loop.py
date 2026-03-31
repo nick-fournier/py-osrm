@@ -183,6 +183,7 @@ class AssignmentLoop:
         ]
         for lg in _assignment_loggers:
             lg.setLevel(level)
+            lg.propagate = False
             if not lg.handlers:
                 handler = logging.StreamHandler()
                 handler.setFormatter(logging.Formatter(
