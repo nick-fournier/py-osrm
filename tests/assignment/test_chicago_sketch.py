@@ -132,7 +132,6 @@ def _run_chicago_assignment(
         max_iterations=max_iter,
         convergence_gap=0.0,
         smoothing=DensitySmoothingConfig(method="none"),
-        verbosity="ERROR",
         speed_csv_dir=str(Path(base_path).parent),
     )
 

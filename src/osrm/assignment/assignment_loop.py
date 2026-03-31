@@ -186,7 +186,7 @@ class AssignmentLoop:
             if not lg.handlers:
                 handler = logging.StreamHandler()
                 handler.setFormatter(logging.Formatter(
-                    "%(name)s %(levelname)s: %(message)s"
+                    "[%(levelname)s] %(message)s"
                 ))
                 lg.addHandler(handler)
         self.vdf = BiParabolicVDF(
@@ -539,7 +539,7 @@ class AssignmentLoop:
         t_start = time.monotonic()
         n_trips = len(trips)
         logger.info(
-            "Assignment started: %s, %d trips, max_iter=%d",
+            "%s started: %d trips, max_iter=%d",
             self.config.method.upper(), n_trips, self.config.max_iterations,
         )
         log: List[IterationResult] = []
@@ -781,10 +781,6 @@ class AssignmentLoop:
                 fw_zero_count = 0
 
             if stop_reason is not None:
-                logger.info(
-                    "%s at iteration %d (gap=%.6f)",
-                    stop_reason.value.capitalize(), n, gap,
-                )
                 break
 
         total_time = time.monotonic() - t_start
@@ -796,10 +792,11 @@ class AssignmentLoop:
         if stop_reason is None:
             stop_reason = StopReason.MAX_ITERATIONS
 
+        final_gap = log[-1].relative_gap if log else float("inf")
         logger.info(
-            "Assignment complete: %s, %d iters, gap=%.6f, %.1fs",
-            stop_reason.value, len(log),
-            log[-1].relative_gap if log else float("inf"), total_time,
+            "%s complete: %s at iter %d, gap=%.6f, %.1fs",
+            self.config.method.upper(), stop_reason.value,
+            len(log), final_gap, total_time,
         )
 
         return AssignmentResult(

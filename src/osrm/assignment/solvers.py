@@ -321,12 +321,11 @@ class MatrixFreeHillClimber:
                 n_trips=0,
             )
 
+        loop = self._make_loop()
         logger.info(
-            "HC started: %d trips, max_epochs=%d",
+            "HC started: %d trips, epochs=%d",
             len(all_trips), max_epochs,
         )
-
-        loop = self._make_loop()
         engine = loop._create_engine()
 
         snapped_trips = loop._snap_trips(engine, all_trips)
@@ -410,7 +409,7 @@ class MatrixFreeHillClimber:
             now = time.monotonic()
             if now - _last_log >= _LOG_INTERVAL_S:
                 logger.info(
-                    "S%d: TSTT=%.0f, speed=%.1f km/h, max_k/kj=%.2f",
+                    "E0:S%d TSTT=%.0f speed=%.1f km/h k/kj=%.2f",
                     batch.batch_index, batch_tstt, mean_speed, max_k_over_kj,
                 )
                 _last_log = now
