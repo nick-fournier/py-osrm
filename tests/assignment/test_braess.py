@@ -1025,6 +1025,23 @@ def generate_braess_report(
     # [4]=slice runtime, [5:]=MFD (handled separately above)
     for i in range(2, 5):
         hc_descriptions[i] = hc_descriptions[i].replace("<h2>", "<h3>").replace("</h2>", "</h3>")
+
+    # Enrich state evolution description with convergence summary
+    rr_paradox_text = (
+        f"The Braess paradox emerges at {rr_pct:+.1f}% &mdash; confirming "
+        "convergence toward approximate Wardrop equilibrium."
+        if rr_pct > 0 else
+        f"The Braess paradox does not emerge ({rr_pct:+.1f}%)."
+    )
+    epochs_w = case_with.result.epoch_results
+    epochs_wo = case_without.result.epoch_results
+    hc_descriptions[3] += (
+        f"<p><b>Reroute convergence:</b> {n_epochs_w} epoch(s) with shortcut, "
+        f"{len(epochs_wo)} without. "
+        f"Final gap: with&nbsp;=&nbsp;{rr_gap_w_str}, without&nbsp;=&nbsp;{rr_gap_wo_str}. "
+        f"{rr_paradox_text}</p>"
+    )
+
     figs.extend(hc_figs[2:5])
     descriptions.extend(hc_descriptions[2:5])
 
@@ -1080,9 +1097,10 @@ def generate_braess_report(
     )
     figs.append(fig_sweep)
     descriptions.append(
-        "<h3>Slice Sensitivity</h3>"
+        "<h3>Slice Sensitivity (Greedy Only)</h3>"
         "<p>TSTT delta (with-shortcut vs without-shortcut) as a function of "
-        "the number of departure slices.  The dotted grey line at 0% is where "
+        "the number of departure slices, using greedy loading only (E0, no reroute epochs).  "
+        "The dotted grey line at 0% is where "
         "the Braess paradox would emerge (positive delta).  The delta never "
         "crosses zero &mdash; the shortcut <b>always helps</b> under hill-climber "
         "loading.</p>"
@@ -1095,63 +1113,6 @@ def generate_braess_report(
         "equilibrium phenomenon that requires global re-routing; greedy "
         "incremental loading never reaches the collectively sub-optimal "
         "state.</p>"
-    )
-
-    # -------------------------------------------------------------------
-    # 7c. Reroute Epoch Gap Convergence
-    # -------------------------------------------------------------------
-    # Build gap-per-epoch chart for both with and without scenarios
-    epochs_w = case_with.result.epoch_results
-    epochs_wo = case_without.result.epoch_results
-
-    fig_epoch = go.Figure()
-    if epochs_w:
-        fig_epoch.add_trace(go.Scatter(
-            x=[f"E{e.epoch}" for e in epochs_w],
-            y=[e.gap for e in epochs_w if e.gap is not None],
-            mode="lines+markers",
-            name="With Shortcut",
-            line=dict(color="#E65100", width=2.5),
-            marker=dict(size=8),
-        ))
-    if epochs_wo:
-        fig_epoch.add_trace(go.Scatter(
-            x=[f"E{e.epoch}" for e in epochs_wo],
-            y=[e.gap for e in epochs_wo if e.gap is not None],
-            mode="lines+markers",
-            name="Without Shortcut",
-            line=dict(color="#FFB74D", width=2.5),
-            marker=dict(size=8),
-        ))
-    fig_epoch.add_hline(
-        y=0.001, line_dash="dot", line_color="#999",
-        annotation_text="gap threshold (0.001)",
-    )
-    fig_epoch.update_layout(
-        title="HC Rerouted: Gap per Epoch",
-        xaxis_title="Epoch",
-        yaxis_title="Sampled Wardrop Gap",
-        yaxis_type="log",
-        template="plotly_white",
-    )
-    figs.append(fig_epoch)
-
-    rr_paradox_text = (
-        f"The Braess paradox emerges at {rr_pct:+.1f}% &mdash; confirming "
-        "convergence toward approximate Wardrop equilibrium."
-        if rr_pct > 0 else
-        f"The Braess paradox does not emerge ({rr_pct:+.1f}%)."
-    )
-    descriptions.append(
-        "<h3>Reroute Epoch Convergence</h3>"
-        "<p>After greedy loading (slices S0&ndash;S9), reroute epochs iterate through all "
-        "slices oldest-first. Each slice's density is subtracted, re-routed on the residual "
-        "network, and re-added (notation: E1:S0 = epoch 1, slice 0). "
-        "This Gauss-Seidel approach avoids full-network AON oscillation.</p>"
-        f"<p>Results: {n_epochs_w} epoch(s) with shortcut, "
-        f"{len(epochs_wo)} without. "
-        f"Final gap: with = {rr_gap_w_str}, without = {rr_gap_wo_str}. "
-        f"{rr_paradox_text}</p>"
     )
 
     # ===================================================================
