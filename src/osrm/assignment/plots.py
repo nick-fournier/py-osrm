@@ -1058,13 +1058,19 @@ def generate_validation_report(
     logger.info("[%s] Building MFD scatter plots...", network_name)
     _add_mfd_section(figs, descriptions, state, detail_scale)
 
-    # --- Insert congestion map at position 0 (before sweep/convergence) ---
+    # --- Insert congestion map + table at position 0 (before sweep) ---
     logger.info("[%s] Building congestion map...", network_name)
     map_figs: list[go.Figure | None] = []
     map_descs: list[str] = []
     _add_congestion_map_section(
         map_figs, map_descs, network_name, node_coords, state,
-        link_attrs, detail_scale,
+        link_attrs, meta, detail_scale,
+    )
+
+    logger.info("[%s] Building link state table...", network_name)
+    _add_link_table_section(
+        map_figs, map_descs, state, link_attrs, node_coords,
+        detail_scale, total_demand,
     )
     figs[0:0] = map_figs
     descriptions[0:0] = map_descs
@@ -1076,12 +1082,6 @@ def generate_validation_report(
             figs, descriptions, state, ref, link_attrs, detail_scale,
         )
 
-    # --- 5. Link state table (at end — large for big networks) ---
-    logger.info("[%s] Building link state table...", network_name)
-    _add_link_table_section(
-        figs, descriptions, state, link_attrs, node_coords,
-        detail_scale, total_demand,
-    )
 
     # Compose intro
     lane_counts = [a["n_lanes"] for a in link_attrs.values()]
@@ -1176,7 +1176,7 @@ def _add_topology_section(figs, descriptions, name, nodes, link_attrs,
 
 
 def _add_congestion_map_section(figs, descriptions, name, nodes, state,
-                                 link_attrs, detail_scale):
+                                 link_attrs, meta, detail_scale):
     """Network map with links colored by k/k_j density ratio."""
     fig = go.Figure()
 
@@ -1271,6 +1271,39 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
         hoverinfo="text",
         showlegend=False,
     ))
+
+    # Zone centroids (trip origins/destinations)
+    centroids = meta.get("zone_centroids", {})
+    od = meta.get("od_matrix")
+    if centroids and od is not None:
+        orig_vol = od.sum(axis=1) * detail_scale
+        dest_vol = od.sum(axis=0) * detail_scale
+        max_vol = max(float(orig_vol.max()), float(dest_vol.max()), 1)
+        zx, zy, zsz, zhover = [], [], [], []
+        for z_id, (lon, lat) in sorted(centroids.items()):
+            zi = z_id - 1
+            ov = float(orig_vol[zi]) if zi < len(orig_vol) else 0
+            dv = float(dest_vol[zi]) if zi < len(dest_vol) else 0
+            sz = 6 + 20 * ((ov + dv) / (2 * max_vol))
+            zx.append(lon)
+            zy.append(lat)
+            zsz.append(sz)
+            zhover.append(
+                f"Zone {z_id}<br>"
+                f"Origins: {ov:,.0f} vph<br>"
+                f"Destinations: {dv:,.0f} vph"
+            )
+        fig.add_trace(go.Scatter(
+            x=zx, y=zy, mode="markers",
+            marker=dict(
+                size=zsz, color="#7B1FA2", opacity=0.6,
+                symbol="diamond",
+                line=dict(width=1, color="white"),
+            ),
+            hovertext=zhover, hoverinfo="text",
+            name="Zone centroids",
+            showlegend=True,
+        ))
 
     fig.update_layout(
         title=f"{name} Congestion Map ({detail_scale:.0%} demand)",
@@ -1590,7 +1623,6 @@ function filterTable() {{
 }}
 
 function highlightLink(tr) {{
-    // Deselect previous row
     if (_prevHighlight) _prevHighlight.style.background = '';
     tr.style.background = '#FFF9C4';
     _prevHighlight = tr;
@@ -1599,30 +1631,25 @@ function highlightLink(tr) {{
     var pt = linkMidpoints[linkId];
     if (!pt) return;
 
-    // Find the congestion map div (fig-0)
     var mapDiv = document.getElementById('fig-0');
     if (!mapDiv) return;
 
-    // Add/update a highlight annotation
-    var ann = {{
-        x: pt[0], y: pt[1],
-        xref: 'x', yref: 'y',
-        text: linkId,
-        showarrow: true,
-        arrowhead: 2, arrowsize: 1.5, arrowcolor: '#000',
-        font: {{ size: 12, color: '#000' }},
-        bgcolor: '#FFF9C4',
-        bordercolor: '#333',
-        borderwidth: 1,
-        borderpad: 3,
-    }};
+    // Annotation only — no zoom
     Plotly.relayout(mapDiv, {{
-        annotations: [ann],
-        'xaxis.range': [pt[0] - 0.015, pt[0] + 0.015],
-        'yaxis.range': [pt[1] - 0.008, pt[1] + 0.008],
+        annotations: [{{
+            x: pt[0], y: pt[1],
+            xref: 'x', yref: 'y',
+            text: '<b>' + linkId + '</b>',
+            showarrow: true,
+            arrowhead: 2, arrowsize: 1.5, arrowcolor: '#000',
+            font: {{ size: 12, color: '#000' }},
+            bgcolor: '#FFF9C4',
+            bordercolor: '#333',
+            borderwidth: 1,
+            borderpad: 3,
+        }}],
     }});
 
-    // Scroll map into view
     mapDiv.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
 }}
 </script>'''
