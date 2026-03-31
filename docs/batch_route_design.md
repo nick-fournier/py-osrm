@@ -199,3 +199,41 @@ Conservative estimate: 5x improvement over current ThreadPoolExecutor.
 3. `CMakeLists.txt` — Verify TBB link (likely already present)
 4. `tests/test_bulk.py` — Add `BatchRoute` correctness + performance tests
 5. `src/osrm/__init__.py` — Expose `BatchRoute` in the Python API if needed
+
+## Future: Shortest-Path-Tree Assignment (OSRM Core PR)
+
+### Motivation
+
+Even with BatchRoute (51K routes/s), large networks are bottlenecked by
+routing 93K+ individual OD pairs per iteration.  Commercial tools (EMME,
+VISUM) avoid this entirely by computing **one shortest-path tree per origin
+zone** and loading all destinations simultaneously.
+
+For Chicago Sketch: **387 trees vs 93,000 routes = 240× fewer routing ops.**
+
+### Approach
+
+Add a `TableWithAnnotations` or `TreeAssign` method to OSRM core that:
+
+1. Computes a shortest-path tree from a single origin to all destinations
+   (OSRM's Table service already does this internally for the cost matrix)
+2. Traces back each destination→origin path through the tree
+3. Returns **per-link flow accumulation** rather than individual route geometries
+4. Accepts a demand vector so accumulation happens entirely in C++
+
+This is fundamentally a new OSRM service endpoint — a core PR, not a wrapper
+change.  MLD's multi-level Dijkstra would need adaptation to emit the tree
+structure (currently it only emits costs).
+
+### Expected gain
+
+- Per-iteration: **4.2s → 0.1–0.5s** (93K routes → 387 trees)
+- 50-iteration Chicago Sketch: **210s → 5–25s**
+- Enables Chicago Regional (39K links, 100K+ OD pairs) in real-time
+
+### LOE
+
+- ~500–1000 lines C++ in OSRM core (table service extension)
+- Requires deep understanding of MLD/CH internals
+- Separate OSRM fork or PR — not a py-osrm change
+- Estimated: 1–2 weeks
