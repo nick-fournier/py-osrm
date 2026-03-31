@@ -13,6 +13,7 @@ instead of duplicating logic.
 
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence
@@ -148,6 +149,19 @@ class HillClimberBatchResult:
 
 
 @dataclass
+class RerouteEpochResult:
+    """Metrics for one reroute epoch (full pass through all slices)."""
+
+    epoch: int
+    slices_rerouted: int
+    routes_changed: int
+    epoch_time_s: float
+    gap: Optional[float]
+    max_k_over_kj: float
+    mean_speed_kmh: float
+
+
+@dataclass
 class HillClimberResult:
     """Final result of the wrapper-side hill-climber MVP."""
 
@@ -156,6 +170,7 @@ class HillClimberResult:
     total_time_s: float
     n_trips: int
     slice_ledger: Optional[SliceLedger] = None
+    epoch_results: List[RerouteEpochResult] = field(default_factory=list)
 
     @property
     def n_batches(self) -> int:
@@ -251,6 +266,9 @@ class MatrixFreeHillClimber:
         max_batch_size: Optional[int] = None,
         state_patch=None,
         progress_callback=None,
+        max_epochs: int = 0,
+        gap_threshold: float = 0.01,
+        gap_sample_floor: int = 10_000,
     ) -> HillClimberResult:
         """Run a stateful wrapper-side hill-climber over ordered trip batches.
 
@@ -262,6 +280,11 @@ class MatrixFreeHillClimber:
         2. Accumulates additional density/volume onto the shared network state
         3. Recomputes VDF speeds
         4. Re-customizes OSRM and reloads the engine
+
+        After the initial load, if ``max_epochs > 0``, reroute epochs iterate
+        through slices oldest-first, subtracting old density, re-routing on
+        the updated state, and adding new density.  Stops when the sampled
+        Wardrop gap falls below ``gap_threshold`` or ``max_epochs`` is reached.
 
         This is the intended MVP for matrix-free loading before the OSRM
         multi-period patch is available.
@@ -360,13 +383,209 @@ class MatrixFreeHillClimber:
             if progress_callback:
                 progress_callback(batch_result)
 
+        # --- Reroute epochs (tail-eating) ---
+        epoch_results: List[RerouteEpochResult] = []
+        for epoch_idx in range(max_epochs):
+            epoch_start = time.monotonic()
+            routes_changed = 0
+
+            for slice_idx in range(len(ledger)):
+                entry = ledger[slice_idx]
+
+                # 1. Subtract this slice's density contribution
+                state.density_vpkm = np.clip(
+                    state.density_vpkm - entry.density,
+                    0.0,
+                    state.jam_density,
+                )
+                loop._update_state(state)
+
+                # 2. Customize OSRM with reduced-state speeds
+                csv_path = loop.writer.write_from_state(state, only_changed=True)
+                osrm_module.customize(
+                    self.base_path,
+                    segment_speed_file=str(csv_path),
+                    verbosity=self.config.verbosity,
+                )
+                del engine
+                engine = loop._create_engine()
+
+                # 3. Re-route this slice's trips (randomize OD order)
+                shuffled_trips = list(entry.trips)
+                random.shuffle(shuffled_trips)
+                new_density, new_volume, new_tstt = loop._route_and_accumulate(
+                    engine, shuffled_trips, state,
+                )
+
+                # Pad if network grew during rerouting
+                if len(new_density) < state.n_edges:
+                    pad = state.n_edges - len(new_density)
+                    new_density = np.append(new_density, np.zeros(pad))
+                    new_volume = np.append(new_volume, np.zeros(pad))
+                ledger.pad_all(state.n_edges)
+
+                # Track route changes (density shifted materially)
+                density_delta = np.abs(new_density - entry.density)
+                if density_delta.sum() > 0.01 * entry.density.sum():
+                    routes_changed += 1
+
+                # 4. Update ledger entry with new contribution
+                entry.density = new_density.copy()
+                entry.volume = new_volume.copy()
+                entry.tstt = new_tstt
+
+                # 5. Add new density back
+                state.density_vpkm = np.clip(
+                    state.density_vpkm + new_density,
+                    0.0,
+                    state.jam_density,
+                )
+                if state_patch:
+                    state_patch(state)
+                loop.smoother.build_adjacency(state.edge_ids, state.length_m)
+                loop._update_state(state)
+
+            # Customize once more after full epoch
+            csv_path = loop.writer.write_from_state(state, only_changed=True)
+            osrm_module.customize(
+                self.base_path,
+                segment_speed_file=str(csv_path),
+                verbosity=self.config.verbosity,
+            )
+            del engine
+            engine = loop._create_engine()
+
+            # Gap check via sampled Table
+            gap = self._sampled_gap(
+                engine, ledger, state, loop,
+                sample_floor=gap_sample_floor,
+            )
+
+            max_k_over_kj = float(
+                np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
+            )
+            mean_speed = float(np.mean(state.speed_kmh))
+
+            epoch_result = RerouteEpochResult(
+                epoch=epoch_idx + 1,
+                slices_rerouted=len(ledger),
+                routes_changed=routes_changed,
+                epoch_time_s=time.monotonic() - epoch_start,
+                gap=gap,
+                max_k_over_kj=max_k_over_kj,
+                mean_speed_kmh=mean_speed,
+            )
+            epoch_results.append(epoch_result)
+
+            if progress_callback:
+                progress_callback(epoch_result)
+
+            if gap is not None and gap < gap_threshold:
+                break
+
         return HillClimberResult(
             network_state=state,
             batch_results=batch_results,
             total_time_s=time.monotonic() - started,
             n_trips=len(snapped_trips),
             slice_ledger=ledger,
+            epoch_results=epoch_results,
         )
+
+    def _sampled_gap(
+        self,
+        engine,
+        ledger: SliceLedger,
+        state: NetworkState,
+        loop: AssignmentLoop,
+        *,
+        sample_floor: int = 10_000,
+    ) -> Optional[float]:
+        """Compute Wardrop relative gap from (sampled) Table API.
+
+        Collects unique OD pairs from the ledger, samples up to
+        ``sample_floor`` if the total exceeds that threshold, then
+        compares shortest-path travel times (from Table API) against
+        assigned route travel times (from current state speeds).
+
+        Returns
+        -------
+        float or None
+            Relative gap: sum(assigned - shortest) / sum(shortest).
+            None if no OD pairs could be evaluated.
+        """
+        import random
+
+        # Collect unique OD pairs with their total assigned volume
+        od_pairs: dict[tuple[float, float, float, float], float] = {}
+        for entry in ledger:
+            for trip in entry.trips:
+                key = (trip.origin[0], trip.origin[1],
+                       trip.destination[0], trip.destination[1])
+                od_pairs[key] = od_pairs.get(key, 0.0) + trip.volume
+
+        if not od_pairs:
+            return None
+
+        # Sample if needed
+        all_keys = list(od_pairs.keys())
+        if len(all_keys) > sample_floor:
+            sampled_keys = random.sample(all_keys, sample_floor)
+        else:
+            sampled_keys = all_keys
+
+        # Build trips for Table API
+        sample_trips = [
+            DemandTrip(origin=(k[0], k[1]), destination=(k[2], k[3]),
+               volume=od_pairs[k])
+            for k in sampled_keys
+        ]
+
+        # Get shortest-path times via routing on current (congested) state
+        raw_results = loop._batch_route_raw(engine, sample_trips)
+
+        sum_shortest = 0.0
+        sum_assigned = 0.0
+        evaluated = 0
+
+        for trip_idx, raw in enumerate(raw_results):
+            if raw is None:
+                continue
+            routes = raw["routes"]
+            if not routes:
+                continue
+            trip = sample_trips[trip_idx]
+            shortest_time = float(routes[0]["duration"])
+
+            # Assigned time: compute from current state speeds along the
+            # route edges.  This uses the VDF-based speeds (which may differ
+            # slightly from OSRM's quantized speeds).
+            route = routes[0]
+            assigned_time = 0.0
+            for leg in route["legs"]:
+                ann = leg["annotation"]
+                nodes = ann["nodes"]
+                for i in range(len(nodes) - 1):
+                    idx = state.edge_ordinal(int(nodes[i]), int(nodes[i + 1]))
+                    if idx is not None:
+                        v = max(state.speed_kmh[idx], 1.08)
+                        assigned_time += state.length_m[idx] / (v / 3.6)
+                    else:
+                        # Edge not in state — use OSRM annotation speed
+                        speeds = ann.get("speed", [])
+                        spd = (speeds[i] * 3.6) if i < len(speeds) and speeds[i] > 0 else 1.08
+                        dists = ann.get("distance", [])
+                        dist = dists[i] if i < len(dists) else 0.0
+                        assigned_time += dist / (spd / 3.6)
+
+            sum_shortest += trip.volume * shortest_time
+            sum_assigned += trip.volume * assigned_time
+            evaluated += 1
+
+        if evaluated == 0 or sum_shortest < 1e-9:
+            return None
+
+        return (sum_assigned - sum_shortest) / sum_shortest
 
     def iter_time_slices(
         self,
