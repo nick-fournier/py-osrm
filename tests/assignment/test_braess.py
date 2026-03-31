@@ -296,7 +296,7 @@ class TestBraessParadox:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "with_run",
             demand_scale=1.0,
-            n_slices=4,
+            n_slices=20,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         case_without = run_hillclimber_case(
@@ -306,7 +306,7 @@ class TestBraessParadox:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "without_run",
             demand_scale=1.0,
-            n_slices=4,
+            n_slices=20,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
 
@@ -877,7 +877,7 @@ def generate_braess_hillclimber_report(
         )],
         run_dir=tmp_path / "with_run",
         demand_scale=1.0,
-        n_slices=4,
+        n_slices=20,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
     )
     case_without = run_hillclimber_case(
@@ -891,7 +891,7 @@ def generate_braess_hillclimber_report(
         )],
         run_dir=tmp_path / "without_run",
         demand_scale=1.0,
-        n_slices=4,
+        n_slices=20,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
     )
 
