@@ -18,12 +18,14 @@ from osrm.assignment import (
     AssignmentConfig,
     AssignmentLoop,
     DensitySmoothingConfig,
+    MatrixFreeHillClimber,
 )
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import braess_network
 from .hillclimber_validation import (
     build_hillclimber_report_sections,
     run_hillclimber_case,
+    slice_trips_by_departure,
 )
 
 
@@ -318,6 +320,62 @@ class TestBraessParadox:
             f"but with={with_tstt:,.0f} >= without={without_tstt:,.0f}"
         )
 
+    def test_reroute_epochs_reproduce_paradox(self, tmp_path):
+        """Reroute epochs restore equilibrium and reproduce the paradox.
+
+        After the initial HC greedy load (which sees no paradox), a single
+        reroute epoch iterates through slices oldest-first, subtracting
+        old density and re-routing on the updated state. This approaches
+        Wardrop equilibrium and the Braess paradox should emerge.
+        """
+        from osrm.assignment.osm_synthesis import patch_braess_lanes
+
+        demand = self.DEMAND
+
+        def _run_with_reroute(base, meta):
+            trips = [DemandTrip(
+                origin=meta["origin"],
+                destination=meta["destination"],
+                volume=demand,
+            )]
+            sliced = slice_trips_by_departure(
+                trips, n_slices=20, bin_width_s=3600.0,
+            )
+            config = AssignmentConfig(bin_width_s=3600.0, verbosity="NONE")
+            hc = MatrixFreeHillClimber(base, config)
+            return hc.run_stream(
+                sliced,
+                state_patch=lambda s: patch_braess_lanes(s, meta),
+                max_epochs=3,
+                gap_threshold=0.001,
+            )
+
+        base_with, meta_with = _prepare_network(tmp_path / "with", with_shortcut=True)
+        base_without, meta_without = _prepare_network(
+            tmp_path / "without", with_shortcut=False,
+        )
+        result_w = _run_with_reroute(base_with, meta_with)
+        result_wo = _run_with_reroute(base_without, meta_without)
+
+        tstt_w = sum(e.tstt for e in result_w.slice_ledger)
+        tstt_wo = sum(e.tstt for e in result_wo.slice_ledger)
+        pct = (tstt_w / tstt_wo - 1) * 100
+
+        # Paradox should appear: shortcut INCREASES TSTT after rerouting
+        assert tstt_w > tstt_wo, (
+            f"Expected Braess paradox after reroute epochs, "
+            f"but with={tstt_w:,.0f} <= without={tstt_wo:,.0f} ({pct:+.1f}%)"
+        )
+        # Should be a material increase, not noise
+        assert pct > 2.0, (
+            f"Paradox too weak: {pct:.1f}% TSTT increase, expected >2%"
+        )
+        # Gap should be near-zero
+        assert result_w.epoch_results, "Expected at least one reroute epoch"
+        assert result_w.epoch_results[-1].gap < 0.01, (
+            f"Gap too large: {result_w.epoch_results[-1].gap:.6f}"
+        )
+
 
 def _braess_state_table(state_w, state_wo):
     """Build a side-by-side link state table for the Braess diamond.
@@ -486,6 +544,144 @@ def _braess_route_tt_table(state_w, state_wo):
             f'</tr>'
         )
 
+    html += '</tbody></table>'
+    return html
+
+
+def _braess_three_way_state_table(state_wo, state_w_greedy, state_w_rerouted):
+    """Three-column link state table: without / with-greedy / with-rerouted."""
+    from collections import OrderedDict
+
+    scenarios = [
+        (state_wo, "Without"),
+        (state_w_greedy, "Greedy"),
+        (state_w_rerouted, "Rerouted"),
+    ]
+    rows = []
+    for state, scenario in scenarios:
+        for i in range(state.n_edges):
+            label = f"{int(state.edge_ids[i,0])}&rarr;{int(state.edge_ids[i,1])}"
+            v = max(state.speed_kmh[i], 1.08)
+            tt = state.length_m[i] / (v / 3.6)
+            rows.append((label, scenario, state.density_vpkm[i], state.speed_kmh[i],
+                         state.freeflow_kmh[i], state.flow_vph[i], state.jam_density[i],
+                         state.n_lanes[i], state.length_m[i], tt))
+
+    pivot: dict[str, dict] = OrderedDict()
+    for label, scenario, k, v, vf, q, kj, lanes, length, tt in rows:
+        pivot.setdefault(label, {"lanes": lanes, "kj": kj, "vf": vf, "length": length})[scenario] = (k, v, q, tt)
+
+    col_headers = [
+        ("Without Shortcut", "Without"),
+        ("With (Greedy HC)", "Greedy"),
+        ("With (Rerouted)", "Rerouted"),
+    ]
+
+    html = (
+        '<table style="border-collapse:collapse; width:100%; max-width:1400px; '
+        'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.82em;">'
+        '<thead><tr style="border-bottom:2px solid #333;">'
+        '<th style="text-align:left;padding:8px;">Link</th>'
+        '<th style="padding:6px;">Len</th>'
+        '<th style="padding:6px;">Ln</th>'
+        '<th style="padding:6px;">k<sub>j</sub></th>'
+        '<th style="padding:6px;">v<sub>f</sub></th>'
+    )
+    for title, _ in col_headers:
+        html += f'<th colspan="4" style="text-align:center;padding:6px;border-left:2px solid #ccc;">{title}</th>'
+    html += '</tr><tr style="border-bottom:1px solid #999;">'
+    html += '<th></th><th></th><th></th><th></th><th></th>'
+    for _ in col_headers:
+        html += ('<th style="padding:3px 5px;border-left:2px solid #ccc;">k</th>'
+                 '<th style="padding:3px 5px;">v</th>'
+                 '<th style="padding:3px 5px;">q</th>'
+                 '<th style="padding:3px 5px;">t</th>')
+    html += '</tr></thead><tbody>'
+
+    def _v_color(v, vf):
+        r = v / vf if vf > 0 else 1
+        return "#F44336" if r < 0.1 else "#FF9800" if r < 0.5 else "#4CAF50"
+
+    def _k_style(k, kj):
+        r = k / kj if kj > 0 else 0
+        if r > 0.9: return "font-weight:700;color:#F44336;"
+        if r > 0.5: return "color:#FF9800;"
+        return ""
+
+    def _fmt_time(s):
+        return f"{s/3600:.1f}h" if s >= 3600 else f"{s:.0f}s"
+
+    for link, info in pivot.items():
+        kj, vf = info["kj"], info["vf"]
+        length_km = info["length"] / 1000.0
+        ff_time = info["length"] / (vf / 3.6) if vf > 0 else 0
+
+        def _cells(vals):
+            if vals is None:
+                return ('<td style="text-align:right;padding:3px 5px;border-left:2px solid #ccc;">&mdash;</td>'
+                        '<td style="text-align:right;padding:3px 5px;">&mdash;</td>'
+                        '<td style="text-align:right;padding:3px 5px;">&mdash;</td>'
+                        '<td style="text-align:right;padding:3px 5px;">&mdash;</td>')
+            k, v, q, tt = vals
+            tt_r = tt / ff_time if ff_time > 0 else 1
+            tt_c = "#F44336" if tt_r > 2 else "#FF9800" if tt_r > 1.3 else "#4CAF50"
+            return (
+                f'<td style="text-align:right;padding:3px 5px;border-left:2px solid #ccc;{_k_style(k, kj)}">{k:.1f}</td>'
+                f'<td style="text-align:right;padding:3px 5px;color:{_v_color(v, vf)};">{v:.1f}</td>'
+                f'<td style="text-align:right;padding:3px 5px;">{q:.0f}</td>'
+                f'<td style="text-align:right;padding:3px 5px;color:{tt_c};">{_fmt_time(tt)}</td>')
+
+        cells = "".join(_cells(info.get(key)) for _, key in col_headers)
+        html += (
+            f'<tr style="border-bottom:1px solid #e0e0e0;">'
+            f'<td style="padding:3px 5px;font-weight:600;">{link}</td>'
+            f'<td style="text-align:center;padding:3px 5px;">{length_km:.1f}</td>'
+            f'<td style="text-align:center;padding:3px 5px;">{info["lanes"]}</td>'
+            f'<td style="text-align:center;padding:3px 5px;">{kj:.0f}</td>'
+            f'<td style="text-align:center;padding:3px 5px;">{vf:.0f}</td>'
+            f'{cells}</tr>')
+    html += '</tbody></table>'
+    return html
+
+
+def _braess_three_way_route_tt(state_wo, state_w_greedy, state_w_rerouted):
+    """Three-column route travel time table."""
+    routes = {
+        "Upper (1&rarr;3&rarr;2)": [("1", "3"), ("3", "2")],
+        "Lower (1&rarr;4&rarr;2)": [("1", "4"), ("4", "2")],
+        "Shortcut (1&rarr;3&rarr;4&rarr;2)": [("1", "3"), ("3", "4"), ("4", "2")],
+    }
+
+    def _link_times(state):
+        times = {}
+        for i in range(state.n_edges):
+            f_id = str(int(state.edge_ids[i, 0]))
+            t_id = str(int(state.edge_ids[i, 1]))
+            v = max(state.speed_kmh[i], 1.08)
+            times[(f_id, t_id)] = state.length_m[i] / (v / 3.6)
+        return times
+
+    all_times = [_link_times(s) for s in [state_wo, state_w_greedy, state_w_rerouted]]
+    col_names = ["Without Shortcut", "With (Greedy HC)", "With (Rerouted)"]
+
+    html = (
+        '<table style="border-collapse:collapse; width:100%; max-width:800px; '
+        'margin:12px auto; font-family:system-ui,sans-serif; font-size:0.85em;">'
+        '<thead><tr style="border-bottom:2px solid #333;">'
+        '<th style="text-align:left;padding:8px;">Route</th>'
+    )
+    for cn in col_names:
+        html += f'<th style="text-align:right;padding:8px;">{cn}</th>'
+    html += '</tr></thead><tbody>'
+
+    for route_name, links in routes.items():
+        html += f'<tr style="border-bottom:1px solid #e0e0e0;"><td style="padding:6px 8px;font-weight:600;">{route_name}</td>'
+        for times in all_times:
+            total = None
+            if all(lk in times for lk in links):
+                total = sum(times[lk] for lk in links)
+            html += f'<td style="text-align:right;padding:6px 8px;">{f"{total:.1f}s" if total is not None else "&mdash;"}</td>'
+        html += '</tr>'
     html += '</tbody></table>'
     return html
 
@@ -1016,49 +1212,127 @@ def generate_braess_hillclimber_report(
         "state.</p>"
     )
 
-    # --- TSTT bar comparison ---
-    fig = go.Figure()
-    labels = ["Without shortcut", "With shortcut"]
-    total_tstt = [
-        sum(b.batch_tstt for b in case_without.result.batch_results),
-        sum(b.batch_tstt for b in case_with.result.batch_results),
-    ]
-    fig.add_trace(go.Bar(
-        x=labels,
-        y=total_tstt,
-        marker_color=["#1565C0", "#D32F2F"],
-        hovertext=[f"TSTT={v:,.0f}" for v in total_tstt],
+    # ===================================================================
+    # Reroute epochs — approach equilibrium
+    # ===================================================================
+    def _run_reroute(base, meta_r):
+        trips = [DemandTrip(
+            origin=meta_r["origin"], destination=meta_r["destination"],
+            volume=demand,
+        )]
+        sliced = slice_trips_by_departure(trips, n_slices=20, bin_width_s=3600.0)
+        config = AssignmentConfig(bin_width_s=3600.0, verbosity="NONE")
+        hc = MatrixFreeHillClimber(base, config)
+        return hc.run_stream(
+            sliced,
+            state_patch=lambda s: patch_braess_lanes(s, meta_r),
+            max_epochs=5,
+            gap_threshold=0.001,
+        )
+
+    rr_base_w, rr_meta_w = _prepare_network(tmp_path / "rr_with", with_shortcut=True)
+    rr_base_wo, rr_meta_wo = _prepare_network(tmp_path / "rr_without", with_shortcut=False)
+    rr_result_w = _run_reroute(rr_base_w, rr_meta_w)
+    rr_result_wo = _run_reroute(rr_base_wo, rr_meta_wo)
+
+    rr_tstt_w = sum(e.tstt for e in rr_result_w.slice_ledger)
+    rr_tstt_wo = sum(e.tstt for e in rr_result_wo.slice_ledger)
+    rr_pct = (rr_tstt_w / rr_tstt_wo - 1) * 100 if rr_tstt_wo else 0.0
+
+    # Greedy HC TSTTs (for the grouped chart)
+    hc_tstt_wo = sum(b.batch_tstt for b in case_without.result.batch_results)
+    hc_tstt_w = sum(b.batch_tstt for b in case_with.result.batch_results)
+    hc_pct = (hc_tstt_w / hc_tstt_wo - 1) * 100 if hc_tstt_wo else 0.0
+
+    # --- Combined TSTT bar chart: greedy vs rerouted ---
+    fig_tstt = go.Figure()
+    fig_tstt.add_trace(go.Bar(
+        name="HC Greedy",
+        x=["Without shortcut", "With shortcut"],
+        y=[hc_tstt_wo, hc_tstt_w],
+        marker_color=["#90CAF9", "#EF9A9A"],
+        hovertext=[f"Greedy: {v:,.0f}" for v in [hc_tstt_wo, hc_tstt_w]],
         hoverinfo="text",
     ))
-    fig.update_layout(
-        title="Braess Hill-Climber Total System Travel Time",
+    fig_tstt.add_trace(go.Bar(
+        name="After Rerouting",
+        x=["Without shortcut", "With shortcut"],
+        y=[rr_tstt_wo, rr_tstt_w],
+        marker_color=["#1565C0", "#D32F2F"],
+        hovertext=[f"Rerouted: {v:,.0f}" for v in [rr_tstt_wo, rr_tstt_w]],
+        hoverinfo="text",
+    ))
+    fig_tstt.update_layout(
+        title="TSTT: Greedy HC vs After Reroute Epochs",
         xaxis_title="Scenario",
-        yaxis_title="Cumulative batch TSTT (veh-seconds)",
+        yaxis_title="TSTT (veh-seconds)",
+        barmode="group",
         template="plotly_white",
-        showlegend=False,
     )
-    figs.append(fig)
-    pct = (total_tstt[1] / total_tstt[0] - 1) * 100 if total_tstt[0] else 0.0
+    figs.append(fig_tstt)
+
+    n_epochs_w = len(rr_result_w.epoch_results)
+    gap_w = rr_result_w.epoch_results[-1].gap if rr_result_w.epoch_results else None
+    gap_wo = rr_result_wo.epoch_results[-1].gap if rr_result_wo.epoch_results else None
+    gap_w_str = f"{gap_w:.6f}" if gap_w is not None else "n/a"
+    gap_wo_str = f"{gap_wo:.6f}" if gap_wo is not None else "n/a"
+    paradox_msg = (
+        " <b>Braess paradox confirmed</b>: adding the shortcut "
+        "<i>increases</i> total travel time at equilibrium."
+        if rr_pct > 0 else
+        " Paradox not observed after rerouting."
+    )
     descriptions.append(
-        "<h2>Braess comparison</h2>"
-        f"<p>Hill-climber cumulative TSTT is <b>{pct:+.1f}%</b> relative to the "
-        "without-shortcut case.  Under incremental loading the shortcut provides "
-        "genuine relief (opposite of the equilibrium paradox) because no single "
-        "batch overloads it.</p>"
+        "<h2>TSTT: Greedy vs Rerouted</h2>"
+        "<p><b>Greedy HC</b> (light bars): shortcut <i>reduces</i> TSTT by "
+        f"<b>{abs(hc_pct):.1f}%</b> — no paradox under incremental loading.</p>"
+        f"<p><b>After {n_epochs_w} reroute epoch(s)</b> (dark bars): TSTT with "
+        f"shortcut = <b>{rr_tstt_w:,.0f}</b>, without = <b>{rr_tstt_wo:,.0f}</b>.  "
+        f"&Delta; = <b>{rr_pct:+.1f}%</b>.{paradox_msg}</p>"
+        f"<p>Final gap: with = {gap_w_str}, without = {gap_wo_str}.</p>"
+    )
+
+    # --- Combined link state: without / with-greedy / with-rerouted ---
+    figs.append(None)
+    descriptions.append(
+        """<h2>Link State Comparison</h2>
+        <p>Side-by-side link state for three scenarios: without shortcut
+        (rerouted), with shortcut (greedy HC), with shortcut (rerouted).
+        Note how rerouting redistributes traffic onto the upper route
+        (3&rarr;2) that greedy HC completely abandoned.</p>"""
+        + _braess_three_way_state_table(
+            case_without.result.network_state,
+            case_with.result.network_state,
+            rr_result_w.network_state,
+        )
+    )
+
+    # --- Combined route travel times ---
+    figs.append(None)
+    descriptions.append(
+        "<h2>Route Travel Times</h2>"
+        "<p>Per-route travel times across all three scenarios.  At "
+        "equilibrium (rerouted), all <i>used</i> routes should have "
+        "similar travel times (Wardrop condition).  Under greedy HC, "
+        "the upper route (1&rarr;3&rarr;2) is abandoned (&mdash;).</p>"
+        + _braess_three_way_route_tt(
+            case_without.result.network_state,
+            case_with.result.network_state,
+            rr_result_w.network_state,
+        )
     )
 
     _write_combined_report(
         title="Braess Hill-Climber Validation",
         intro=(
             "<p>Matrix-free hill-climber validation on the Braess diamond.  Demand "
-            f"(<b>{demand:,.0f}</b> vph) is distributed across four deterministic "
-            "departure slices for both with-shortcut and without-shortcut scenarios.</p>"
+            f"(<b>{demand:,.0f}</b> vph) is distributed across 20 departure "
+            "slices for both with-shortcut and without-shortcut scenarios.</p>"
             "<p><b>Key finding:</b> The Braess paradox does <i>not</i> appear under "
-            "incremental hill-climber loading.  The shortcut always reduces TSTT "
-            "because the greedy router never overloads it the way equilibrium does.  "
-            "The upper route (1&rarr;3&rarr;2) is completely abandoned once the "
-            "shortcut is available.  A slice-sweep confirms the gap narrows with "
-            "more batches but never crosses zero.</p>"
+            "greedy HC loading (shortcut always helps).  However, after reroute "
+            "epochs that iterate through slices subtracting/re-routing, the paradox "
+            f"<b>emerges at {rr_pct:+.1f}%</b> — confirming convergence to "
+            "approximate equilibrium.</p>"
         ),
         figures=figs,
         descriptions=descriptions,
