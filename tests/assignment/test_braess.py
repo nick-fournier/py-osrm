@@ -1021,7 +1021,7 @@ def generate_braess_report(
         detail_scale=1.0,
     )
     # [0]=congestion map, [1]=link table, [2]=slice timeline, [3]=state evolution,
-    # [4]=slice runtime, [5:]=MFD (handled separately above)
+    # [4]=slice runtime, [5]=MFD, [6:]=correlation (if ref)
     for i in range(2, 5):
         hc_descriptions[i] = hc_descriptions[i].replace("<h2>", "<h3>").replace("</h2>", "</h3>")
 

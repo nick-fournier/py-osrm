@@ -242,10 +242,12 @@ def _add_batch_sections(
     epoch_note = ""
     if epoch_results:
         n_reroute = sum(er.slices_rerouted for er in epoch_results)
+        final_gap = epoch_results[-1].gap
+        gap_str = f" Converged after {len(epoch_results)} epoch(s), final gap={final_gap:.6f}." if final_gap is not None else ""
         epoch_note = (
             f" After greedy loading (E0), {len(epoch_results)} reroute epoch(s) "
             f"re-processed all {result.batch_results[-1].batch_index + 1} slices "
-            f"({n_reroute} total reroutes). Gap computed once per epoch."
+            f"({n_reroute} total reroutes). Gap computed once per epoch.{gap_str}"
         )
     descriptions.append(
         f"<h2>State Evolution</h2>"

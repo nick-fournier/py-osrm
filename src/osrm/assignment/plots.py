@@ -455,16 +455,22 @@ def _write_combined_report(
     fig_htmls = []
     for i, fig in enumerate(figures):
         if fig is not None:
-            fig.update_layout(
-                margin=dict(l=60, r=40, t=50, b=50),
-                xaxis=dict(fixedrange=True),
-                yaxis=dict(fixedrange=True),
-                dragmode=False,
-            )
-            # Lock axes on subplots too
-            for key in list(fig.layout.to_plotly_json().keys()):
-                if key.startswith("xaxis") or key.startswith("yaxis"):
-                    fig.layout[key]["fixedrange"] = True
+            # Skip fixedrange/dragmode overrides for zoomable figures
+            if fig.layout.dragmode not in (None, False):
+                fig.update_layout(
+                    margin=dict(l=60, r=40, t=50, b=50),
+                )
+            else:
+                fig.update_layout(
+                    margin=dict(l=60, r=40, t=50, b=50),
+                    xaxis=dict(fixedrange=True),
+                    yaxis=dict(fixedrange=True),
+                    dragmode=False,
+                )
+                # Lock axes on subplots too
+                for key in list(fig.layout.to_plotly_json().keys()):
+                    if key.startswith("xaxis") or key.startswith("yaxis"):
+                        fig.layout[key]["fixedrange"] = True
             fig_htmls.append(
                 fig.to_html(full_html=False, include_plotlyjs=False, div_id=f"fig-{i}")
             )
@@ -1278,18 +1284,14 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
     # Node markers
     xs = [nodes[n][0] for n in sorted(nodes)]
     ys = [nodes[n][1] for n in sorted(nodes)]
-    show_labels = len(nodes) <= 50
     fig.add_trace(go.Scatter(
         x=xs, y=ys,
-        mode="markers+text" if show_labels else "markers",
+        mode="markers",
         marker=dict(
-            size=12 if show_labels else 3,
+            size=5,
             color="white",
             line=dict(width=1, color="#333"),
         ),
-        text=[str(n) for n in sorted(nodes)] if show_labels else None,
-        textfont=dict(size=8, color="#333") if show_labels else None,
-        textposition="middle center" if show_labels else None,
         hovertext=[f"Node {n}" for n in sorted(nodes)],
         hoverinfo="text",
         showlegend=False,
@@ -1301,16 +1303,14 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
     if centroids and od is not None:
         orig_vol = od.sum(axis=1) * detail_scale
         dest_vol = od.sum(axis=0) * detail_scale
-        max_vol = max(float(orig_vol.max()), float(dest_vol.max()), 1)
-        zx, zy, zsz, zhover = [], [], [], []
+        zx, zy, zvol, zhover = [], [], [], []
         for z_id, (lon, lat) in sorted(centroids.items()):
             zi = z_id - 1
             ov = float(orig_vol[zi]) if zi < len(orig_vol) else 0
             dv = float(dest_vol[zi]) if zi < len(dest_vol) else 0
-            sz = 6 + 20 * ((ov + dv) / (2 * max_vol))
             zx.append(lon)
             zy.append(lat)
-            zsz.append(sz)
+            zvol.append(ov + dv)
             zhover.append(
                 f"Zone {z_id}<br>"
                 f"Origins: {ov:,.0f} vph<br>"
@@ -1319,21 +1319,24 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
         fig.add_trace(go.Scatter(
             x=zx, y=zy, mode="markers",
             marker=dict(
-                size=zsz, color="#7B1FA2", opacity=0.6,
-                symbol="diamond",
+                size=8, color=zvol, opacity=0.8,
+                colorscale="Viridis",
+                colorbar=dict(title="OD Volume (vph)"),
+                symbol="circle",
                 line=dict(width=1, color="white"),
             ),
             hovertext=zhover, hoverinfo="text",
             name="Zone centroids",
-            showlegend=True,
+            showlegend=False,
         ))
 
     fig.update_layout(
         title=f"{name} Congestion Map ({detail_scale:.0%} demand)",
-        xaxis=dict(title="Longitude", scaleanchor="y", fixedrange=True),
-        yaxis=dict(title="Latitude", fixedrange=True),
+        xaxis=dict(title="Longitude", scaleanchor="y"),
+        yaxis=dict(title="Latitude"),
         template="plotly_white",
         height=500,
+        dragmode="zoom",
     )
     figs.append(fig)
 
@@ -1734,69 +1737,57 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     q_pts = vdf.density_to_flow(k_pts, vf_arr, kj_arr)
     curve_label = f"VDF (v_f={med_vf:.0f}, k_j={med_kj_lane:.0f}/lane)"
 
-    # --- Speed–Density (per lane) ---
-    fig_vk = go.Figure()
-    fig_vk.add_trace(go.Scatter(
+    # --- Combined Speed–Density and Flow–Density (per lane) ---
+    hover_labels = [
+        f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])} "
+        f"({int(n_lanes[i])}L)"
+        for i in range(state.n_edges)
+    ]
+    fig_mfd = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=["Speed–Density", "Flow–Density"],
+    )
+    # Left: speed–density scatter
+    fig_mfd.add_trace(go.Scatter(
         x=k_per_lane.tolist(), y=v.tolist(), mode="markers",
         marker=dict(size=4, color="#1565C0", opacity=0.5),
-        hovertext=[f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])} "
-                   f"({int(n_lanes[i])}L)"
-                   for i in range(state.n_edges)],
-        hoverinfo="text",
+        hovertext=hover_labels, hoverinfo="text",
         showlegend=False,
-    ))
-    fig_vk.add_trace(go.Scatter(
+    ), row=1, col=1)
+    fig_mfd.add_trace(go.Scatter(
         x=k_pts.tolist(), y=v_pts.tolist(), mode="lines",
         line=dict(color="#999", dash="dash", width=1),
-        name=curve_label,
-    ))
-    fig_vk.update_layout(
-        title=f"Speed–Density ({detail_scale:.0%} demand)",
-        xaxis_title="Density per lane (veh/km/lane)",
-        yaxis_title="Speed (km/h)",
+        name=curve_label, showlegend=True,
+    ), row=1, col=1)
+    # Right: flow–density scatter
+    fig_mfd.add_trace(go.Scatter(
+        x=k_per_lane.tolist(), y=q_per_lane.tolist(), mode="markers",
+        marker=dict(size=4, color="#D32F2F", opacity=0.5),
+        hovertext=hover_labels, hoverinfo="text",
+        showlegend=False,
+    ), row=1, col=2)
+    fig_mfd.add_trace(go.Scatter(
+        x=k_pts.tolist(), y=q_pts.tolist(), mode="lines",
+        line=dict(color="#999", dash="dash", width=1),
+        name=curve_label, showlegend=False,
+    ), row=1, col=2)
+    fig_mfd.update_xaxes(title_text="Density per lane (veh/km/lane)", rangemode="tozero")
+    fig_mfd.update_yaxes(rangemode="tozero")
+    fig_mfd.update_yaxes(title_text="Speed (km/h)", row=1, col=1)
+    fig_mfd.update_yaxes(title_text="Flow per lane (veh/hr/lane)", row=1, col=2)
+    fig_mfd.update_layout(
+        title=f"Macroscopic Fundamental Diagram ({detail_scale:.0%} demand)",
         template="plotly_white",
-        xaxis=dict(rangemode="tozero"),
-        yaxis=dict(rangemode="tozero"),
+        height=450, width=1000,
     )
-    figs.append(fig_vk)
+    figs.append(fig_mfd)
     descriptions.append(
-        "<h2>Speed–Density (MFD)</h2>"
+        "<h2>Macroscopic Fundamental Diagram (MFD)</h2>"
         "<p>Each point is one link, normalized to per-lane density so links "
         "with different lane counts are comparable. Dashed curve: theoretical "
         f"VDF using median v<sub>f</sub>={med_vf:.0f} km/h, "
-        f"k<sub>j</sub>={med_kj_lane:.0f} veh/km/lane.</p>"
-    )
-
-    # --- Flow–Density (per lane) ---
-    fig_qk = go.Figure()
-    fig_qk.add_trace(go.Scatter(
-        x=k_per_lane.tolist(), y=q_per_lane.tolist(), mode="markers",
-        marker=dict(size=4, color="#D32F2F", opacity=0.5),
-        hovertext=[f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])} "
-                   f"({int(n_lanes[i])}L)"
-                   for i in range(state.n_edges)],
-        hoverinfo="text",
-        showlegend=False,
-    ))
-    fig_qk.add_trace(go.Scatter(
-        x=k_pts.tolist(), y=q_pts.tolist(), mode="lines",
-        line=dict(color="#999", dash="dash", width=1),
-        name=curve_label,
-    ))
-    fig_qk.update_layout(
-        title=f"Flow–Density ({detail_scale:.0%} demand)",
-        xaxis_title="Density per lane (veh/km/lane)",
-        yaxis_title="Flow per lane (veh/hr/lane)",
-        template="plotly_white",
-        xaxis=dict(rangemode="tozero"),
-        yaxis=dict(rangemode="tozero"),
-    )
-    figs.append(fig_qk)
-    descriptions.append(
-        "<h2>Flow–Density (MFD)</h2>"
-        "<p>Each point is one link (per-lane normalization). The inverted-U shape "
-        "is the fundamental diagram: flow increases with density up to capacity, "
-        "then drops as congestion sets in.</p>"
+        f"k<sub>j</sub>={med_kj_lane:.0f} veh/km/lane. "
+        "Left: speed–density. Right: flow–density (inverted-U fundamental diagram).</p>"
     )
 
 
@@ -1827,84 +1818,76 @@ def _add_correlation_section(figs, descriptions, state, ref, link_attrs,
         bpr_tt.append(bpr_cost)
         link_labels.append(f"{key[0]}→{key[1]}")
 
-    # 4a: Flow scatter
-    fig_flow = go.Figure()
-    fig_flow.add_trace(go.Scatter(
-        x=bpr_flows, y=mfd_flows, mode="markers",
-        marker=dict(size=6, color="#1565C0", opacity=0.7),
-        hovertext=link_labels, hoverinfo="text",
-    ))
+    # Compute correlations
     flow_rho = 0.0
     if len(mfd_flows) >= 3:
         flow_rho, _ = spearmanr(bpr_flows, mfd_flows)
     flow_max = max(max(bpr_flows, default=1), max(mfd_flows, default=1)) * 1.1
-    fig_flow.add_shape(
-        type="line", x0=0, x1=flow_max, y0=0, y1=flow_max,
-        line=dict(color="#999", dash="dash", width=1),
-    )
-    fig_flow.update_layout(
-        title=f"Link Flow: MFD ({detail_scale:.0%}) vs BPR (100%) — ρ={flow_rho:.3f}",
-        xaxis_title="BPR Equilibrium Flow (vph, 100% demand)",
-        yaxis_title=f"MFD Flow (vph, {detail_scale:.0%} demand)",
-        template="plotly_white",
-        width=600, height=600,
-        xaxis=dict(fixedrange=True, range=[0, flow_max]),
-        yaxis=dict(fixedrange=True, range=[0, flow_max],
-                   scaleanchor="x", scaleratio=1),
-    )
-    figs.append(fig_flow)
-    descriptions.append(
-        "<h2>Flow Correlation: MFD vs BPR</h2>"
-        "<p>Scatter of per-link flow: our density-based MFD assignment "
-        f"({detail_scale:.0%} demand, {state.n_edges} links) vs published BPR equilibrium "
-        "(100% demand). The <b>rank correlation</b> (Spearman &rho;) measures whether "
-        "the same links carry relatively more or less traffic under both models. "
-        f"&rho; = <b>{flow_rho:.3f}</b> ({len(mfd_flows)} matched links).</p>"
-    )
 
-    # 4b: TT scatter (exclude gridlocked)
     finite_mask = [t < float("inf") for t in mfd_tt]
     tt_bpr_f = [b for b, m in zip(bpr_tt, finite_mask) if m]
     tt_mfd_f = [t for t, m in zip(mfd_tt, finite_mask) if m]
     tt_labels_f = [l for l, m in zip(link_labels, finite_mask) if m]
     n_gridlocked = sum(1 for m in finite_mask if not m)
-
-    fig_tt = go.Figure()
-    fig_tt.add_trace(go.Scatter(
-        x=tt_bpr_f, y=tt_mfd_f, mode="markers",
-        marker=dict(size=6, color="#D32F2F", opacity=0.7),
-        hovertext=tt_labels_f, hoverinfo="text",
-    ))
-    if tt_bpr_f and tt_mfd_f:
-        tt_max = max(max(tt_bpr_f), max(tt_mfd_f)) * 1.1
-        fig_tt.add_shape(
-            type="line", x0=0, x1=tt_max, y0=0, y1=tt_max,
-            line=dict(color="#999", dash="dash", width=1),
-        )
     tt_rho = 0.0
     if len(tt_mfd_f) >= 3:
         tt_rho, _ = spearmanr(tt_bpr_f, tt_mfd_f)
-    fig_tt.update_layout(
-        title=f"Link Travel Time: MFD vs BPR — ρ={tt_rho:.3f}",
-        xaxis_title="BPR Equilibrium Travel Time (min)",
-        yaxis_title=f"MFD Travel Time (min, {detail_scale:.0%} demand)",
-        template="plotly_white",
-        width=600, height=600,
-        xaxis=dict(fixedrange=True, range=[0, tt_max] if tt_bpr_f else None),
-        yaxis=dict(fixedrange=True,
-                   range=[0, tt_max] if tt_bpr_f else None,
-                   scaleanchor="x", scaleratio=1),
+    tt_max = max(max(tt_bpr_f, default=1), max(tt_mfd_f, default=1)) * 1.1
+
+    # Combined correlation figure
+    fig_corr = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=[
+            f"Flow Correlation (ρ={flow_rho:.3f})",
+            f"Travel Time Correlation (ρ={tt_rho:.3f})",
+        ],
     )
-    figs.append(fig_tt)
+    # Left: flow scatter
+    fig_corr.add_trace(go.Scatter(
+        x=bpr_flows, y=mfd_flows, mode="markers",
+        marker=dict(size=6, color="#1565C0", opacity=0.7),
+        hovertext=link_labels, hoverinfo="text",
+        showlegend=False,
+    ), row=1, col=1)
+    fig_corr.add_shape(
+        type="line", x0=0, x1=flow_max, y0=0, y1=flow_max,
+        line=dict(color="#999", dash="dash", width=1),
+        row=1, col=1,
+    )
+    # Right: TT scatter
+    fig_corr.add_trace(go.Scatter(
+        x=tt_bpr_f, y=tt_mfd_f, mode="markers",
+        marker=dict(size=6, color="#D32F2F", opacity=0.7),
+        hovertext=tt_labels_f, hoverinfo="text",
+        showlegend=False,
+    ), row=1, col=2)
+    if tt_bpr_f and tt_mfd_f:
+        fig_corr.add_shape(
+            type="line", x0=0, x1=tt_max, y0=0, y1=tt_max,
+            line=dict(color="#999", dash="dash", width=1),
+            row=1, col=2,
+        )
+    fig_corr.update_xaxes(title_text="BPR Flow (vph, 100%)", range=[0, flow_max], row=1, col=1)
+    fig_corr.update_yaxes(title_text=f"MFD Flow (vph, {detail_scale:.0%})", range=[0, flow_max], row=1, col=1)
+    fig_corr.update_xaxes(title_text="BPR Travel Time (min)", range=[0, tt_max] if tt_bpr_f else None, row=1, col=2)
+    fig_corr.update_yaxes(title_text=f"MFD Travel Time (min, {detail_scale:.0%})", range=[0, tt_max] if tt_bpr_f else None, row=1, col=2)
+    fig_corr.update_layout(
+        title=f"Correlation: MFD ({detail_scale:.0%} demand) vs BPR (100%)",
+        template="plotly_white",
+        height=450, width=1000,
+    )
+    figs.append(fig_corr)
     gridlock_note = (
         f" ({n_gridlocked} gridlocked link{'s' if n_gridlocked != 1 else ''} excluded.)"
         if n_gridlocked > 0 else ""
     )
     descriptions.append(
-        "<h2>Travel Time Correlation: MFD vs BPR</h2>"
-        f"<p>Per-link travel time: MFD at {detail_scale:.0%} demand ({len(tt_mfd_f)} "
-        "links) vs BPR at 100% demand. Dashed line = y&thinsp;=&thinsp;x. "
-        f"Spearman &rho; = <b>{tt_rho:.3f}</b>.{gridlock_note}</p>"
+        "<h2>Correlation: MFD vs BPR</h2>"
+        "<p>Scatter of per-link flow (left) and travel time (right): our density-based "
+        f"MFD assignment ({detail_scale:.0%} demand, {state.n_edges} links) vs published "
+        "BPR equilibrium (100% demand). Dashed line = y&thinsp;=&thinsp;x. "
+        f"Flow &rho; = <b>{flow_rho:.3f}</b> ({len(mfd_flows)} matched links). "
+        f"Travel time &rho; = <b>{tt_rho:.3f}</b> ({len(tt_mfd_f)} links).{gridlock_note}</p>"
     )
 
 
