@@ -552,7 +552,7 @@ def generate_braess_report(
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     from osrm.assignment.osm_synthesis import patch_braess_lanes
-    from osrm.assignment.plots import _write_combined_report
+    from osrm.assignment.plots import _add_mfd_section, _write_combined_report
 
     tmp_path = Path(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -639,6 +639,16 @@ def generate_braess_report(
     rr_tstt_w = sum(e.tstt for e in rr_result_w.slice_ledger)
     rr_tstt_wo = sum(e.tstt for e in rr_result_wo.slice_ledger)
     rr_pct = (rr_tstt_w / rr_tstt_wo - 1) * 100 if rr_tstt_wo else 0.0
+
+    fw_tstt_w = result_fw_with.iteration_log[-1].tstt
+    fw_tstt_wo = result_fw_without.iteration_log[-1].tstt
+    fw_pct = (fw_tstt_w / fw_tstt_wo - 1) * 100 if fw_tstt_wo else 0.0
+
+    n_epochs_w = len(rr_result_w.epoch_results)
+    rr_gap_w = rr_result_w.epoch_results[-1].gap if rr_result_w.epoch_results else None
+    rr_gap_wo = rr_result_wo.epoch_results[-1].gap if rr_result_wo.epoch_results else None
+    rr_gap_w_str = f"{rr_gap_w:.6f}" if rr_gap_w is not None else "n/a"
+    rr_gap_wo_str = f"{rr_gap_wo:.6f}" if rr_gap_wo is not None else "n/a"
 
     figs = []
     descriptions = []
@@ -759,17 +769,17 @@ def generate_braess_report(
     # 2. Link State Comparison (4-column)
     # ===================================================================
     state_scenarios = [
-        (result_without.network_state, "Without (Eq.)"),
-        (result_with.network_state, "With (Eq.)"),
-        (case_with.result.network_state, "With (Greedy)"),
-        (rr_result_w.network_state, "With (Rerouted)"),
+        (result_without.network_state, "Without (MSA)"),
+        (result_with.network_state, "With (MSA)"),
+        (case_with.result.network_state, "With (HC Greedy)"),
+        (rr_result_w.network_state, "With (HC Rerouted)"),
     ]
 
     figs.append(None)
     descriptions.append(
         """<h2>Link State Comparison</h2>
-        <p>Four scenarios compared: matrix equilibrium (MSA) without and with shortcut,
-        greedy hill-climber with shortcut, and rerouted hill-climber with shortcut.
+        <p>Four scenarios compared: MSA without and with shortcut,
+        HC Greedy with shortcut, and HC Rerouted with shortcut.
         Density (k, veh/km), speed (v, km/h), flow (q = k&times;v, veh/hr), and travel
         time (t = L/v) at the final state.
         <span style="color:#F44336;font-weight:600;">Red density</span>
@@ -789,14 +799,74 @@ def generate_braess_report(
         """<h2>Route Travel Times</h2>
         <p>Total travel time for each OD route, summed from link-level t = L/v.
         At user equilibrium (Wardrop), all <i>used</i> routes between an OD pair
-        should have equal travel time.  Under greedy HC, the upper route
+        should have equal travel time.  Under HC Greedy, the upper route
         (1&rarr;3&rarr;2) may be abandoned.</p>"""
         + _braess_route_tt_table(state_scenarios)
     )
 
     # ===================================================================
-    # 4. TSTT Convergence (MSA)
+    # 4. TSTT Comparison (all methods)
     # ===================================================================
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        name="MSA",
+        x=["Without Shortcut", "With Shortcut"],
+        y=[tstt_without_vals[-1], tstt_with_vals[-1]],
+        marker_color=["#90CAF9", "#EF9A9A"],
+    ))
+    fig_bar.add_trace(go.Bar(
+        name="FW",
+        x=["Without Shortcut", "With Shortcut"],
+        y=[fw_tstt_wo, fw_tstt_w],
+        marker_color=["#64B5F6", "#E57373"],
+    ))
+    fig_bar.add_trace(go.Bar(
+        name="HC Greedy",
+        x=["Without Shortcut", "With Shortcut"],
+        y=[hc_tstt_wo, hc_tstt_w],
+        marker_color=["#42A5F5", "#EF5350"],
+    ))
+    fig_bar.add_trace(go.Bar(
+        name="HC Rerouted",
+        x=["Without Shortcut", "With Shortcut"],
+        y=[rr_tstt_wo, rr_tstt_w],
+        marker_color=["#1565C0", "#D32F2F"],
+    ))
+    fig_bar.update_layout(
+        title="TSTT by Method and Scenario",
+        xaxis_title="Network Scenario",
+        yaxis_title="TSTT (veh\u00b7seconds)",
+        barmode="group",
+        template="plotly_white",
+    )
+    figs.append(fig_bar)
+    descriptions.append(
+        "<h2>TSTT Comparison</h2>"
+        "<p>Total system travel time across all methods. At equilibrium (MSA, FW), "
+        "the Braess paradox is confirmed: adding the shortcut <i>increases</i> TSTT "
+        f"by <b>+{pct:.1f}%</b> (MSA) / <b>+{fw_pct:.1f}%</b> (FW). Under HC Greedy loading, the "
+        f"shortcut <i>reduces</i> TSTT by <b>{abs(hc_pct):.1f}%</b>. After reroute epochs, HC Rerouted "
+        f"converges toward equilibrium and the paradox re-emerges at <b>{rr_pct:+.1f}%</b>.</p>"
+    )
+
+    # ===================================================================
+    # 5. MFD Plots
+    # ===================================================================
+    _add_mfd_section(figs, descriptions, case_with.result.network_state, 1.0)
+
+    # ===================================================================
+    # 6. Matrix Convergence
+    # ===================================================================
+    figs.append(None)
+    descriptions.append(
+        "<h2>Matrix Convergence</h2>"
+        "<p>Convergence diagnostics for matrix-based equilibrium methods (MSA and Frank-Wolfe). "
+        "Both use all-or-nothing (AON) routing each iteration with density blending toward equilibrium.</p>"
+    )
+
+    # -------------------------------------------------------------------
+    # 6a. TSTT Convergence (MSA)
+    # -------------------------------------------------------------------
     iters_w = [r.iteration for r in result_with.iteration_log]
     iters_wo = [r.iteration for r in result_without.iteration_log]
 
@@ -830,7 +900,7 @@ def generate_braess_report(
     gap_wo_fmt = f"{gap_wo:.6f}"
     pct_fmt = f"{pct:+.1f}"
     descriptions.append(
-        "<h2>TSTT Convergence</h2>"
+        "<h3>TSTT Convergence (MSA)</h3>"
         "<p>Red = network WITH shortcut, blue = WITHOUT. "
         f"TSTT with shortcut = <b>{tstt_w_fmt}</b> veh&middot;s (gap={gap_w_fmt}), "
         f"without = <b>{tstt_wo_fmt}</b> veh&middot;s (gap={gap_wo_fmt}). "
@@ -838,9 +908,9 @@ def generate_braess_report(
         f"{paradox_msg}</p>"
     )
 
-    # ===================================================================
-    # 5. Convergence: MSA vs Frank-Wolfe
-    # ===================================================================
+    # -------------------------------------------------------------------
+    # 6b. Wardrop Gap: MSA vs Frank-Wolfe
+    # -------------------------------------------------------------------
     gap_with = [r.relative_gap for r in result_with.iteration_log]
     gap_without = [r.relative_gap for r in result_without.iteration_log]
     gap_fw_w = [r.relative_gap for r in result_fw_with.iteration_log]
@@ -905,16 +975,16 @@ def generate_braess_report(
     fw_gap_w_fmt = f"{fw_final_gap_w:.6f}"
     fw_gap_wo_fmt = f"{fw_final_gap_wo:.6f}"
     descriptions.append(
-        "<h2>Convergence: MSA vs Frank-Wolfe</h2>"
+        "<h3>Wardrop Gap: MSA vs Frank-Wolfe</h3>"
         "<p>MSA (dashed envelopes, faint dots) vs Frank-Wolfe (solid lines). "
         "FW uses Beckmann line search to find the optimal step size each iteration, "
         "eliminating the bang-bang oscillation inherent to MSA on small networks. "
         f"FW final gap: with shortcut = {fw_gap_w_fmt}, without = {fw_gap_wo_fmt}.</p>"
     )
 
-    # ===================================================================
-    # 6. FW Step Size
-    # ===================================================================
+    # -------------------------------------------------------------------
+    # 6c. Frank-Wolfe Step Size
+    # -------------------------------------------------------------------
     step_sizes_w = [r.step_size for r in result_fw_with.iteration_log]
     step_sizes_wo = [r.step_size for r in result_fw_without.iteration_log]
 
@@ -942,7 +1012,7 @@ def generate_braess_report(
     )
     figs.append(fig_step)
     descriptions.append(
-        "<h2>FW Step Size</h2>"
+        "<h3>Frank-Wolfe Step Size</h3>"
         "<p>Optimal step size &alpha;* from the Beckmann line search each iteration. "
         "Dotted grey = MSA fixed schedule (1/n). Early iterations take large steps; "
         "as equilibrium is approached, FW takes progressively smaller steps &mdash; "
@@ -950,20 +1020,34 @@ def generate_braess_report(
     )
 
     # ===================================================================
-    # 7. HC Batch Timeline (from build_hillclimber_report_sections)
+    # 7. Hill-Climber Convergence
     # ===================================================================
+    figs.append(None)
+    descriptions.append(
+        "<h2>Hill-Climber Convergence</h2>"
+        "<p>Convergence diagnostics for the matrix-free hill-climber. Demand is sliced into 20 departure "
+        "batches loaded sequentially (HC Greedy), then refined via reroute epochs (HC Rerouted) that "
+        "iterate through slices oldest-first, subtracting and re-routing each slice's demand.</p>"
+    )
+
+    # -------------------------------------------------------------------
+    # 7a. Batch Timeline / State / Runtime
+    # -------------------------------------------------------------------
     hc_figs, hc_descriptions = build_hillclimber_report_sections(
         network_name="Braess",
         case=case_with,
         detail_scale=1.0,
     )
-    # Skip [0]=congestion map and [1]=link table; take batch/MFD sections
-    figs.extend(hc_figs[2:])
-    descriptions.extend(hc_descriptions[2:])
+    # [0]=congestion map, [1]=link table, [2]=batch timeline, [3]=state evolution,
+    # [4]=batch runtime, [5:]=MFD (handled separately above)
+    for i in range(2, 5):
+        hc_descriptions[i] = hc_descriptions[i].replace("<h2>", "<h3>").replace("</h2>", "</h3>")
+    figs.extend(hc_figs[2:5])
+    descriptions.extend(hc_descriptions[2:5])
 
-    # ===================================================================
-    # 8. Slice Sweep
-    # ===================================================================
+    # -------------------------------------------------------------------
+    # 7b. Slice Sensitivity
+    # -------------------------------------------------------------------
     sweep_slices = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
     sweep_pcts: list[float] = []
     for ns in sweep_slices:
@@ -1011,7 +1095,7 @@ def generate_braess_report(
     )
     figs.append(fig_sweep)
     descriptions.append(
-        "<h2>Slice Sweep: Does More Batching Reproduce the Paradox?</h2>"
+        "<h3>Slice Sensitivity</h3>"
         "<p>TSTT delta (with-shortcut vs without-shortcut) as a function of "
         "the number of departure slices.  The dotted grey line at 0% is where "
         "the Braess paradox would emerge (positive delta).  The delta never "
@@ -1028,54 +1112,23 @@ def generate_braess_report(
         "state.</p>"
     )
 
-    # ===================================================================
-    # 9. TSTT: Greedy vs Rerouted (grouped bar chart)
-    # ===================================================================
-    fig_bar = go.Figure()
-    fig_bar.add_trace(go.Bar(
-        name="HC Greedy",
-        x=["Without shortcut", "With shortcut"],
-        y=[hc_tstt_wo, hc_tstt_w],
-        marker_color=["#90CAF9", "#EF9A9A"],
-        hovertext=[f"Greedy: {v:,.0f}" for v in [hc_tstt_wo, hc_tstt_w]],
-        hoverinfo="text",
-    ))
-    fig_bar.add_trace(go.Bar(
-        name="After Rerouting",
-        x=["Without shortcut", "With shortcut"],
-        y=[rr_tstt_wo, rr_tstt_w],
-        marker_color=["#1565C0", "#D32F2F"],
-        hovertext=[f"Rerouted: {v:,.0f}" for v in [rr_tstt_wo, rr_tstt_w]],
-        hoverinfo="text",
-    ))
-    fig_bar.update_layout(
-        title="TSTT: Greedy HC vs After Reroute Epochs",
-        xaxis_title="Scenario",
-        yaxis_title="TSTT (veh-seconds)",
-        barmode="group",
-        template="plotly_white",
-    )
-    figs.append(fig_bar)
-
-    n_epochs_w = len(rr_result_w.epoch_results)
-    rr_gap_w = rr_result_w.epoch_results[-1].gap if rr_result_w.epoch_results else None
-    rr_gap_wo = rr_result_wo.epoch_results[-1].gap if rr_result_wo.epoch_results else None
-    rr_gap_w_str = f"{rr_gap_w:.6f}" if rr_gap_w is not None else "n/a"
-    rr_gap_wo_str = f"{rr_gap_wo:.6f}" if rr_gap_wo is not None else "n/a"
-    rr_paradox_msg = (
-        " <b>Braess paradox confirmed</b>: adding the shortcut "
-        "<i>increases</i> total travel time at equilibrium."
+    # -------------------------------------------------------------------
+    # 7c. Reroute Epochs
+    # -------------------------------------------------------------------
+    figs.append(None)
+    rr_paradox_text = (
+        f"The Braess paradox emerges at {rr_pct:+.1f}% &mdash; confirming "
+        "convergence toward approximate Wardrop equilibrium."
         if rr_pct > 0 else
-        " Paradox not observed after rerouting."
+        f"The Braess paradox does not emerge ({rr_pct:+.1f}%)."
     )
     descriptions.append(
-        "<h2>TSTT: Greedy vs Rerouted</h2>"
-        "<p><b>Greedy HC</b> (light bars): shortcut <i>reduces</i> TSTT by "
-        f"<b>{abs(hc_pct):.1f}%</b> &mdash; no paradox under incremental loading.</p>"
-        f"<p><b>After {n_epochs_w} reroute epoch(s)</b> (dark bars): TSTT with "
-        f"shortcut = <b>{rr_tstt_w:,.0f}</b>, without = <b>{rr_tstt_wo:,.0f}</b>.  "
-        f"&Delta; = <b>{rr_pct:+.1f}%</b>.{rr_paradox_msg}</p>"
-        f"<p>Final gap: with = {rr_gap_w_str}, without = {rr_gap_wo_str}.</p>"
+        "<h3>Reroute Epochs</h3>"
+        "<p>After greedy loading, reroute epochs iterate through all 20 slices oldest-first. "
+        "Each slice's density is subtracted, re-routed on the residual network, and re-added. "
+        "This Gauss-Seidel approach avoids the full-network AON oscillation of matrix methods.</p>"
+        f"<p>Results: {n_epochs_w} epoch(s) completed. Final gap: with shortcut = {rr_gap_w_str}, "
+        f"without = {rr_gap_wo_str}. {rr_paradox_text}</p>"
     )
 
     # ===================================================================
@@ -1085,14 +1138,15 @@ def generate_braess_report(
     _write_combined_report(
         title="Braess Paradox Validation",
         intro=(
-            "<p>Unified Braess paradox validation: matrix-based equilibrium (MSA &amp; Frank-Wolfe) "
-            "and matrix-free hill-climber (greedy + reroute epochs) on a 4-node diamond network.</p>"
-            f"<p>Demand: <b>{demand_fmt}</b> vehicles.  Methods: MSA (&alpha;=1/n, {max_iter} iter), "
-            f"FW (Beckmann line search, {max_iter} iter), HC (20 slices, greedy), HC rerouted "
-            "(up to 5 epochs, gap &lt; 0.001).</p>"
-            f"<p><b>Key finding:</b> Matrix equilibrium confirms Braess paradox (+{pct:.1f}%). "
-            f"Greedy HC does <i>not</i> reproduce it ({hc_pct:+.1f}%). After reroute epochs, "
-            f"HC converges to approximate equilibrium and the paradox re-emerges ({rr_pct:+.1f}%).</p>"
+            "<p>Unified Braess paradox validation on a 4-node diamond network, comparing "
+            "matrix-based equilibrium (MSA, Frank-Wolfe) and matrix-free hill-climber "
+            "(HC Greedy, HC Rerouted).</p>"
+            f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.  "
+            f"FW: Beckmann line search, {max_iter} iterations.  "
+            "HC Greedy: 20 departure slices.  HC Rerouted: up to 5 epochs, gap &lt; 0.001.</p>"
+            f"<p><b>Key finding:</b> MSA and FW confirm the Braess paradox (+{pct:.1f}%). "
+            f"HC Greedy does <i>not</i> reproduce it ({hc_pct:+.1f}%). After reroute epochs, "
+            f"HC Rerouted converges to approximate equilibrium ({rr_pct:+.1f}%).</p>"
         ),
         figures=figs,
         descriptions=descriptions,
