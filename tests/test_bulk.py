@@ -665,3 +665,100 @@ class TestBulkMatch:
             mock_tqdm.assert_not_called()
 
 
+class TestBatchRoute:
+    """Tests for the native C++ BatchRoute method."""
+
+    @classmethod
+    def setup_class(cls):
+        cls.py_osrm = osrm.OSRM(
+            storage_config=ch_data_path,
+            use_shared_memory=False,
+        )
+        cls.test_coords = [
+            (7.41337, 43.72956, 7.41546, 43.73077),
+            (7.41862, 43.73216, 7.42000, 43.73300),
+            (7.42150, 43.73400, 7.42300, 43.73500),
+            (7.41500, 43.73000, 7.42500, 43.73600),
+            (7.41400, 43.72900, 7.42400, 43.73550),
+        ]
+
+    def _build_params(self, coords_list):
+        """Build RouteParameters list from (olon, olat, dlon, dlat) tuples."""
+        return [
+            osrm.RouteParameters(coordinates=[(c[0], c[1]), (c[2], c[3])])
+            for c in coords_list
+        ]
+
+    def test_batch_route_matches_serial(self):
+        """BatchRoute results must match serial Route for the same inputs."""
+        params_list = self._build_params(self.test_coords)
+
+        batch = self.py_osrm.BatchRoute(params_list)
+
+        for i, (bp, coords) in enumerate(zip(batch, self.test_coords)):
+            serial = self.py_osrm.Route(
+                coordinates=[(coords[0], coords[1]), (coords[2], coords[3])]
+            )
+            assert bp is not None, f"Route {i} returned None in batch"
+            assert abs(bp['routes'][0]['distance'] - serial['routes'][0]['distance']) < 1e-6
+            assert abs(bp['routes'][0]['duration'] - serial['routes'][0]['duration']) < 1e-6
+
+    def test_batch_route_empty_input(self):
+        """Empty list should return empty list."""
+        result = self.py_osrm.BatchRoute([])
+        assert result == []
+
+    def test_batch_route_single(self):
+        """Single route batch should work."""
+        params = self._build_params(self.test_coords[:1])
+        result = self.py_osrm.BatchRoute(params)
+        assert len(result) == 1
+        assert result[0] is not None
+        assert 'routes' in result[0]
+
+    def test_batch_route_failed_routes_return_none(self):
+        """Failed routes should return None without crashing the batch."""
+        good = osrm.RouteParameters(coordinates=[(7.41337, 43.72956), (7.41546, 43.73077)])
+        bad = osrm.RouteParameters(coordinates=[(999.0, 999.0), (999.0, 999.0)])
+
+        result = self.py_osrm.BatchRoute([good, bad, good])
+        assert len(result) == 3
+        assert result[0] is not None
+        assert result[1] is None
+        assert result[2] is not None
+
+    def test_batch_route_all_fail(self):
+        """All-failing batch should return all Nones."""
+        bad = osrm.RouteParameters(coordinates=[(999.0, 999.0), (999.0, 999.0)])
+        result = self.py_osrm.BatchRoute([bad, bad])
+        assert all(r is None for r in result)
+
+    def test_batch_route_performance(self):
+        """BatchRoute should be faster than serial Route."""
+        import random
+        random.seed(42)
+        N = 1000
+        coords = [
+            (random.uniform(7.408, 7.440), random.uniform(43.724, 43.752),
+             random.uniform(7.408, 7.440), random.uniform(43.724, 43.752))
+            for _ in range(N)
+        ]
+        params_list = self._build_params(coords)
+
+        # Serial
+        t0 = time.perf_counter()
+        for p in params_list:
+            self.py_osrm._engine.Route(p)
+        serial_time = time.perf_counter() - t0
+
+        # Batch
+        t0 = time.perf_counter()
+        self.py_osrm.BatchRoute(params_list)
+        batch_time = time.perf_counter() - t0
+
+        speedup = serial_time / batch_time
+        if serial_time < 0.05:
+            pytest.skip("Routes too fast to measure speedup reliably")
+        assert speedup > 1.5, f"Expected >1.5x speedup, got {speedup:.2f}x"
+
+
