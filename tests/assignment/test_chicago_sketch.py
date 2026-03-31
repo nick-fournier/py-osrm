@@ -141,7 +141,7 @@ def _run_chicago_assignment(
 
 def generate_chicago_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/chicago_sketch_validation.html",
+    output_path: str = "docs/plots/chicago_sketch_matrix_validation.html",
     max_iter: int = 50,
 ) -> Path:
     """Generate Chicago Sketch validation report.

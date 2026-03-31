@@ -264,7 +264,7 @@ class TestAnaheim:
 
 def generate_anaheim_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/anaheim_validation.html",
+    output_path: str = "docs/plots/anaheim_matrix_validation.html",
     max_iter: int = 50,
 ) -> Path:
     """Generate Anaheim validation report using the generic reporter.

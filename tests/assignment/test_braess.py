@@ -266,7 +266,7 @@ class TestBraessParadox:
 
 def generate_braess_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/braess_validation.html",
+    output_path: str = "docs/plots/braess_matrix_validation.html",
     demand: float = 2500.0,
     max_iter: int = 100,
 ) -> Path:

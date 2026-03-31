@@ -8,6 +8,7 @@ Uses a small synthetic OD matrix on the Monaco test network.
 
 import logging
 import shutil
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -17,27 +18,43 @@ import osrm
 from osrm.assignment import (
     AssignmentConfig,
     AssignmentLoop,
-    ODMatrixAdapter,
     DensitySmoothingConfig,
+    MatrixFreeHillClimber,
+    ODMatrixAdapter,
+    DemandTrip,
 )
 
 
-@pytest.fixture(scope="module")
-def monaco_mld(tmp_path_factory):
+def _prepare_monaco_network(tmp_path: Path) -> str:
     """Prepare Monaco MLD data in a temp directory."""
-    work = tmp_path_factory.mktemp("monaco_assignment")
+    work = tmp_path / "monaco_assignment"
+    work.mkdir(parents=True, exist_ok=True)
     src_dir = Path("tests/data")
     pbf = src_dir / "monaco.osm.pbf"
     if not pbf.exists():
         pytest.skip("Monaco PBF not found")
 
     base = str(work / "monaco")
-
     osrm.extract(str(pbf), profile="car", output_path=base, verbosity="ERROR")
     osrm.partition(base, verbosity="ERROR")
     osrm.customize(base, verbosity="ERROR")
-
     return base
+
+
+def _copy_clean_osrm(base_path: str, run_dir: Path) -> str:
+    """Copy clean OSRM files so each run starts from an uncustomized base."""
+    src = Path(base_path).parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for f in src.glob("monaco.osrm*"):
+        shutil.copy2(f, run_dir / f.name)
+    return str(run_dir / Path(base_path).name)
+
+
+@pytest.fixture(scope="module")
+def monaco_mld(tmp_path_factory):
+    """Prepare Monaco MLD data in a temp directory."""
+    work = tmp_path_factory.mktemp("monaco_assignment")
+    return _prepare_monaco_network(work)
 
 
 @pytest.fixture
@@ -77,6 +94,22 @@ def _get_sample_coords(base_path, n=8, seed=42):
     if len(coords) < 4:
         pytest.skip("Could not snap enough coordinates to Monaco network")
     return coords
+
+
+def _build_monaco_trip_stream(base_path: str) -> list[DemandTrip]:
+    """Create a tiny multi-slice trip stream for hill-climber MVP tests."""
+    coords = _get_sample_coords(base_path, n=8, seed=123)
+    departures = [0.0, 0.0, 900.0, 1200.0, 3700.0, 3900.0]
+    volumes = [40.0, 25.0, 35.0, 20.0, 30.0, 15.0]
+    trips = []
+    for i, (dep, vol) in enumerate(zip(departures, volumes)):
+        trips.append(DemandTrip(
+            origin=coords[i % len(coords)],
+            destination=coords[(i + 3) % len(coords)],
+            volume=vol,
+            departure_time_s=dep,
+        ))
+    return trips
 
 
 class TestAssignmentLoop:
@@ -197,6 +230,29 @@ class TestAssignmentLoop:
         assert "max_density_delta" in log_dict
         assert len(log_dict["iteration"]) == 2
 
+    def test_matrix_free_hill_climber_smoke(self, monaco_work):
+        """Matrix-free hill-climber MVP runs across multiple Monaco slices."""
+        trips = _build_monaco_trip_stream(monaco_work)
+
+        solver = MatrixFreeHillClimber(
+            monaco_work,
+            AssignmentConfig(
+                bin_width_s=1800.0,
+                smoothing=DensitySmoothingConfig(method="none"),
+                verbosity="ERROR",
+            ),
+            default_batch_size=3,
+        )
+
+        result = solver.run_stream(trips, max_batch_size=3)
+
+        assert result.n_batches >= 2
+        assert result.n_trips == len(trips)
+        assert result.network_state is not None
+        assert result.network_state.n_edges > 0
+        assert np.any(result.network_state.density_vpkm > 0)
+        assert all(b.batch_tstt > 0 for b in result.batch_results)
+
 
 class TestODMatrixAdapter:
     def test_trip_generation(self):
@@ -225,3 +281,118 @@ class TestODMatrixAdapter:
         assert adapter.total_demand == pytest.approx(1000.0)
         # Diagonal should be zero (no self-trips)
         assert np.all(np.diag(adapter.matrix) == 0)
+
+
+def generate_monaco_hillclimber_report(
+    tmp_path: str | Path,
+    output_path: str = "docs/plots/monaco_hillclimber_validation.html",
+) -> Path:
+    """Generate a tiny Monaco hill-climber MVP validation report."""
+    import plotly.graph_objects as go
+    from osrm.assignment.plots import _add_mfd_section, _write_combined_report
+
+    tmp_path = Path(tmp_path)
+    base = _prepare_monaco_network(tmp_path)
+    run_base = _copy_clean_osrm(base, tmp_path / "monaco_hc_run")
+    trips = _build_monaco_trip_stream(run_base)
+
+    solver = MatrixFreeHillClimber(
+        run_base,
+        AssignmentConfig(
+            bin_width_s=1800.0,
+            smoothing=DensitySmoothingConfig(method="none"),
+            verbosity="ERROR",
+            speed_csv_dir=str(Path(run_base).parent),
+        ),
+        default_batch_size=3,
+    )
+    result = solver.run_stream(trips, max_batch_size=3)
+    state = result.network_state
+    assert state is not None
+
+    figs = []
+    descs = []
+    batch_labels = [
+        f"batch {b.batch_index}<br>bin {b.departure_bin}" if b.departure_bin is not None
+        else f"batch {b.batch_index}"
+        for b in result.batch_results
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=batch_labels,
+        y=[b.n_trips for b in result.batch_results],
+        name="Trips",
+        marker_color="#1976D2",
+    ))
+    fig.add_trace(go.Scatter(
+        x=batch_labels,
+        y=[b.batch_tstt for b in result.batch_results],
+        name="Batch TSTT",
+        yaxis="y2",
+        mode="lines+markers",
+        line=dict(color="#D32F2F", width=2.5),
+    ))
+    fig.update_layout(
+        title="Monaco Hill-Climber Batches",
+        xaxis_title="Departure slice / batch",
+        yaxis=dict(title="Trips"),
+        yaxis2=dict(title="Batch TSTT (veh-seconds)", overlaying="y", side="right"),
+        template="plotly_white",
+    )
+    figs.append(fig)
+    descs.append(
+        "<h2>Batch timeline</h2>"
+        "<p>Tiny matrix-free Monaco stream, loaded sequentially by departure slice. "
+        "Bars show trips per batch; line shows batch total system travel time.</p>"
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=batch_labels,
+        y=[b.mean_speed_kmh for b in result.batch_results],
+        mode="lines+markers",
+        line=dict(color="#2E7D32", width=2.5),
+        marker=dict(size=8),
+        name="Mean speed",
+    ))
+    fig.add_trace(go.Scatter(
+        x=batch_labels,
+        y=[b.max_k_over_kj for b in result.batch_results],
+        mode="lines+markers",
+        line=dict(color="#FF9800", width=2.0),
+        marker=dict(size=7),
+        name="Max k/kj",
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        title="Monaco Hill-Climber State Evolution",
+        xaxis_title="Departure slice / batch",
+        yaxis=dict(title="Mean speed (km/h)"),
+        yaxis2=dict(title="Max k/kj", overlaying="y", side="right"),
+        template="plotly_white",
+    )
+    figs.append(fig)
+    descs.append(
+        "<h2>State evolution</h2>"
+        "<p>Mean network speed and worst-link density ratio after each batch. "
+        "<code>MatrixFreeHillClimber</code> currently runs as wrapper-side "
+        "route → accumulate → VDF → customize → reload.</p>"
+    )
+
+    _add_mfd_section(figs, descs, state, detail_scale=1.0)
+
+    intro = (
+        f"<p>Validation of the <b>matrix-free hill-climber MVP</b> on the Monaco test "
+        f"network. {len(trips)} trips are loaded across {result.n_batches} batches "
+        f"using wrapper-side departure slicing (no OSRM period patch yet). "
+        f"Total runtime: {result.total_time_s:.2f}s.</p>"
+    )
+    _write_combined_report(
+        title="Monaco Hill-Climber Validation",
+        intro=intro,
+        figures=figs,
+        descriptions=descs,
+        path=Path(output_path),
+    )
+    return Path(output_path)

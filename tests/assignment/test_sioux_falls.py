@@ -202,7 +202,7 @@ class TestSiouxFalls:
 
 def generate_sioux_falls_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/sioux_falls_validation.html",
+    output_path: str = "docs/plots/sioux_falls_matrix_validation.html",
     max_iter: int = 50,
 ) -> Path:
     """Generate Sioux Falls validation report using the generic reporter.

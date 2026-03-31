@@ -5,10 +5,11 @@ Usage::
 
     uv run python scripts/generate_reports.py          # all reports
     uv run python scripts/generate_reports.py vdf       # VDF theory only
-    uv run python scripts/generate_reports.py anaheim   # Anaheim only
-    uv run python scripts/generate_reports.py braess    # Braess only
-    uv run python scripts/generate_reports.py sioux     # Sioux Falls only
-    uv run python scripts/generate_reports.py chi-sketch # Chicago Sketch only
+    uv run python scripts/generate_reports.py anaheim    # Anaheim matrix validation
+    uv run python scripts/generate_reports.py braess     # Braess matrix validation
+    uv run python scripts/generate_reports.py sioux      # Sioux Falls matrix validation
+    uv run python scripts/generate_reports.py chi-sketch # Chicago Sketch matrix validation
+    uv run python scripts/generate_reports.py monaco-hc  # Monaco hill-climber validation
 
 Reports are written to docs/plots/.
 """
@@ -62,12 +63,20 @@ def generate_chicago() -> Path:
     return generate_chicago_report(tempfile.mkdtemp())
 
 
+def generate_monaco_hillclimber() -> Path:
+    """Generate Monaco hill-climber validation report."""
+    from tests.assignment.test_assignment_loop import generate_monaco_hillclimber_report
+
+    return generate_monaco_hillclimber_report(tempfile.mkdtemp())
+
+
 REPORTS = {
     "vdf": ("VDF Theory", generate_vdf),
-    "braess": ("Braess Paradox", generate_braess),
-    "sioux": ("Sioux Falls", generate_sioux_falls),
-    "anaheim": ("Anaheim", generate_anaheim),
-    "chi-sketch": ("Chicago Sketch", generate_chicago),
+    "braess": ("Braess Matrix Validation", generate_braess),
+    "sioux": ("Sioux Falls Matrix Validation", generate_sioux_falls),
+    "anaheim": ("Anaheim Matrix Validation", generate_anaheim),
+    "chi-sketch": ("Chicago Sketch Matrix Validation", generate_chicago),
+    "monaco-hc": ("Monaco Hill-Climber Validation", generate_monaco_hillclimber),
 }
 
 
