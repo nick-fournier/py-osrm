@@ -238,6 +238,23 @@ class AssignmentLoop:
         )
         return snapped_trips
 
+    @staticmethod
+    def _batch_route_raw(engine: osrm_module.OSRM, trips: List[DemandTrip]):
+        """Route all trips via C++ BatchRoute, return raw C++ result objects.
+
+        Returns a list parallel to *trips*; failed routes are None.
+        """
+        from osrm._params import RouteParameters as _RP, set_param as _sp
+
+        params = []
+        for t in trips:
+            rp = _RP()
+            rp.coordinates = [t.origin, t.destination]
+            _sp(rp, "annotations", ["nodes", "distance", "duration", "speed"])
+            params.append(rp)
+
+        return engine._engine.BatchRoute(params)
+
     def _discover_network(
         self,
         engine: osrm_module.OSRM,
@@ -252,24 +269,12 @@ class AssignmentLoop:
         """
         logger.info("Discovering network edges from %d OD pairs...", len(trips))
 
-        od_dict = {
-            "origin_lon": [t.origin[0] for t in trips],
-            "origin_lat": [t.origin[1] for t in trips],
-            "dest_lon": [t.destination[0] for t in trips],
-            "dest_lat": [t.destination[1] for t in trips],
-        }
-
-        raw_results = osrm_module.bulk_route(
-            engine, od_dict,
-            annotations=["nodes", "distance", "duration", "speed"],
-            raw_response=True,
-            show_progress=False,
-        )
-
+        raw = self._batch_route_raw(engine, trips)
         route_results = [
-            r for r in raw_results.get("_response", [])
-            if r is not None and r.get("routes")
+            r.to_dict() for r in raw
+            if r is not None
         ]
+        route_results = [r for r in route_results if r.get("routes")]
 
         state = NetworkState.from_route_annotations(
             route_results,
@@ -315,38 +320,23 @@ class AssignmentLoop:
         tstt = 0.0
         bin_width_hr = self.config.bin_width_s / 3600.0
 
-        # Build OD dict for bulk_route
-        od_dict = {
-            "origin_lon": [t.origin[0] for t in trips],
-            "origin_lat": [t.origin[1] for t in trips],
-            "dest_lon": [t.destination[0] for t in trips],
-            "dest_lat": [t.destination[1] for t in trips],
-        }
+        raw_results = self._batch_route_raw(engine, trips)
 
-        raw_results = osrm_module.bulk_route(
-            engine, od_dict,
-            annotations=["nodes", "distance", "duration", "speed"],
-            raw_response=True,
-            show_progress=False,
-        )
-
-        # Walk raw responses to accumulate density and volume
-        responses = raw_results.get("_response", [])
-        for trip_idx, response in enumerate(responses):
-            if response is None:
+        for trip_idx, raw in enumerate(raw_results):
+            if raw is None:
                 continue
             trip = trips[trip_idx]
-            routes = response.get("routes")
+            routes = raw["routes"]
             if not routes:
                 continue
             route = routes[0]
-            tstt += trip.volume * route["duration"]
+            tstt += trip.volume * float(route["duration"])
 
             for leg in route["legs"]:
-                ann = leg.get("annotation", {})
-                nodes = ann.get("nodes", [])
-                distances = ann.get("distance", [])
-                speeds = ann.get("speed", [])
+                ann = leg["annotation"]
+                nodes = ann["nodes"]
+                distances = ann["distance"]
+                speeds = ann["speed"]
 
                 for i in range(len(nodes) - 1):
                     from_id, to_id = int(nodes[i]), int(nodes[i + 1])
