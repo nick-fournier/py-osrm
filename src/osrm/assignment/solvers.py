@@ -13,6 +13,7 @@ instead of duplicating logic.
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from dataclasses import dataclass, field
@@ -29,6 +30,11 @@ from osrm.assignment.assignment_loop import (
 from osrm.assignment.network_state import NetworkState
 from osrm.assignment.od_matrix import DemandTrip, ODMatrixAdapter
 from osrm.assignment.trip_stream import TripBatch, TripStreamAdapter
+
+logger = logging.getLogger(__name__)
+
+# Minimum seconds between progress log messages (avoids spam on fast runs)
+_LOG_INTERVAL_S = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +318,7 @@ class MatrixFreeHillClimber:
 
         batch_results: List[HillClimberBatchResult] = []
         ledger = SliceLedger()
+        _last_log = time.monotonic()
         for batch in snapped_stream.iter_time_slices(
             bin_width_s=self.config.bin_width_s,
             max_batch_size=max_batch_size,
@@ -380,6 +387,14 @@ class MatrixFreeHillClimber:
             )
             batch_results.append(batch_result)
 
+            now = time.monotonic()
+            if now - _last_log >= _LOG_INTERVAL_S:
+                logger.info(
+                    "S%d: TSTT=%.0f, speed=%.1f km/h, max_k/kj=%.2f",
+                    batch.batch_index, batch_tstt, mean_speed, max_k_over_kj,
+                )
+                _last_log = now
+
             if progress_callback:
                 progress_callback(batch_result)
 
@@ -445,6 +460,14 @@ class MatrixFreeHillClimber:
                 loop.smoother.build_adjacency(state.edge_ids, state.length_m)
                 loop._update_state(state)
 
+                now = time.monotonic()
+                if now - _last_log >= _LOG_INTERVAL_S:
+                    logger.info(
+                        "E%d:S%d rerouting (%d/%d slices)",
+                        epoch_idx + 1, slice_idx, slice_idx + 1, len(ledger),
+                    )
+                    _last_log = now
+
             # Customize once more after full epoch
             csv_path = loop.writer.write_from_state(state, only_changed=True)
             osrm_module.customize(
@@ -476,6 +499,12 @@ class MatrixFreeHillClimber:
                 mean_speed_kmh=mean_speed,
             )
             epoch_results.append(epoch_result)
+            gap_str = f"{gap:.6f}" if gap is not None else "n/a"
+            logger.info(
+                "E%d: gap=%s, changed=%d/%d, speed=%.1f km/h, %.1fs",
+                epoch_idx + 1, gap_str, routes_changed, len(ledger),
+                mean_speed, epoch_result.epoch_time_s,
+            )
 
             if progress_callback:
                 progress_callback(epoch_result)

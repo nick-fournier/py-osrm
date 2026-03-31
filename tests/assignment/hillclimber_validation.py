@@ -161,6 +161,7 @@ def _add_batch_sections(
     )
 
     fig = go.Figure()
+    # Greedy slice phase
     fig.add_trace(go.Scatter(
         x=slice_labels,
         y=[b.mean_speed_kmh for b in result.batch_results],
@@ -178,19 +179,55 @@ def _add_batch_sections(
         name="Max k/kj",
         yaxis="y2",
     ))
+
+    # Append epoch data if present
+    epoch_results = getattr(result, "epoch_results", []) or []
+    if epoch_results:
+        epoch_labels = [f"E{e.epoch}" for e in epoch_results]
+        all_labels = slice_labels + epoch_labels
+        fig.add_trace(go.Scatter(
+            x=epoch_labels,
+            y=[e.mean_speed_kmh for e in epoch_results],
+            mode="lines+markers",
+            line=dict(color="#2E7D32", width=2.5, dash="dash"),
+            marker=dict(size=10, symbol="diamond"),
+            name="Mean speed (reroute)",
+        ))
+        fig.add_trace(go.Scatter(
+            x=epoch_labels,
+            y=[e.max_k_over_kj for e in epoch_results],
+            mode="lines+markers",
+            line=dict(color="#FF9800", width=2.0, dash="dash"),
+            marker=dict(size=9, symbol="diamond"),
+            name="Max k/kj (reroute)",
+            yaxis="y2",
+        ))
+        # Vertical line separating greedy from reroute
+        fig.add_vline(
+            x=len(slice_labels) - 0.5,
+            line_dash="dot", line_color="#666", line_width=1.5,
+            annotation_text="⟵ greedy | reroute ⟶",
+            annotation_position="top",
+        )
     fig.update_layout(
-        title="Slice State Evolution",
-        xaxis_title="Slice",
+        title="State Evolution (Slices → Epochs)",
+        xaxis_title="Phase",
         yaxis=dict(title="Mean speed (km/h)"),
         yaxis2=dict(title="Max k/kj", overlaying="y", side="right"),
         template="plotly_white",
     )
     figs.append(fig)
+    epoch_note = ""
+    if epoch_results:
+        epoch_note = (
+            f" After greedy loading, {len(epoch_results)} reroute epoch(s) "
+            "refine the solution (dashed lines, diamond markers)."
+        )
     descriptions.append(
         f"<h2>State Evolution</h2>"
         f"<p>Final loaded demand is {case.total_demand:,.0f} "
-        "vph, distributed deterministically across departure slices so total demand "
-        "is preserved.</p>"
+        "vph, distributed deterministically across departure slices."
+        f"{epoch_note}</p>"
     )
 
     fig = go.Figure()

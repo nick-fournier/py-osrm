@@ -178,6 +178,7 @@ class AssignmentLoop:
         )
         logger.setLevel(level)
         logging.getLogger("osrm.assignment.plots").setLevel(level)
+        logging.getLogger("osrm.assignment.solvers").setLevel(level)
         self.vdf = BiParabolicVDF(
             kc_ratio=self.config.vdf_kc_ratio,
             min_speed_kmh=self.config.vdf_min_speed_kmh,
@@ -558,6 +559,7 @@ class AssignmentLoop:
         # that has already seen partial congestion.
         inc_steps = self.config.incremental_steps
         n_inc = 0
+        _last_log = time.monotonic()
         for step_frac in inc_steps:
             if step_frac >= 1.0:
                 break  # 1.0 is handled by the main loop's first iteration
@@ -718,12 +720,20 @@ class AssignmentLoop:
             )
             log.append(iter_result)
 
-            logger.debug(
-                "Iter %d: gap=%.4f, TSTT=%.0f, alpha=%.4f, max_dk=%.1f, "
-                "oversat=%d, route=%.3fs, gap=%.3fs, customize=%.3fs, engine=%.3fs",
-                n, gap, tstt, alpha, max_delta, n_oversat,
-                route_time, gap_time, customize_time, engine_time,
-            )
+            now = time.monotonic()
+            if now - _last_log >= 2.0:
+                logger.info(
+                    "Iter %d: gap=%.4f, TSTT=%.0f, alpha=%.4f",
+                    n, gap, tstt, alpha,
+                )
+                _last_log = now
+            else:
+                logger.debug(
+                    "Iter %d: gap=%.4f, TSTT=%.0f, alpha=%.4f, max_dk=%.1f, "
+                    "oversat=%d, route=%.3fs, gap=%.3fs, customize=%.3fs, engine=%.3fs",
+                    n, gap, tstt, alpha, max_delta, n_oversat,
+                    route_time, gap_time, customize_time, engine_time,
+                )
 
             if progress_callback:
                 progress_callback(n, gap, tstt)

@@ -1113,9 +1113,44 @@ def generate_braess_report(
     )
 
     # -------------------------------------------------------------------
-    # 7c. Reroute Epochs
+    # 7c. Reroute Epoch Gap Convergence
     # -------------------------------------------------------------------
-    figs.append(None)
+    # Build gap-per-epoch chart for both with and without scenarios
+    epochs_w = rr_result_w.epoch_results
+    epochs_wo = rr_result_wo.epoch_results
+
+    fig_epoch = go.Figure()
+    if epochs_w:
+        fig_epoch.add_trace(go.Scatter(
+            x=[f"E{e.epoch}" for e in epochs_w],
+            y=[e.gap for e in epochs_w if e.gap is not None],
+            mode="lines+markers",
+            name="With Shortcut",
+            line=dict(color="#E65100", width=2.5),
+            marker=dict(size=8),
+        ))
+    if epochs_wo:
+        fig_epoch.add_trace(go.Scatter(
+            x=[f"E{e.epoch}" for e in epochs_wo],
+            y=[e.gap for e in epochs_wo if e.gap is not None],
+            mode="lines+markers",
+            name="Without Shortcut",
+            line=dict(color="#FFB74D", width=2.5),
+            marker=dict(size=8),
+        ))
+    fig_epoch.add_hline(
+        y=0.001, line_dash="dot", line_color="#999",
+        annotation_text="gap threshold (0.001)",
+    )
+    fig_epoch.update_layout(
+        title="HC Rerouted: Gap per Epoch",
+        xaxis_title="Epoch",
+        yaxis_title="Sampled Wardrop Gap",
+        yaxis_type="log",
+        template="plotly_white",
+    )
+    figs.append(fig_epoch)
+
     rr_paradox_text = (
         f"The Braess paradox emerges at {rr_pct:+.1f}% &mdash; confirming "
         "convergence toward approximate Wardrop equilibrium."
@@ -1123,12 +1158,15 @@ def generate_braess_report(
         f"The Braess paradox does not emerge ({rr_pct:+.1f}%)."
     )
     descriptions.append(
-        "<h3>Reroute Epochs</h3>"
-        "<p>After greedy loading, reroute epochs iterate through all 20 slices oldest-first. "
-        "Each slice's density is subtracted, re-routed on the residual network, and re-added. "
-        "This Gauss-Seidel approach avoids the full-network AON oscillation of matrix methods.</p>"
-        f"<p>Results: {n_epochs_w} epoch(s) completed. Final gap: with shortcut = {rr_gap_w_str}, "
-        f"without = {rr_gap_wo_str}. {rr_paradox_text}</p>"
+        "<h3>Reroute Epoch Convergence</h3>"
+        "<p>After greedy loading (slices S0&ndash;S19), reroute epochs iterate through all "
+        "slices oldest-first. Each slice's density is subtracted, re-routed on the residual "
+        "network, and re-added (notation: E1:S0 = epoch 1, slice 0). "
+        "This Gauss-Seidel approach avoids full-network AON oscillation.</p>"
+        f"<p>Results: {n_epochs_w} epoch(s) with shortcut, "
+        f"{len(epochs_wo)} without. "
+        f"Final gap: with = {rr_gap_w_str}, without = {rr_gap_wo_str}. "
+        f"{rr_paradox_text}</p>"
     )
 
     # ===================================================================
