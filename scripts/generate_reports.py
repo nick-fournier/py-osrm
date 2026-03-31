@@ -127,11 +127,11 @@ def main() -> None:
 
     for key in targets:
         label, fn = REPORTS[key]
-        print(f"Generating {label}...", end=" ", flush=True)
+        print(f"Generating {label}...", flush=True)
         t0 = time.perf_counter()
         path = fn()
         elapsed = time.perf_counter() - t0
-        print(f"{path} ({path.stat().st_size / 1024:.0f} KB, {elapsed:.1f}s)")
+        print(f"  → {path} ({path.stat().st_size / 1024:.0f} KB, {elapsed:.1f}s)")
 
     print("Done.")
 
