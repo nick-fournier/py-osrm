@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import enum
 import logging
-import math
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -329,31 +327,31 @@ class AssignmentLoop:
         tstt = 0.0
         bin_width_hr = self.config.bin_width_s / 3600.0
 
-        # Parallel routing phase: OSRM releases GIL so threads run concurrently
-        n_workers = min(os.cpu_count() or 1, len(trips))
-        route_results: List[Optional[dict]] = [None] * len(trips)
+        # Build OD dict for bulk_route
+        od_dict = {
+            "origin_lon": [t.origin[0] for t in trips],
+            "origin_lat": [t.origin[1] for t in trips],
+            "dest_lon": [t.destination[0] for t in trips],
+            "dest_lat": [t.destination[1] for t in trips],
+        }
 
-        def _route_batch(indices: List[int]) -> List[Tuple[int, Optional[dict]]]:
-            return [(i, self._route_single(engine, trips[i])) for i in indices]
+        raw_results = osrm_module.bulk_route(
+            engine, od_dict,
+            annotations=["nodes", "distance", "duration", "speed"],
+            raw_response=True,
+            show_progress=False,
+        )
 
-        chunk_size = max(1, math.ceil(len(trips) / n_workers))
-        chunks = [
-            list(range(i, min(i + chunk_size, len(trips))))
-            for i in range(0, len(trips), chunk_size)
-        ]
-
-        with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            futures = [executor.submit(_route_batch, chunk) for chunk in chunks]
-            for future in as_completed(futures):
-                for idx, result in future.result():
-                    route_results[idx] = result
-
-        # Sequential accumulation phase: mutates state (edge registration)
-        for trip_idx, result in enumerate(route_results):
-            if result is None:
+        # Walk raw responses to accumulate density and volume
+        responses = raw_results.get("_response", [])
+        for trip_idx, response in enumerate(responses):
+            if response is None:
                 continue
             trip = trips[trip_idx]
-            route = result["routes"][0]
+            routes = response.get("routes")
+            if not routes:
+                continue
+            route = routes[0]
             tstt += trip.volume * route["duration"]
 
             for leg in route["legs"]:

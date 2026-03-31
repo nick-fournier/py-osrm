@@ -17,6 +17,7 @@ def bulk_route(
     fail_fast: bool = False,
     timeout: Optional[float] = None,
     show_progress: bool = True,
+    raw_response: bool = False,
     **default_params
 ) -> Dict[str, List]: ...
 
@@ -29,6 +30,7 @@ def bulk_route(
     fail_fast: bool = False,
     timeout: Optional[float] = None,
     show_progress: bool = True,
+    raw_response: bool = False,
     **default_params
 ) -> DataFrameT: ...
 
@@ -40,6 +42,7 @@ def bulk_route(
     fail_fast: bool = False,
     timeout: Optional[float] = None,
     show_progress: bool = True,
+    raw_response: bool = False,
     **default_params
 ) -> Union[DataFrameT, Dict[str, List]]:
     """
@@ -56,6 +59,7 @@ def bulk_route(
         fail_fast: If True, raise on first error; if False, collect all results
         timeout: Timeout in seconds for individual route requests
         show_progress: If True (default), display progress bar with processing rate and error count
+        raw_response: If True, include the full OSRM response dict under '_response' key
         **default_params: Default parameters applied to all routes (overridden by row params)
     
     Returns:
@@ -173,12 +177,16 @@ def bulk_route(
                 result['geometry'] = route.get('geometry')
                 result['success'] = True
                 result['error'] = None
+                if raw_response:
+                    result['_response'] = response
             else:
                 result['distance'] = None
                 result['duration'] = None
                 result['geometry'] = None
                 result['success'] = False
                 result['error'] = "No routes found"
+                if raw_response:
+                    result['_response'] = None
                 
         except Exception as e:
             result['distance'] = None
@@ -186,6 +194,8 @@ def bulk_route(
             result['geometry'] = None
             result['success'] = False
             result['error'] = str(e)
+            if raw_response:
+                result['_response'] = None
             
             if fail_fast:
                 raise
@@ -232,13 +242,16 @@ def bulk_route(
                     for index, row in failed_chunk:
                         error_count += 1
                         results[index] = row.copy()
-                        results[index].update({
+                        error_update = {
                             'distance': None,
                             'duration': None,
                             'geometry': None,
                             'success': False,
                             'error': str(e)
-                        })
+                        }
+                        if raw_response:
+                            error_update['_response'] = None
+                        results[index].update(error_update)
                         if progress_bar:
                             progress_bar.set_postfix({"errors": error_count})
                             progress_bar.update(1)
