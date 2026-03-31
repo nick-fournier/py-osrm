@@ -280,16 +280,36 @@ def _add_batch_sections(
         marker=dict(size=7),
         name="Engine reload time",
     ))
+
+    # Append epoch-level runtime bars if reroute epochs exist
+    epoch_results = getattr(result, "epoch_results", []) or []
+    if epoch_results:
+        epoch_rt_labels = [f"E{e.epoch}" for e in epoch_results]
+        fig.add_trace(go.Bar(
+            x=epoch_rt_labels,
+            y=[e.epoch_time_s for e in epoch_results],
+            name="Epoch total time",
+            marker_color="#E65100",
+            opacity=0.7,
+        ))
+
     fig.update_layout(
-        title="Slice Runtime",
-        xaxis_title="Slice",
+        title="Slice & Epoch Runtime",
+        xaxis_title="Slice / Epoch",
         yaxis_title="Time (s)",
         template="plotly_white",
     )
     figs.append(fig)
+    epoch_rt_note = ""
+    if epoch_results:
+        epoch_rt_note = (
+            " Orange bars show total wall-clock time per reroute epoch "
+            f"(each re-processes all {len(result.batch_results)} slices)."
+        )
     descriptions.append(
-        "<h2>Slice Runtime</h2>"
-        "<p>Per-slice routing, customize, and engine reload timings.</p>"
+        "<h2>Slice &amp; Epoch Runtime</h2>"
+        "<p>Per-slice routing, customize, and engine reload timings for the greedy phase."
+        f"{epoch_rt_note}</p>"
     )
 
 

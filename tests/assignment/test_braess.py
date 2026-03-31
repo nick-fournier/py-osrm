@@ -1092,7 +1092,12 @@ def generate_braess_report(
         xaxis_title="Number of departure slices",
         yaxis_title="TSTT delta (with vs without shortcut, %)",
         template="plotly_white",
-        xaxis=dict(type="log", dtick=1, fixedrange=True),
+        xaxis=dict(
+            type="log",
+            tickvals=sweep_slices,
+            ticktext=[str(s) for s in sweep_slices],
+            fixedrange=True,
+        ),
         yaxis=dict(fixedrange=True),
     )
     figs.append(fig_sweep)
