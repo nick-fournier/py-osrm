@@ -118,170 +118,23 @@ if not _lib_dir.exists() or not _lib_dir.is_dir():
         f"Try reinstalling: pip install --force-reinstall py-osrm"
     )
 
-# String to enum mappings
-_GEOMETRIES_MAP = {
-    'polyline': RouteGeometriesType.Polyline,
-    'polyline6': RouteGeometriesType.Polyline6,
-    'geojson': RouteGeometriesType.GeoJSON,
-}
-
-_OVERVIEW_MAP = {
-    'simplified': RouteOverviewType.Simplified,
-    'full': RouteOverviewType.Full,
-    'false': getattr(RouteOverviewType, "False"),  # False is a keyword, use getattr
-}
-
-# Annotations are bitflags, can be combined
-_ANNOTATIONS_MAP = {
-    'none': getattr(RouteAnnotationsType, "None"),  # None is a keyword, use getattr
-    'duration': RouteAnnotationsType.Duration,
-    'nodes': RouteAnnotationsType.Nodes,
-    'distance': RouteAnnotationsType.Distance,
-    'weight': RouteAnnotationsType.Weight,
-    'datasources': RouteAnnotationsType.Datasources,
-    'speed': RouteAnnotationsType.Speed,
-    'all': RouteAnnotationsType.All,
-}
-
-_GAPS_MAP = {
-    'split': MatchGapsType.Split,
-    'ignore': MatchGapsType.Ignore,
-}
-
-_FORMAT_MAP = {
-    'json': OutputFormatType.JSON,
-    'flatbuffers': OutputFormatType.FLATBUFFERS,
-}
-
-_SNAPPING_MAP = {
-    'default': SnappingType.Default,
-    'any': SnappingType.Any,
-}
-
-_TABLE_ANNOTATIONS_MAP = {
-    'none': getattr(TableAnnotationsType, "None"),
-    'duration': TableAnnotationsType.Duration,
-    'distance': TableAnnotationsType.Distance,
-    'all': TableAnnotationsType.All,
-}
-
-_TABLE_FALLBACK_COORDINATE_MAP = {
-    'input': TableFallbackCoordinateType.Input,
-    'snapped': TableFallbackCoordinateType.Snapped,
-}
-
-_TRIP_SOURCE_MAP = {
-    'any': TripSourceType.Any,
-    'first': TripSourceType.First,
-}
-
-_TRIP_DESTINATION_MAP = {
-    'any': TripDestinationType.Any,
-    'last': TripDestinationType.Last,
-}
-
-# Helper function to convert strings to enums
-def _convert_enum(name, value, enum_map):
-    """Convert string value to enum using provided map."""
-    if isinstance(value, str):
-        value_lower = value.lower()
-        if value_lower not in enum_map:
-            raise ValueError(f"Invalid {name}: '{value}'. Must be one of {list(enum_map.keys())}")
-        return enum_map[value_lower]
-    return value
-
-def _convert_annotations(value, annotations_map):
-    """Convert string or list of strings to annotation enum(s)."""
-    if isinstance(value, str):
-        return _convert_enum('annotations', value, annotations_map)
-    elif isinstance(value, list):
-        # Convert list of strings to list of enums (C++ will OR them)
-        return [_convert_enum('annotation', item, annotations_map) if isinstance(item, str) else item 
-                for item in value]
-    return value
-
-# Helper to set parameters with automatic enum conversion
-def _set_param(params, key, value):
-    """Set parameter attribute with automatic string-to-enum conversion."""
-    # Map friendly names to actual attribute names
-    if key == 'annotations':
-        # Check which attribute name the parameter type uses
-        if hasattr(params, 'annotations_type'):
-            key = 'annotations_type'
-        # else it's 'annotations' which TableParameters uses
-    
-    # Special handling for annotations
-    if key == 'annotations' or key == 'annotations_type':
-        converted = _convert_annotations(value, _ANNOTATIONS_MAP if key == 'annotations_type' else _TABLE_ANNOTATIONS_MAP)
-        
-        # If it's a list, use set_annotations method (C++ will OR them)
-        if isinstance(converted, list):
-            if hasattr(params, 'set_annotations'):
-                params.set_annotations(converted)
-            return
-        
-        # Single enum value - set directly
-        if key == 'annotations_type':
-            params.annotations_type = converted
-        else:
-            params.annotations = converted
-        return
-    
-    # Convert known enum types
-    if key == 'geometries':
-        value = _convert_enum('geometries', value, _GEOMETRIES_MAP)
-    elif key == 'overview':
-        value = _convert_enum('overview', value, _OVERVIEW_MAP)
-    elif key == 'gaps':
-        value = _convert_enum('gaps', value, _GAPS_MAP)
-    elif key == 'format':
-        value = _convert_enum('format', value, _FORMAT_MAP)
-    elif key == 'snapping':
-        value = _convert_enum('snapping', value, _SNAPPING_MAP)
-    elif key == 'fallback_coordinate_type':
-        value = _convert_enum('fallback_coordinate_type', value, _TABLE_FALLBACK_COORDINATE_MAP)
-    elif key == 'source':
-        value = _convert_enum('source', value, _TRIP_SOURCE_MAP)
-    elif key == 'destination':
-        value = _convert_enum('destination', value, _TRIP_DESTINATION_MAP)
-    
-    # Set the attribute (skip if not supported)
-    if hasattr(params, key):
-        setattr(params, key, value)
-    else:
-        # Some parameters like 'waypoints' are constructor-only
-        pass
-
-class RouteParameters(_RouteParameters):
-    """RouteParameters wrapper that handles string-to-enum conversion."""
-    
-    def __init__(self, **kwargs):
-        # Create empty parameters
-        super().__init__()
-        
-        # Set all parameters
-        for key, value in kwargs.items():
-            self.__setattr__(key, value)
-    
-    def __setattr__(self, name, value):
-        # Intercept attribute setting to handle string-to-enum conversion
-        if name in ['geometries', 'overview', 'snapping']:
-            value = _convert_enum(name, value, {
-                'geometries': _GEOMETRIES_MAP,
-                'overview': _OVERVIEW_MAP,
-                'snapping': _SNAPPING_MAP
-            }.get(name, {})) if isinstance(value, str) else value
-            super().__setattr__(name, value)
-        elif name in ['annotations', 'annotations_type']:
-            converted = _convert_annotations(value, _ANNOTATIONS_MAP)
-            if isinstance(converted, list):
-                # Use set_annotations for lists
-                if hasattr(self, 'set_annotations'):
-                    self.set_annotations(converted)
-            else:
-                super().__setattr__('annotations_type', converted)
-        else:
-            super().__setattr__(name, value)
+# String to enum mappings — defined in _params.py to avoid circular imports
+from ._params import (
+    GEOMETRIES_MAP as _GEOMETRIES_MAP,
+    OVERVIEW_MAP as _OVERVIEW_MAP,
+    ANNOTATIONS_MAP as _ANNOTATIONS_MAP,
+    GAPS_MAP as _GAPS_MAP,
+    FORMAT_MAP as _FORMAT_MAP,
+    SNAPPING_MAP as _SNAPPING_MAP,
+    TABLE_ANNOTATIONS_MAP as _TABLE_ANNOTATIONS_MAP,
+    TABLE_FALLBACK_COORDINATE_MAP as _TABLE_FALLBACK_COORDINATE_MAP,
+    TRIP_SOURCE_MAP as _TRIP_SOURCE_MAP,
+    TRIP_DESTINATION_MAP as _TRIP_DESTINATION_MAP,
+    convert_enum as _convert_enum,
+    convert_annotations as _convert_annotations,
+    set_param as _set_param,
+    RouteParameters,
+)
 
 
 class OSRM:
@@ -350,6 +203,18 @@ class OSRM:
             _set_param(params, key, value)
         
         return self._engine.Route(params).to_dict()
+    
+    def BatchRoute(self, params_list):
+        """Route multiple OD pairs in parallel using native C++ TBB threading.
+
+        Args:
+            params_list: List of RouteParameters objects.
+
+        Returns:
+            List of route result dicts (None for failed routes).
+        """
+        raw = self._engine.BatchRoute(params_list)
+        return [r.to_dict() if r is not None else None for r in raw]
     
     def Nearest(self, coordinates=None, **kwargs):
         """

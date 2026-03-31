@@ -10,9 +10,14 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include <stdexcept>
 #include <cstdlib>
+#include <vector>
+
+#include <tbb/parallel_for.h>
+#include <tbb/blocked_range.h>
 
 #include "engineconfig_nb.h"
 #include "preprocessing_nb.h"
@@ -187,6 +192,45 @@ NB_MODULE(osrm_ext, m) {
                 (json): [A Route JSON Response](https://project-osrm.org/docs/v5.24.0/api/#route-service).\n\n"
             "Raises:\n\
                 RuntimeError: On invalid RouteParameters."
+            )
+        .def("BatchRoute", [](OSRM* t, const std::vector<RouteParameters>& params_list) {
+            // Validate all params with GIL held for error reporting
+            for (size_t i = 0; i < params_list.size(); ++i) {
+                if (!params_list[i].IsValid()) {
+                    throw std::runtime_error(
+                        "Invalid Route Parameters at index " + std::to_string(i));
+                }
+            }
+
+            std::vector<json::Object> results(params_list.size());
+            std::vector<osrm::engine::Status> statuses(params_list.size());
+
+            {
+                nb::gil_scoped_release release;
+                tbb::parallel_for(
+                    tbb::blocked_range<size_t>(0, params_list.size()),
+                    [&](const tbb::blocked_range<size_t>& range) {
+                        for (size_t i = range.begin(); i != range.end(); ++i) {
+                            statuses[i] = t->Route(params_list[i], results[i]);
+                        }
+                    }
+                );
+            }
+
+            nb::list py_results;
+            for (size_t i = 0; i < results.size(); ++i) {
+                if (statuses[i] == osrm::engine::Status::Ok) {
+                    py_results.append(nb::cast(std::move(results[i])));
+                } else {
+                    py_results.append(nb::none());
+                }
+            }
+            return py_results;
+        }, "Route multiple OD pairs in parallel using native C++ threading (TBB).\n\n"
+            "Args:\n\
+                params_list (list[osrm.RouteParameters]): List of RouteParameters objects.\n\n"
+            "Returns:\n\
+                list: Route result dicts (None for failed routes).\n"
             )
         .def("Table", [](OSRM* t, const TableParameters& params) {
             if(!params.IsValid()) {

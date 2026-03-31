@@ -9,3 +9,6 @@ __pycache__
 
 # generated plots
 docs/plots/*.html
+
+# compiled extensions
+*.so

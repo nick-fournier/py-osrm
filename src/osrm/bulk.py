@@ -5,6 +5,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, TypeVar, Union, overload
 
+from ._params import RouteParameters as _RouteParameters, set_param as _set_param
+
 # TypeVar for DataFrame type (Polars DataFrame)
 DataFrameT = TypeVar('DataFrameT')
 
@@ -160,34 +162,63 @@ def bulk_route(
                 params[col] = row[col]
         
         return params
-    
-    def process_single_route(row: Dict[str, Any], index: int) -> Dict[str, Any]:
-        """Process a single route request."""
-        result = row.copy()  # Preserve original columns
-        
+
+    # Build C++ RouteParameters objects for BatchRoute
+    params_list = []
+    for row in rows:
+        kw = build_params_for_row(row)
+        rp = _RouteParameters()
+        coords = kw.pop('coordinates')
+        rp.coordinates = coords
+        for key, value in kw.items():
+            _set_param(rp, key, value)
+        params_list.append(rp)
+
+    # Dispatch all routes via native C++ TBB parallelism (single GIL release)
+    try:
+        batch_results = osrm_instance._engine.BatchRoute(params_list)
+    except Exception as e:
+        if fail_fast:
+            raise
+        # Total failure — mark all rows as errors
+        batch_results = [None] * len(rows)
+
+    # Unpack results into row dicts
+    results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
+    for i, (row, raw) in enumerate(zip(rows, batch_results)):
+        result = row.copy()
         try:
-            params = build_params_for_row(row)
-            response = osrm_instance.Route(**params)
-            
-            # Extract key metrics from response
-            if response and 'routes' in response and len(response['routes']) > 0:
-                route = response['routes'][0]
-                result['distance'] = route.get('distance')
-                result['duration'] = route.get('duration')
-                result['geometry'] = route.get('geometry')
-                result['success'] = True
-                result['error'] = None
-                if raw_response:
-                    result['_response'] = response
+            if raw is not None:
+                response = raw.to_dict()
+                if response and 'routes' in response and len(response['routes']) > 0:
+                    route = response['routes'][0]
+                    result['distance'] = route.get('distance')
+                    result['duration'] = route.get('duration')
+                    result['geometry'] = route.get('geometry')
+                    result['success'] = True
+                    result['error'] = None
+                    if raw_response:
+                        result['_response'] = response
+                else:
+                    result['distance'] = None
+                    result['duration'] = None
+                    result['geometry'] = None
+                    result['success'] = False
+                    result['error'] = "No routes found"
+                    if raw_response:
+                        result['_response'] = None
+                    if fail_fast:
+                        raise RuntimeError(f"Route {i}: No routes found")
             else:
                 result['distance'] = None
                 result['duration'] = None
                 result['geometry'] = None
                 result['success'] = False
-                result['error'] = "No routes found"
+                result['error'] = "Route failed"
                 if raw_response:
                     result['_response'] = None
-                
+                if fail_fast:
+                    raise RuntimeError(f"Route {i}: Route failed")
         except Exception as e:
             result['distance'] = None
             result['duration'] = None
@@ -196,69 +227,19 @@ def bulk_route(
             result['error'] = str(e)
             if raw_response:
                 result['_response'] = None
-            
             if fail_fast:
                 raise
-        
-        return result
-    
-    def process_chunk(chunk: List[tuple]) -> List[Dict[str, Any]]:
-        """Process a chunk of (index, row) pairs sequentially within one thread."""
-        chunk_results = []
-        for index, row in chunk:
-            chunk_results.append((index, process_single_route(row, index)))
-        return chunk_results
 
-    # Split rows into chunks (one per worker) to minimize task submission overhead
-    chunk_size = max(1, math.ceil(len(rows) / max_workers))
-    indexed_rows = list(enumerate(rows))
-    chunks = [indexed_rows[i:i + chunk_size] for i in range(0, len(indexed_rows), chunk_size)]
+        if not result.get('success', False):
+            error_count += 1
+        if progress_bar:
+            progress_bar.set_postfix({"errors": error_count})
+            progress_bar.update(1)
 
-    # Process route chunks in parallel
-    results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
+        results[i] = result
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_chunk = {
-            executor.submit(process_chunk, chunk): chunk
-            for chunk in chunks
-        }
-
-        try:
-            for future in as_completed(future_to_chunk, timeout=timeout):
-                try:
-                    chunk_results = future.result()
-                    for index, result in chunk_results:
-                        results[index] = result
-                        if not result.get('success', False):
-                            error_count += 1
-                        if progress_bar:
-                            progress_bar.set_postfix({"errors": error_count})
-                            progress_bar.update(1)
-                except Exception as e:
-                    if fail_fast:
-                        raise
-                    # Mark all routes in the failed chunk as errors
-                    failed_chunk = future_to_chunk[future]
-                    for index, row in failed_chunk:
-                        error_count += 1
-                        results[index] = row.copy()
-                        error_update = {
-                            'distance': None,
-                            'duration': None,
-                            'geometry': None,
-                            'success': False,
-                            'error': str(e)
-                        }
-                        if raw_response:
-                            error_update['_response'] = None
-                        results[index].update(error_update)
-                        if progress_bar:
-                            progress_bar.set_postfix({"errors": error_count})
-                            progress_bar.update(1)
-
-        finally:
-            if progress_bar:
-                progress_bar.close()
+    if progress_bar:
+        progress_bar.close()
     
     # Convert results back to DataFrame or dict-of-lists
     if is_polars:
