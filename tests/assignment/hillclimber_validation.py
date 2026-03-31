@@ -342,6 +342,8 @@ def generate_hillclimber_validation_report(
     max_batch_size: int | None = None,
     state_patch_factory: Callable[[dict], Callable] | None = None,
     intro_html: str = "",
+    max_epochs: int = 3,
+    gap_threshold: float = 0.01,
 ) -> Path:
     """Generate a shared hill-climber validation report for one scenario."""
     tmp_path = Path(tmp_path)
@@ -359,6 +361,8 @@ def generate_hillclimber_validation_report(
         bin_width_s=bin_width_s,
         max_batch_size=max_batch_size,
         state_patch_factory=state_patch_factory,
+        max_epochs=max_epochs,
+        gap_threshold=gap_threshold,
     )
 
     state = case.result.network_state

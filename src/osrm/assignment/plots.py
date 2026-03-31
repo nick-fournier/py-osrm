@@ -459,6 +459,7 @@ def _write_combined_report(
             if fig.layout.dragmode not in (None, False):
                 fig.update_layout(
                     margin=dict(l=60, r=40, t=50, b=50),
+                    legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
                 )
             else:
                 fig.update_layout(
@@ -466,6 +467,7 @@ def _write_combined_report(
                     xaxis=dict(fixedrange=True),
                     yaxis=dict(fixedrange=True),
                     dragmode=False,
+                    legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
                 )
                 # Lock axes on subplots too
                 for key in list(fig.layout.to_plotly_json().keys()):
