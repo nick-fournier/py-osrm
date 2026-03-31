@@ -1063,7 +1063,8 @@ def generate_validation_report(
     map_figs: list[go.Figure | None] = []
     map_descs: list[str] = []
     _add_congestion_map_section(
-        map_figs, map_descs, network_name, node_coords, state, detail_scale,
+        map_figs, map_descs, network_name, node_coords, state,
+        link_attrs, detail_scale,
     )
     figs[0:0] = map_figs
     descriptions[0:0] = map_descs
@@ -1174,62 +1175,75 @@ def _add_topology_section(figs, descriptions, name, nodes, link_attrs,
 
 
 def _add_congestion_map_section(figs, descriptions, name, nodes, state,
-                                 detail_scale):
+                                 link_attrs, detail_scale):
     """Network map with links colored by k/k_j density ratio."""
     fig = go.Figure()
 
-    # Collect midpoints and hover data for a single marker trace
-    mid_x, mid_y, mid_color, mid_hover, mid_size = [], [], [], [], []
-
+    # Build state edge lookup
+    edge_map = {}
     for i in range(state.n_edges):
         u, v = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
+        edge_map[(u, v)] = i
+
+    mid_x, mid_y, mid_color, mid_hover, mid_size = [], [], [], [], []
+
+    # Plot ALL links from link_attrs (TNTP network)
+    for (u, v), attrs in link_attrs.items():
         if u not in nodes or v not in nodes:
             continue
         x0, y0 = nodes[u]
         x1, y1 = nodes[v]
+        lanes = attrs["n_lanes"]
 
-        kj = state.jam_density[i]
-        k = state.density_vpkm[i]
-        k_ratio = k / kj if kj > 0 else 0
-        vf = state.freeflow_kmh[i]
-        v_cong = state.speed_kmh[i]
-        flow = state.flow_vph[i]
-        lanes = int(state.n_lanes[i])
+        idx = edge_map.get((u, v))
+        if idx is not None:
+            kj = state.jam_density[idx]
+            k = state.density_vpkm[idx]
+            k_ratio = k / kj if kj > 0 else 0
+            vf = state.freeflow_kmh[idx]
+            v_cong = state.speed_kmh[idx]
+            flow = state.flow_vph[idx]
 
-        if k_ratio < 0.33:
-            color = "#4CAF50"
-        elif k_ratio < 0.66:
-            color = "#FF9800"
-        elif k_ratio < 0.90:
-            color = "#F44336"
+            if k_ratio < 0.33:
+                color = "#4CAF50"
+            elif k_ratio < 0.66:
+                color = "#FF9800"
+            elif k_ratio < 0.90:
+                color = "#F44336"
+            else:
+                color = "#B71C1C"
+
+            hover = (
+                f"{u}→{v}<br>"
+                f"Lanes: {lanes}<br>"
+                f"Freeflow: {vf:.1f} km/h<br>"
+                f"Speed: {v_cong:.1f} km/h<br>"
+                f"Density: {k:.1f} veh/km (k/kj={k_ratio:.2f})<br>"
+                f"Flow: {flow:.0f} veh/hr"
+            )
         else:
-            color = "#B71C1C"
+            color = "#BDBDBD"
+            hover = (
+                f"{u}→{v}<br>"
+                f"Lanes: {lanes}<br>"
+                f"Freeflow: {attrs['ff_speed_kmh']:.0f} km/h<br>"
+                f"(no demand routed)"
+            )
 
-        width = max(1.5, lanes * 1.2)
-
-        # Line segment (no hover — thin lines are hard to hit)
         fig.add_trace(go.Scatter(
             x=[x0, x1], y=[y0, y1], mode="lines",
-            line=dict(color=color, width=width),
+            line=dict(color=color, width=1),
             hoverinfo="skip",
             showlegend=False,
         ))
 
-        # Midpoint for hover
         mid_x.append((x0 + x1) / 2)
         mid_y.append((y0 + y1) / 2)
         mid_color.append(color)
-        mid_size.append(max(6, lanes * 3))
-        mid_hover.append(
-            f"{u}→{v}<br>"
-            f"Lanes: {lanes}<br>"
-            f"Freeflow: {vf:.1f} km/h<br>"
-            f"Speed: {v_cong:.1f} km/h<br>"
-            f"Density: {k:.1f} veh/km (k/kj={k_ratio:.2f})<br>"
-            f"Flow: {flow:.0f} veh/hr"
-        )
+        mid_size.append(8)
+        mid_hover.append(hover)
 
-    # Single marker trace at midpoints for hover
+    # Invisible midpoint markers for hover
     fig.add_trace(go.Scatter(
         x=mid_x, y=mid_y, mode="markers",
         marker=dict(size=mid_size, color=mid_color, opacity=0),
@@ -1266,19 +1280,19 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
     )
     figs.append(fig)
 
+    n_unused = len(link_attrs) - len(edge_map)
     n_crit = int(np.sum(state.density_vpkm > state.jam_density / 3))
-    n_jam = int(np.sum(
-        state.density_vpkm >= state.jam_density * 0.9
-    ))
+    n_jam = int(np.sum(state.density_vpkm >= state.jam_density * 0.9))
     descriptions.append(
         f"<h2>Congestion Map ({detail_scale:.0%} demand)</h2>"
         f"<p>Links colored by density ratio k/k<sub>j</sub>: "
-        f'<span style="color:#4CAF50"><b>green</b></span> (k/k<sub>j</sub> &lt; 0.33), '
+        f'<span style="color:#4CAF50"><b>green</b></span> (&lt; 0.33), '
         f'<span style="color:#FF9800"><b>yellow</b></span> (0.33–0.66), '
         f'<span style="color:#F44336"><b>red</b></span> (0.66–0.90), '
-        f'<span style="color:#B71C1C"><b>dark red</b></span> (&ge; 0.90). '
-        f"{n_crit} links above k<sub>c</sub>, {n_jam} near jam. "
-        f"Hover over links for details.</p>"
+        f'<span style="color:#B71C1C"><b>dark red</b></span> (&ge; 0.90), '
+        f'<span style="color:#BDBDBD"><b>grey</b></span> (no demand). '
+        f"{n_crit} links above k<sub>c</sub>, {n_jam} near jam, "
+        f"{n_unused} unused. Hover over links for details.</p>"
     )
 
 
@@ -1473,22 +1487,30 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
         return ""
 
     table_html = (
-        '<table style="border-collapse:collapse; width:100%; font-size:13px; '
+        '<div style="margin-bottom:8px;">'
+        '<input type="text" id="linkFilter" placeholder="Filter links (e.g. 397)" '
+        'oninput="filterTable()" '
+        'style="padding:4px 8px;font-size:13px;border:1px solid #ccc;border-radius:3px;width:200px;">'
+        '</div>'
+        '<div style="max-height:500px;overflow-y:auto;border:1px solid #ddd;">'
+        '<table id="linkTable" style="border-collapse:collapse; width:100%; font-size:13px; '
         'font-family:monospace;">\n'
-        '<thead><tr style="border-bottom:2px solid #333;">'
-        '<th style="text-align:left;padding:6px;">Link</th>'
-        '<th style="padding:6px;">Lanes</th>'
-        '<th style="padding:6px;">Dist (m)</th>'
-        '<th style="padding:6px;">v<sub>f</sub></th>'
-        '<th style="padding:6px;">q<sub>c</sub></th>'
-        '<th style="padding:6px;border-left:2px solid #ccc;">Flow</th>'
-        '<th style="padding:6px;">k</th>'
-        '<th style="padding:6px;">k/k<sub>j</sub></th>'
-        '<th style="padding:6px;">V/C</th>'
-        '<th style="padding:6px;">Speed</th>'
-        '<th style="padding:6px;">FF TT</th>'
-        '<th style="padding:6px;">TT</th>'
-        '<th style="padding:6px;">TT/FF</th>'
+        '<thead style="position:sticky;top:0;background:#fff;z-index:1;">'
+        '<tr style="border-bottom:2px solid #333;cursor:pointer;" '
+        'onclick="sortTable(event)">'
+        '<th data-col="0" style="text-align:left;padding:6px;">Link</th>'
+        '<th data-col="1" style="padding:6px;">Lanes</th>'
+        '<th data-col="2" style="padding:6px;">Dist (m)</th>'
+        '<th data-col="3" style="padding:6px;">v<sub>f</sub></th>'
+        '<th data-col="4" style="padding:6px;">q<sub>c</sub></th>'
+        '<th data-col="5" style="padding:6px;border-left:2px solid #ccc;">Flow</th>'
+        '<th data-col="6" style="padding:6px;">k</th>'
+        '<th data-col="7" style="padding:6px;">k/k<sub>j</sub></th>'
+        '<th data-col="8" style="padding:6px;">V/C</th>'
+        '<th data-col="9" style="padding:6px;">Speed</th>'
+        '<th data-col="10" style="padding:6px;">FF TT</th>'
+        '<th data-col="11" style="padding:6px;">TT</th>'
+        '<th data-col="12" style="padding:6px;">TT/FF</th>'
         '</tr></thead>\n<tbody>\n'
     )
 
@@ -1518,7 +1540,39 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
             f'</tr>\n'
         )
 
-    table_html += '</tbody></table>'
+    table_html += '</tbody></table></div>'
+
+    # Sort and filter JS
+    table_html += '''
+<script>
+var sortDir = {};
+function sortTable(e) {
+    var th = e.target.closest('th');
+    if (!th) return;
+    var col = parseInt(th.dataset.col);
+    var table = document.getElementById('linkTable');
+    var tbody = table.tBodies[0];
+    var rows = Array.from(tbody.rows);
+    sortDir[col] = !(sortDir[col] || false);
+    var asc = sortDir[col] ? 1 : -1;
+    rows.sort(function(a, b) {
+        var at = a.cells[col].textContent.trim();
+        var bt = b.cells[col].textContent.trim();
+        var an = parseFloat(at), bn = parseFloat(bt);
+        if (!isNaN(an) && !isNaN(bn)) return (an - bn) * asc;
+        return at.localeCompare(bt) * asc;
+    });
+    rows.forEach(function(r) { tbody.appendChild(r); });
+}
+function filterTable() {
+    var val = document.getElementById('linkFilter').value.toLowerCase();
+    var rows = document.getElementById('linkTable').tBodies[0].rows;
+    for (var i = 0; i < rows.length; i++) {
+        var txt = rows[i].cells[0].textContent.toLowerCase();
+        rows[i].style.display = txt.indexOf(val) >= 0 ? '' : 'none';
+    }
+}
+</script>'''
 
     all_vc = [r[11] for r in rows]
     all_speeds = [r[4] for r in rows]
