@@ -31,6 +31,14 @@ from osrm.assignment.vdf import BiParabolicVDF
 
 logger = logging.getLogger(__name__)
 
+_VERBOSITY_LEVELS = {
+    "NONE": logging.WARNING + 10,   # effectively silent
+    "ERROR": logging.ERROR,
+    "WARNING": logging.WARNING,
+    "INFO": logging.INFO,
+    "DEBUG": logging.DEBUG,
+}
+
 
 class StopReason(enum.Enum):
     """Why the assignment loop terminated."""
@@ -164,6 +172,12 @@ class AssignmentLoop:
     ) -> None:
         self.base_path = str(base_path)
         self.config = config or AssignmentConfig()
+        # Wire verbosity config to Python loggers
+        level = _VERBOSITY_LEVELS.get(
+            self.config.verbosity.upper(), logging.ERROR,
+        )
+        logger.setLevel(level)
+        logging.getLogger("osrm.assignment.plots").setLevel(level)
         self.vdf = BiParabolicVDF(
             kc_ratio=self.config.vdf_kc_ratio,
             min_speed_kmh=self.config.vdf_min_speed_kmh,
@@ -229,7 +243,7 @@ class AssignmentLoop:
             1 for c in unique_coords
             if abs(snapped[c][0] - c[0]) > 1e-8 or abs(snapped[c][1] - c[1]) > 1e-8
         )
-        logger.info(
+        logger.debug(
             "Snapped %d/%d unique coordinates (max shift: %.2fm)",
             n_moved, len(unique_coords),
             max(
@@ -268,7 +282,7 @@ class AssignmentLoop:
         OSM ``maxspeed`` tags.  This speed is stored as ``freeflow_kmh``
         and is never updated — it is an immutable physical road attribute.
         """
-        logger.info("Discovering network edges from %d OD pairs...", len(trips))
+        logger.debug("Discovering network edges from %d OD pairs...", len(trips))
 
         raw = self._batch_route_raw(engine, trips)
         route_results = [
@@ -548,7 +562,7 @@ class AssignmentLoop:
             if step_frac >= 1.0:
                 break  # 1.0 is handled by the main loop's first iteration
             n_inc += 1
-            logger.info(
+            logger.debug(
                 "=== Incremental step %d/%d (%.0f%% demand) ===",
                 n_inc, len(inc_steps), step_frac * 100,
             )
@@ -587,7 +601,7 @@ class AssignmentLoop:
             del engine
             engine = self._create_engine()
 
-            logger.info(
+            logger.debug(
                 "Incremental step %d: frac=%.2f, max_k/kj=%.2f, route=%.3fs",
                 n_inc, step_frac,
                 float(np.max(state.density_vpkm / state.jam_density)),
@@ -599,7 +613,7 @@ class AssignmentLoop:
         fw_zero_count = 0
 
         for n in range(1, self.config.max_iterations + 1):
-            logger.info("=== Iteration %d ===", n)
+            logger.debug("=== Iteration %d ===", n)
 
             # 2. Route all trips, get all-or-nothing density and volume
             t_route = time.monotonic()
@@ -704,7 +718,7 @@ class AssignmentLoop:
             )
             log.append(iter_result)
 
-            logger.info(
+            logger.debug(
                 "Iter %d: gap=%.4f, TSTT=%.0f, alpha=%.4f, max_dk=%.1f, "
                 "oversat=%d, route=%.3fs, gap=%.3fs, customize=%.3fs, engine=%.3fs",
                 n, gap, tstt, alpha, max_delta, n_oversat,

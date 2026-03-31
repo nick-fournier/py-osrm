@@ -1036,7 +1036,7 @@ def generate_validation_report(
 
     # --- 1. Demand scaling sweep (skip if ≤1 scale) ---
     if len(sweep_scales) > 1:
-        logger.info(
+        logger.debug(
             "[%s] Running demand sweep (%d scales)...",
             network_name, len(sweep_scales),
         )
@@ -1047,7 +1047,7 @@ def generate_validation_report(
 
     # --- 2. FW vs MSA convergence ---
     run_methods = list(methods) if methods else ["fw", "msa"]
-    logger.info(
+    logger.debug(
         "[%s] Running convergence comparison (%s, %d iters)...",
         network_name, "+".join(run_methods), max_iter,
     )
@@ -1058,11 +1058,11 @@ def generate_validation_report(
 
     # --- 3. MFD scatter ---
     state = result_fw.network_state
-    logger.info("[%s] Building MFD scatter plots...", network_name)
+    logger.debug("[%s] Building MFD scatter plots...", network_name)
     _add_mfd_section(figs, descriptions, state, detail_scale)
 
     # --- Insert congestion map + table at position 0 (before sweep) ---
-    logger.info("[%s] Building congestion map...", network_name)
+    logger.debug("[%s] Building congestion map...", network_name)
     map_figs: list[go.Figure | None] = []
     map_descs: list[str] = []
     _add_congestion_map_section(
@@ -1070,7 +1070,7 @@ def generate_validation_report(
         link_attrs, meta, detail_scale,
     )
 
-    logger.info("[%s] Building link state table...", network_name)
+    logger.debug("[%s] Building link state table...", network_name)
     _add_link_table_section(
         map_figs, map_descs, state, link_attrs, node_coords,
         detail_scale, total_demand,
@@ -1080,7 +1080,7 @@ def generate_validation_report(
 
     # --- 4. Flow and TT correlation ---
     if ref:
-        logger.info("[%s] Building correlation plots...", network_name)
+        logger.debug("[%s] Building correlation plots...", network_name)
         _add_correlation_section(
             figs, descriptions, state, ref, link_attrs, detail_scale,
         )
@@ -1358,7 +1358,7 @@ def _add_sweep_section(figs, descriptions, base, meta, copy_fn, run_fn,
     sweep_tstt = []
 
     for scale in scales:
-        logger.info("  Sweep scale %.0f%%...", scale * 100)
+        logger.debug("  Sweep scale %.0f%%...", scale * 100)
         run_base = copy_fn(base, Path(base).parent.parent / f"sweep_{scale:.2f}")
         result = run_fn(run_base, meta, max_iter, "fw", scale)
         state = result.network_state
@@ -1469,7 +1469,7 @@ def _add_convergence_section(figs, descriptions, base, meta, copy_fn,
     results = {}
 
     for method in methods:
-        logger.info("  Running %s at %.0f%% demand...", method.upper(), detail_scale * 100)
+        logger.debug("  Running %s at %.0f%% demand...", method.upper(), detail_scale * 100)
         if method == methods[0]:
             run_base = copy_fn(base, tmp_path / f"{method}_detail")
             results[method] = run_fn(run_base, meta, max_iter, method, detail_scale)
@@ -1913,7 +1913,7 @@ def _add_vc_section(figs, descriptions, base, meta, copy_fn, run_fn,
     max_flow = 1
 
     for sc, col in zip(scales, colors):
-        logger.info("  V/C scale %.0f%%...", sc * 100)
+        logger.debug("  V/C scale %.0f%%...", sc * 100)
         vc_base = copy_fn(base, tmp_path / f"vc_{sc:.2f}")
         res = run_fn(vc_base, meta, max_iter, "fw", sc)
         st = res.network_state
