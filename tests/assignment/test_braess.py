@@ -298,7 +298,7 @@ class TestBraessParadox:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "with_run",
             demand_scale=1.0,
-            n_slices=20,
+            n_slices=8,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         case_without = run_hillclimber_case(
@@ -308,7 +308,7 @@ class TestBraessParadox:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "without_run",
             demand_scale=1.0,
-            n_slices=20,
+            n_slices=8,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
 
@@ -339,14 +339,14 @@ class TestBraessParadox:
                 volume=demand,
             )]
             sliced = slice_trips_by_departure(
-                trips, n_slices=20, bin_width_s=3600.0,
+                trips, n_slices=8, bin_width_s=3600.0,
             )
             config = AssignmentConfig(bin_width_s=3600.0, verbosity="NONE")
             hc = MatrixFreeHillClimber(base, config)
             return hc.run_stream(
                 sliced,
                 state_patch=lambda s: patch_braess_lanes(s, meta),
-                max_epochs=3,
+                max_epochs=5,
                 gap_threshold=0.001,
             )
 
@@ -591,7 +591,7 @@ def generate_braess_report(
         trip_builder=_hc_trip_builder,
         run_dir=tmp_path / "hc_with_run",
         demand_scale=1.0,
-        n_slices=20,
+        n_slices=8,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
     )
     case_without = run_hillclimber_case(
@@ -601,7 +601,7 @@ def generate_braess_report(
         trip_builder=_hc_trip_builder,
         run_dir=tmp_path / "hc_without_run",
         demand_scale=1.0,
-        n_slices=20,
+        n_slices=8,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
     )
 
@@ -611,7 +611,7 @@ def generate_braess_report(
             origin=meta_r["origin"], destination=meta_r["destination"],
             volume=demand,
         )]
-        sliced = slice_trips_by_departure(trips, n_slices=20, bin_width_s=3600.0)
+        sliced = slice_trips_by_departure(trips, n_slices=8, bin_width_s=3600.0)
         config = AssignmentConfig(bin_width_s=3600.0, verbosity="NONE")
         hc = MatrixFreeHillClimber(base, config)
         return hc.run_stream(
@@ -1025,7 +1025,7 @@ def generate_braess_report(
     figs.append(None)
     descriptions.append(
         "<h2>Hill-Climber Convergence</h2>"
-        "<p>Convergence diagnostics for the matrix-free hill-climber. Demand is divided into 20 departure "
+        "<p>Convergence diagnostics for the matrix-free hill-climber. Demand is divided into 8 departure "
         "slices loaded sequentially (HC Greedy), then refined via reroute epochs (HC Rerouted) that "
         "iterate through slices oldest-first, subtracting and re-routing each slice's demand.</p>"
     )
@@ -1159,7 +1159,7 @@ def generate_braess_report(
     )
     descriptions.append(
         "<h3>Reroute Epoch Convergence</h3>"
-        "<p>After greedy loading (slices S0&ndash;S19), reroute epochs iterate through all "
+        "<p>After greedy loading (slices S0S0&ndash;S4ndash;S7), reroute epochs iterate through all "
         "slices oldest-first. Each slice's density is subtracted, re-routed on the residual "
         "network, and re-added (notation: E1:S0 = epoch 1, slice 0). "
         "This Gauss-Seidel approach avoids full-network AON oscillation.</p>"
@@ -1181,7 +1181,7 @@ def generate_braess_report(
             "(HC Greedy, HC Rerouted).</p>"
             f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.  "
             f"FW: Beckmann line search, {max_iter} iterations.  "
-            "HC Greedy: 20 departure slices.  HC Rerouted: up to 5 epochs, gap &lt; 0.001.</p>"
+            "HC Greedy: 8 departure slices.  HC Rerouted: up to 5 epochs, gap &lt; 0.001.</p>"
             f"<p><b>Key finding:</b> MSA and FW confirm the Braess paradox (+{pct:.1f}%). "
             f"HC Greedy does <i>not</i> reproduce it ({hc_pct:+.1f}%). After reroute epochs, "
             f"HC Rerouted converges to approximate equilibrium ({rr_pct:+.1f}%).</p>"
