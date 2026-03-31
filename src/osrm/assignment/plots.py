@@ -1033,15 +1033,16 @@ def generate_validation_report(
     descriptions: list[str] = []
 
 
-    # --- 1. Demand scaling sweep ---
-    logger.info(
-        "[%s] Running demand sweep (%d scales)...",
-        network_name, len(sweep_scales),
-    )
-    _add_sweep_section(
-        figs, descriptions, base, meta, copy_fn, run_fn,
-        sweep_scales, total_demand, n_links, max_iter,
-    )
+    # --- 1. Demand scaling sweep (skip if ≤1 scale) ---
+    if len(sweep_scales) > 1:
+        logger.info(
+            "[%s] Running demand sweep (%d scales)...",
+            network_name, len(sweep_scales),
+        )
+        _add_sweep_section(
+            figs, descriptions, base, meta, copy_fn, run_fn,
+            sweep_scales, total_demand, n_links, max_iter,
+        )
 
     # --- 2. FW vs MSA convergence ---
     logger.info(
@@ -1707,81 +1708,76 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     q = state.flow_vph
     vf = state.freeflow_kmh
     kj = state.jam_density
+    n_lanes = state.n_lanes
 
-    # --- Build VDF curves per lane class ---
-    # Group links by lane count, use median v_f for each group
-    lane_classes = {}
-    for i in range(state.n_edges):
-        nl = int(state.n_lanes[i])
-        lane_classes.setdefault(nl, []).append(i)
+    # Per-lane normalization for comparable visualization
+    k_per_lane = k / np.maximum(n_lanes, 1)
+    q_per_lane = q / np.maximum(n_lanes, 1)
+    kj_per_lane = kj / np.maximum(n_lanes, 1)
 
-    curve_colors = ["#999", "#66BB6A", "#AB47BC", "#FF7043", "#42A5F5"]
-    curves = []
-    for idx, (nl, idxs) in enumerate(sorted(lane_classes.items())):
-        med_vf_nl = float(np.median(vf[idxs]))
-        kj_nl = float(np.median(kj[idxs]))
-        k_pts = np.linspace(0, kj_nl, 200)
-        vf_arr = np.full_like(k_pts, med_vf_nl)
-        kj_arr = np.full_like(k_pts, kj_nl)
-        v_pts = vdf.density_to_speed(k_pts, vf_arr, kj_arr)
-        q_pts = vdf.density_to_flow(k_pts, vf_arr, kj_arr)
-        label = f"{nl}-lane (v_f={med_vf_nl:.0f}, k_j={kj_nl:.0f})"
-        color = curve_colors[idx % len(curve_colors)]
-        curves.append((nl, k_pts, v_pts, q_pts, label, color))
+    # --- Single VDF curve normalized per lane ---
+    med_vf = float(np.median(vf))
+    med_kj_lane = float(np.median(kj_per_lane))
+    k_pts = np.linspace(0, med_kj_lane, 200)
+    vf_arr = np.full_like(k_pts, med_vf)
+    kj_arr = np.full_like(k_pts, med_kj_lane)
+    v_pts = vdf.density_to_speed(k_pts, vf_arr, kj_arr)
+    q_pts = vdf.density_to_flow(k_pts, vf_arr, kj_arr)
+    curve_label = f"VDF (v_f={med_vf:.0f}, k_j={med_kj_lane:.0f}/lane)"
 
-    # --- Speed–Density ---
+    # --- Speed–Density (per lane) ---
     fig_vk = go.Figure()
     fig_vk.add_trace(go.Scatter(
-        x=k, y=v, mode="markers",
+        x=k_per_lane.tolist(), y=v.tolist(), mode="markers",
         marker=dict(size=4, color="#1565C0", opacity=0.5),
-        hovertext=[f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+        hovertext=[f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])} "
+                   f"({int(n_lanes[i])}L)"
                    for i in range(state.n_edges)],
         hoverinfo="text",
         showlegend=False,
     ))
-    for nl, k_pts, v_pts, q_pts, label, color in curves:
-        fig_vk.add_trace(go.Scatter(
-            x=k_pts, y=v_pts, mode="lines",
-            line=dict(color=color, dash="dash", width=1),
-            name=label,
-        ))
+    fig_vk.add_trace(go.Scatter(
+        x=k_pts.tolist(), y=v_pts.tolist(), mode="lines",
+        line=dict(color="#999", dash="dash", width=1),
+        name=curve_label,
+    ))
     fig_vk.update_layout(
         title=f"Speed–Density ({detail_scale:.0%} demand)",
-        xaxis_title="Density (veh/km)",
+        xaxis_title="Density per lane (veh/km/lane)",
         yaxis_title="Speed (km/h)",
         template="plotly_white",
         xaxis=dict(rangemode="tozero"),
         yaxis=dict(rangemode="tozero"),
     )
     figs.append(fig_vk)
-    curve_labels = ", ".join(f"{nl}-lane" for nl, *_ in curves)
     descriptions.append(
         "<h2>Speed–Density (MFD)</h2>"
-        "<p>Each point is one link. Dashed curves: theoretical VDF for "
-        f"lane classes ({curve_labels}), using median v<sub>f</sub> per class.</p>"
+        "<p>Each point is one link, normalized to per-lane density so links "
+        "with different lane counts are comparable. Dashed curve: theoretical "
+        f"VDF using median v<sub>f</sub>={med_vf:.0f} km/h, "
+        f"k<sub>j</sub>={med_kj_lane:.0f} veh/km/lane.</p>"
     )
 
-    # --- Flow–Density ---
-    # Use density_to_flow() — not k×v — to avoid speed-floor artifact
+    # --- Flow–Density (per lane) ---
     fig_qk = go.Figure()
     fig_qk.add_trace(go.Scatter(
-        x=k, y=q, mode="markers",
+        x=k_per_lane.tolist(), y=q_per_lane.tolist(), mode="markers",
         marker=dict(size=4, color="#D32F2F", opacity=0.5),
-        hovertext=[f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])}"
+        hovertext=[f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])} "
+                   f"({int(n_lanes[i])}L)"
                    for i in range(state.n_edges)],
         hoverinfo="text",
         showlegend=False,
     ))
-    for nl, k_pts, v_pts, q_pts, label, color in curves:
-        fig_qk.add_trace(go.Scatter(
-            x=k_pts, y=q_pts, mode="lines",
-            line=dict(color=color, dash="dash", width=1),
-            name=label,
-        ))
+    fig_qk.add_trace(go.Scatter(
+        x=k_pts.tolist(), y=q_pts.tolist(), mode="lines",
+        line=dict(color="#999", dash="dash", width=1),
+        name=curve_label,
+    ))
     fig_qk.update_layout(
         title=f"Flow–Density ({detail_scale:.0%} demand)",
-        xaxis_title="Density (veh/km)",
-        yaxis_title="Flow (veh/hr)",
+        xaxis_title="Density per lane (veh/km/lane)",
+        yaxis_title="Flow per lane (veh/hr/lane)",
         template="plotly_white",
         xaxis=dict(rangemode="tozero"),
         yaxis=dict(rangemode="tozero"),
@@ -1789,9 +1785,9 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     figs.append(fig_qk)
     descriptions.append(
         "<h2>Flow–Density (MFD)</h2>"
-        "<p>Each point is one link. The inverted-U shape is the fundamental "
-        "diagram: flow increases with density up to capacity, then drops as "
-        "congestion sets in.</p>"
+        "<p>Each point is one link (per-lane normalization). The inverted-U shape "
+        "is the fundamental diagram: flow increases with density up to capacity, "
+        "then drops as congestion sets in.</p>"
     )
 
 

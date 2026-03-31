@@ -111,16 +111,14 @@ def _run_chicago_assignment(
     meta: dict,
     max_iter: int = 30,
     method: str = "fw",
-    demand_scale: float = 0.10,
+    demand_scale: float = 1.00,
 ):
     """Run assignment on Chicago Sketch network.
 
     Parameters
     ----------
     demand_scale : float
-        Fraction of TNTP demand to use.  Default 0.10 (126,090 vph).
-        Chicago Sketch has 1.26M total demand which is ~12× Anaheim,
-        so we start with a lower scale.
+        Fraction of TNTP demand to use.  Default 1.00 (1,260,907 vph).
     """
     meta_scaled = dict(meta)
     meta_scaled["od_matrix"] = meta["od_matrix"] * demand_scale
@@ -149,20 +147,20 @@ class TestChicagoSketch:
     def test_smoke_fw(self, tmp_path):
         """Quick smoke: FW runs without error on Chicago Sketch."""
         base, meta = _prepare_chicago_network(tmp_path)
-        result = _run_chicago_assignment(base, meta, max_iter=5)
+        result = _run_chicago_assignment(base, meta, max_iter=5, demand_scale=0.10)
         assert result.iterations >= 1
         assert result.network_state.n_edges > 0
 
     def test_flow_nonnegativity(self, tmp_path):
         """All link flows must be non-negative."""
         base, meta = _prepare_chicago_network(tmp_path)
-        result = _run_chicago_assignment(base, meta, max_iter=10)
+        result = _run_chicago_assignment(base, meta, max_iter=10, demand_scale=0.10)
         assert np.all(result.network_state.flow_vph >= 0)
 
     def test_network_scale(self, tmp_path):
         """Verify OSRM discovers a meaningful fraction of the 2950 links."""
         base, meta = _prepare_chicago_network(tmp_path)
-        result = _run_chicago_assignment(base, meta, max_iter=5)
+        result = _run_chicago_assignment(base, meta, max_iter=5, demand_scale=0.10)
         state = result.network_state
         # 387 zones → many OD pairs → should discover substantial network
         assert state.n_edges >= 500, (
@@ -172,7 +170,7 @@ class TestChicagoSketch:
     def test_speeds_within_bounds(self, tmp_path):
         """Speeds must be between VDF min and freeflow."""
         base, meta = _prepare_chicago_network(tmp_path)
-        result = _run_chicago_assignment(base, meta, max_iter=10)
+        result = _run_chicago_assignment(base, meta, max_iter=10, demand_scale=0.10)
         state = result.network_state
         assert np.all(state.speed_kmh >= 1.08 - 1e-6)
         assert np.all(state.speed_kmh <= state.freeflow_kmh + 1e-6)
@@ -200,7 +198,7 @@ def generate_chicago_report(
         tmp_path=Path(tmp_path),
         output_path=output_path,
         max_iter=max_iter,
-        detail_scale=0.30,
-        sweep_scales=[0.05, 0.10, 0.20, 0.30],
-        vc_scales=[0.05, 0.10, 0.15, 0.20],
+        detail_scale=1.00,
+        sweep_scales=[1.00],
+        vc_scales=[],
     )
