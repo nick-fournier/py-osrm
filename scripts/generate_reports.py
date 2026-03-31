@@ -13,6 +13,7 @@ Usage::
     uv run python scripts/generate_reports.py sioux-hc   # Sioux Falls hill-climber validation
     uv run python scripts/generate_reports.py anaheim-hc # Anaheim hill-climber validation
     uv run python scripts/generate_reports.py chi-sketch-hc # Chicago hill-climber validation
+    uv run python scripts/generate_reports.py slice-sweep   # Cross-network slice sweep
 
 Reports are written to docs/plots/.
 """
@@ -95,6 +96,13 @@ def generate_chicago_hillclimber() -> Path:
     return generate_chicago_hillclimber_report(tempfile.mkdtemp())
 
 
+def generate_slice_sweep() -> Path:
+    """Generate cross-network slice convergence sweep report."""
+    from tests.assignment.test_slice_sweep import generate_slice_sweep_report
+
+    return generate_slice_sweep_report(tempfile.mkdtemp())
+
+
 REPORTS = {
     "vdf": ("VDF Theory", generate_vdf),
     "braess": ("Braess Paradox Validation", generate_braess),
@@ -105,6 +113,7 @@ REPORTS = {
     "sioux-hc": ("Sioux Falls Hill-Climber Validation", generate_sioux_hillclimber),
     "anaheim-hc": ("Anaheim Hill-Climber Validation", generate_anaheim_hillclimber),
     "chi-sketch-hc": ("Chicago Sketch Hill-Climber Validation", generate_chicago_hillclimber),
+    "slice-sweep": ("Slice Convergence Sweep", generate_slice_sweep),
 }
 
 DEFAULT_REPORTS = ["vdf", "braess", "sioux", "anaheim", "chi-sketch", "monaco-hc"]
