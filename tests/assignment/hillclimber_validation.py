@@ -93,7 +93,6 @@ def run_hillclimber_case(
     config = AssignmentConfig(
         bin_width_s=bin_width_s,
         smoothing=DensitySmoothingConfig(method="none"),
-        verbosity="ERROR",
         speed_csv_dir=str(Path(run_base).parent),
     )
     solver = MatrixFreeHillClimber(

@@ -537,6 +537,11 @@ class AssignmentLoop:
         use a separate base path per run.
         """
         t_start = time.monotonic()
+        n_trips = len(trips)
+        logger.info(
+            "Assignment started: %s, %d trips, max_iter=%d",
+            self.config.method.upper(), n_trips, self.config.max_iterations,
+        )
         log: List[IterationResult] = []
 
         # 1. Discover network on current OSRM state.
@@ -608,7 +613,7 @@ class AssignmentLoop:
             osrm_module.customize(
                 self.base_path,
                 segment_speed_file=str(csv_path),
-                verbosity=self.config.verbosity,
+                verbosity="ERROR",  # OSRM C++ always quiet
             )
             del engine
             engine = self._create_engine()
@@ -706,7 +711,7 @@ class AssignmentLoop:
             osrm_module.customize(
                 self.base_path,
                 segment_speed_file=str(csv_path),
-                verbosity=self.config.verbosity,
+                verbosity="ERROR",  # OSRM C++ always quiet
             )
             customize_time = time.monotonic() - t_cust
 
@@ -790,6 +795,12 @@ class AssignmentLoop:
 
         if stop_reason is None:
             stop_reason = StopReason.MAX_ITERATIONS
+
+        logger.info(
+            "Assignment complete: %s, %d iters, gap=%.6f, %.1fs",
+            stop_reason.value, len(log),
+            log[-1].relative_gap if log else float("inf"), total_time,
+        )
 
         return AssignmentResult(
             converged=stop_reason == StopReason.CONVERGED,

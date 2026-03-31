@@ -318,6 +318,11 @@ class MatrixFreeHillClimber:
                 n_trips=0,
             )
 
+        logger.info(
+            "HC started: %d trips, max_epochs=%d",
+            len(all_trips), max_epochs,
+        )
+
         loop = self._make_loop()
         engine = loop._create_engine()
 
@@ -375,7 +380,7 @@ class MatrixFreeHillClimber:
             osrm_module.customize(
                 self.base_path,
                 segment_speed_file=str(csv_path),
-                verbosity=self.config.verbosity,
+                verbosity="ERROR",  # OSRM C++ always quiet
             )
             customize_time = time.monotonic() - t_cust
 
@@ -433,7 +438,7 @@ class MatrixFreeHillClimber:
                 osrm_module.customize(
                     self.base_path,
                     segment_speed_file=str(csv_path),
-                    verbosity=self.config.verbosity,
+                    verbosity="ERROR",  # OSRM C++ always quiet
                 )
                 del engine
                 engine = loop._create_engine()
@@ -499,7 +504,7 @@ class MatrixFreeHillClimber:
             osrm_module.customize(
                 self.base_path,
                 segment_speed_file=str(csv_path),
-                verbosity=self.config.verbosity,
+                verbosity="ERROR",  # OSRM C++ always quiet
             )
             del engine
             engine = loop._create_engine()
@@ -539,10 +544,16 @@ class MatrixFreeHillClimber:
             if gap is not None and gap < gap_threshold:
                 break
 
+        total_time = time.monotonic() - started
+        logger.info(
+            "HC complete: %d slices, %d epochs, %.1fs",
+            len(batch_results), len(epoch_results), total_time,
+        )
+
         return HillClimberResult(
             network_state=state,
             batch_results=batch_results,
-            total_time_s=time.monotonic() - started,
+            total_time_s=total_time,
             n_trips=len(snapped_trips),
             slice_ledger=ledger,
             epoch_results=epoch_results,
