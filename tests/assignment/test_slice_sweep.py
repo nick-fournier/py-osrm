@@ -1,7 +1,7 @@
 """Cross-network slice sweep: convergence sensitivity to N slices.
 
-Runs the hill-climber at [2, 4, 8, 16, 32] slices on Sioux Falls, Anaheim,
-and Chicago Sketch with reroute epochs (max_epochs=10, gap_threshold=0.001).
+Runs the hill-climber at [2, 4, 8, 16, 32] slices on Sioux Falls and Anaheim
+with reroute epochs (max_epochs=10, gap_threshold=0.001).
 Produces a standalone HTML report comparing epochs-to-converge, final gap,
 and total runtime as a function of slice count and network size.
 """
@@ -52,12 +52,6 @@ def _build_specs() -> list[NetworkSpec]:
     )
     from osrm.assignment.osm_synthesis import patch_lanes
 
-    from .test_chicago_sketch import (
-        _prepare_chicago_network,
-        _copy_clean_osrm as chi_copy,
-        _build_hillclimber_trips as chi_trips,
-    )
-
     return [
         NetworkSpec(
             name="Sioux Falls",
@@ -74,15 +68,6 @@ def _build_specs() -> list[NetworkSpec]:
             prepare_fn=_prepare_anaheim_network,
             copy_fn=ana_copy,
             trip_builder=ana_trips,
-            detail_scale=1.00,
-            state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
-        ),
-        NetworkSpec(
-            name="Chicago Sketch",
-            color="#D32F2F",
-            prepare_fn=_prepare_chicago_network,
-            copy_fn=chi_copy,
-            trip_builder=chi_trips,
             detail_scale=1.00,
             state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
         ),
@@ -114,11 +99,15 @@ class NetworkSweepResult:
 
 def _run_sweep(spec: NetworkSpec, tmp_root: Path) -> NetworkSweepResult:
     """Run the slice sweep for one network."""
+    import logging
+    logger = logging.getLogger("osrm.assignment.slice_sweep")
+
     nsr = NetworkSweepResult(spec=spec)
     base, meta = spec.prepare_fn(tmp_root / spec.name.lower().replace(" ", "_"))
     spec.n_nodes = len(meta["nodes"])
     spec.n_links = len(meta["link_attrs"])
 
+    logger.info("── %s (%d nodes, %d links) ──", spec.name, spec.n_nodes, spec.n_links)
     for ns in SWEEP_SLICES:
         t0 = time.perf_counter()
         case = run_hillclimber_case(
@@ -144,6 +133,12 @@ def _run_sweep(spec: NetworkSpec, tmp_root: Path) -> NetworkSweepResult:
             final_tstt = sum(s.tstt for s in epochs[-1].slice_snapshots)
         else:
             final_tstt = greedy_tstt
+
+        gap_str = f"gap={final_gap:.6f}" if final_gap is not None else "gap=n/a"
+        logger.info(
+            "  slices=%d: %d epochs, %s, %.1fs",
+            ns, n_epochs, gap_str, elapsed,
+        )
 
         nsr.points.append(SweepPoint(
             n_slices=ns,
