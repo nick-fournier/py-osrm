@@ -6,11 +6,10 @@ Usage::
     uv run python scripts/generate_reports.py          # all reports
     uv run python scripts/generate_reports.py vdf       # VDF theory only
     uv run python scripts/generate_reports.py anaheim    # Anaheim matrix validation
-    uv run python scripts/generate_reports.py braess     # Braess matrix validation
+    uv run python scripts/generate_reports.py braess     # Braess unified validation
     uv run python scripts/generate_reports.py sioux      # Sioux Falls matrix validation
     uv run python scripts/generate_reports.py chi-sketch # Chicago Sketch matrix validation
     uv run python scripts/generate_reports.py monaco-hc  # Monaco hill-climber validation
-    uv run python scripts/generate_reports.py braess-hc  # Braess hill-climber validation
     uv run python scripts/generate_reports.py sioux-hc   # Sioux Falls hill-climber validation
     uv run python scripts/generate_reports.py anaheim-hc # Anaheim hill-climber validation
     uv run python scripts/generate_reports.py chi-sketch-hc # Chicago hill-climber validation
@@ -40,7 +39,7 @@ def generate_vdf() -> Path:
 
 
 def generate_braess() -> Path:
-    """Generate Braess paradox validation report."""
+    """Generate unified Braess paradox validation report."""
     from tests.assignment.test_braess import generate_braess_report
 
     return generate_braess_report(tempfile.mkdtemp())
@@ -74,12 +73,6 @@ def generate_monaco_hillclimber() -> Path:
     return generate_monaco_hillclimber_report(tempfile.mkdtemp())
 
 
-def generate_braess_hillclimber() -> Path:
-    """Generate Braess hill-climber validation report."""
-    from tests.assignment.test_braess import generate_braess_hillclimber_report
-
-    return generate_braess_hillclimber_report(tempfile.mkdtemp())
-
 
 def generate_sioux_hillclimber() -> Path:
     """Generate Sioux Falls hill-climber validation report."""
@@ -104,12 +97,11 @@ def generate_chicago_hillclimber() -> Path:
 
 REPORTS = {
     "vdf": ("VDF Theory", generate_vdf),
-    "braess": ("Braess Matrix Validation", generate_braess),
+    "braess": ("Braess Paradox Validation", generate_braess),
     "sioux": ("Sioux Falls Matrix Validation", generate_sioux_falls),
     "anaheim": ("Anaheim Matrix Validation", generate_anaheim),
     "chi-sketch": ("Chicago Sketch Matrix Validation", generate_chicago),
     "monaco-hc": ("Monaco Hill-Climber Validation", generate_monaco_hillclimber),
-    "braess-hc": ("Braess Hill-Climber Validation", generate_braess_hillclimber),
     "sioux-hc": ("Sioux Falls Hill-Climber Validation", generate_sioux_hillclimber),
     "anaheim-hc": ("Anaheim Hill-Climber Validation", generate_anaheim_hillclimber),
     "chi-sketch-hc": ("Chicago Sketch Hill-Climber Validation", generate_chicago_hillclimber),
