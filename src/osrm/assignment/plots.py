@@ -1079,7 +1079,8 @@ def generate_validation_report(
     # --- 5. Link state table (at end — large for big networks) ---
     logger.info("[%s] Building link state table...", network_name)
     _add_link_table_section(
-        figs, descriptions, state, link_attrs, detail_scale, total_demand,
+        figs, descriptions, state, link_attrs, node_coords,
+        detail_scale, total_demand,
     )
 
     # Compose intro
@@ -1457,10 +1458,11 @@ def _add_convergence_section(figs, descriptions, base, meta, copy_fn,
     return result_fw
 
 
-def _add_link_table_section(figs, descriptions, state, link_attrs,
+def _add_link_table_section(figs, descriptions, state, link_attrs, nodes,
                              detail_scale, total_demand):
     """Section 3: per-link state table."""
     rows = []
+    midpoints = {}
     for i in range(state.n_edges):
         key = (int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1]))
         la = link_attrs.get(key, {})
@@ -1476,6 +1478,11 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
         ff_tt = dist_m / 1000 / vf * 60 if vf > 0 else float("inf")
         vc = flow / qc if qc > 0 else 0
         rows.append((key, ln, dist_m, vf, v, flow, k, kj, qc, ff_tt, tt, vc))
+        u, vn = key
+        if u in nodes and vn in nodes:
+            mx = (nodes[u][0] + nodes[vn][0]) / 2
+            my = (nodes[u][1] + nodes[vn][1]) / 2
+            midpoints[f"{u}→{vn}"] = (mx, my)
 
     rows.sort(key=lambda r: r[0])
 
@@ -1522,9 +1529,11 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
                     else "color:#FF6F00;" if k_kj > 0.5 else "")
         tt_str = f"{tt:.2f}" if tt < float("inf") else "&infin;"
         ratio_str = f"{ratio:.2f}" if ratio < float("inf") else "&infin;"
+        link_id = f"{key[0]}→{key[1]}"
         table_html += (
-            f'<tr style="border-bottom:1px solid #eee;">'
-            f'<td style="padding:4px 6px;">{key[0]}&rarr;{key[1]}</td>'
+            f'<tr style="border-bottom:1px solid #eee;cursor:pointer;" '
+            f'data-link="{link_id}" onclick="highlightLink(this)">'
+            f'<td style="padding:4px 6px;">{key[0]}→{key[1]}</td>'
             f'<td style="text-align:right;padding:4px 6px;">{ln}</td>'
             f'<td style="text-align:right;padding:4px 6px;">{dist_m:.0f}</td>'
             f'<td style="text-align:right;padding:4px 6px;">{vf:.0f}</td>'
@@ -1542,11 +1551,17 @@ def _add_link_table_section(figs, descriptions, state, link_attrs,
 
     table_html += '</tbody></table></div>'
 
-    # Sort and filter JS
-    table_html += '''
+    # Embed midpoint coordinates for map highlighting
+    import json
+    mp_json = json.dumps({k: list(v) for k, v in midpoints.items()})
+
+    table_html += f'''
 <script>
-var sortDir = {};
-function sortTable(e) {
+var sortDir = {{}};
+var linkMidpoints = {mp_json};
+var _prevHighlight = null;
+
+function sortTable(e) {{
     var th = e.target.closest('th');
     if (!th) return;
     var col = parseInt(th.dataset.col);
@@ -1555,23 +1570,61 @@ function sortTable(e) {
     var rows = Array.from(tbody.rows);
     sortDir[col] = !(sortDir[col] || false);
     var asc = sortDir[col] ? 1 : -1;
-    rows.sort(function(a, b) {
+    rows.sort(function(a, b) {{
         var at = a.cells[col].textContent.trim();
         var bt = b.cells[col].textContent.trim();
         var an = parseFloat(at), bn = parseFloat(bt);
         if (!isNaN(an) && !isNaN(bn)) return (an - bn) * asc;
         return at.localeCompare(bt) * asc;
-    });
-    rows.forEach(function(r) { tbody.appendChild(r); });
-}
-function filterTable() {
+    }});
+    rows.forEach(function(r) {{ tbody.appendChild(r); }});
+}}
+
+function filterTable() {{
     var val = document.getElementById('linkFilter').value.toLowerCase();
     var rows = document.getElementById('linkTable').tBodies[0].rows;
-    for (var i = 0; i < rows.length; i++) {
+    for (var i = 0; i < rows.length; i++) {{
         var txt = rows[i].cells[0].textContent.toLowerCase();
         rows[i].style.display = txt.indexOf(val) >= 0 ? '' : 'none';
-    }
-}
+    }}
+}}
+
+function highlightLink(tr) {{
+    // Deselect previous row
+    if (_prevHighlight) _prevHighlight.style.background = '';
+    tr.style.background = '#FFF9C4';
+    _prevHighlight = tr;
+
+    var linkId = tr.dataset.link;
+    var pt = linkMidpoints[linkId];
+    if (!pt) return;
+
+    // Find the congestion map div (fig-0)
+    var mapDiv = document.getElementById('fig-0');
+    if (!mapDiv) return;
+
+    // Add/update a highlight annotation
+    var ann = {{
+        x: pt[0], y: pt[1],
+        xref: 'x', yref: 'y',
+        text: linkId,
+        showarrow: true,
+        arrowhead: 2, arrowsize: 1.5, arrowcolor: '#000',
+        font: {{ size: 12, color: '#000' }},
+        bgcolor: '#FFF9C4',
+        bordercolor: '#333',
+        borderwidth: 1,
+        borderpad: 3,
+    }};
+    Plotly.relayout(mapDiv, {{
+        annotations: [ann],
+        'xaxis.range': [pt[0] - 0.015, pt[0] + 0.015],
+        'yaxis.range': [pt[1] - 0.008, pt[1] + 0.008],
+    }});
+
+    // Scroll map into view
+    mapDiv.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+}}
 </script>'''
 
     all_vc = [r[11] for r in rows]
