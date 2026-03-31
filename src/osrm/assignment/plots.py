@@ -976,7 +976,7 @@ def generate_validation_report(
 
     Produces an interactive HTML report with:
 
-    0. Network topology map
+    0. Congestion map (links colored by k/k_j, hover for details)
     1. Demand scaling sweep (oversaturation, speed, TSTT)
     2. FW vs MSA convergence comparison
     3. Speed–density and flow–density MFD scatter
@@ -1032,12 +1032,6 @@ def generate_validation_report(
     figs: list[go.Figure | None] = []
     descriptions: list[str] = []
 
-    # --- 0. Network topology map ---
-    logger.info("[%s] Building topology map...", network_name)
-    _add_topology_section(
-        figs, descriptions, network_name, node_coords, link_attrs,
-        n_links, n_zones, total_demand,
-    )
 
     # --- 1. Demand scaling sweep ---
     logger.info(
@@ -1064,11 +1058,15 @@ def generate_validation_report(
     logger.info("[%s] Building MFD scatter plots...", network_name)
     _add_mfd_section(figs, descriptions, state, detail_scale)
 
-    # --- 3b. Congestion map ---
+    # --- Insert congestion map at position 0 (before sweep/convergence) ---
     logger.info("[%s] Building congestion map...", network_name)
+    map_figs: list[go.Figure | None] = []
+    map_descs: list[str] = []
     _add_congestion_map_section(
-        figs, descriptions, network_name, node_coords, state, detail_scale,
+        map_figs, map_descs, network_name, node_coords, state, detail_scale,
     )
+    figs[0:0] = map_figs
+    descriptions[0:0] = map_descs
 
     # --- 4. Flow and TT correlation ---
     if ref:
@@ -1180,28 +1178,24 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
     """Network map with links colored by k/k_j density ratio."""
     fig = go.Figure()
 
-    # Build node-id to state-index lookup
-    edge_map = {}
+    # Collect midpoints and hover data for a single marker trace
+    mid_x, mid_y, mid_color, mid_hover, mid_size = [], [], [], [], []
+
     for i in range(state.n_edges):
         u, v = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
-        edge_map[(u, v)] = i
-
-    # Colorscale breakpoints: green (free) → yellow (kc) → red (jam)
-    for (u, v), idx in edge_map.items():
         if u not in nodes or v not in nodes:
             continue
         x0, y0 = nodes[u]
         x1, y1 = nodes[v]
 
-        kj = state.jam_density[idx]
-        k = state.density_vpkm[idx]
+        kj = state.jam_density[i]
+        k = state.density_vpkm[i]
         k_ratio = k / kj if kj > 0 else 0
-        vf = state.freeflow_kmh[idx]
-        v_cong = state.speed_kmh[idx]
-        flow = state.flow_vph[idx]
-        lanes = int(state.n_lanes[idx])
+        vf = state.freeflow_kmh[i]
+        v_cong = state.speed_kmh[i]
+        flow = state.flow_vph[i]
+        lanes = int(state.n_lanes[i])
 
-        # Color: green → yellow → orange → red
         if k_ratio < 0.33:
             color = "#4CAF50"
         elif k_ratio < 0.66:
@@ -1213,7 +1207,20 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
 
         width = max(1.5, lanes * 1.2)
 
-        hover = (
+        # Line segment (no hover — thin lines are hard to hit)
+        fig.add_trace(go.Scatter(
+            x=[x0, x1], y=[y0, y1], mode="lines",
+            line=dict(color=color, width=width),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
+
+        # Midpoint for hover
+        mid_x.append((x0 + x1) / 2)
+        mid_y.append((y0 + y1) / 2)
+        mid_color.append(color)
+        mid_size.append(max(6, lanes * 3))
+        mid_hover.append(
             f"{u}→{v}<br>"
             f"Lanes: {lanes}<br>"
             f"Freeflow: {vf:.1f} km/h<br>"
@@ -1221,12 +1228,14 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
             f"Density: {k:.1f} veh/km (k/kj={k_ratio:.2f})<br>"
             f"Flow: {flow:.0f} veh/hr"
         )
-        fig.add_trace(go.Scatter(
-            x=[x0, x1], y=[y0, y1], mode="lines",
-            line=dict(color=color, width=width),
-            hoverinfo="text", hovertext=hover,
-            showlegend=False,
-        ))
+
+    # Single marker trace at midpoints for hover
+    fig.add_trace(go.Scatter(
+        x=mid_x, y=mid_y, mode="markers",
+        marker=dict(size=mid_size, color=mid_color, opacity=0),
+        hovertext=mid_hover, hoverinfo="text",
+        showlegend=False,
+    ))
 
     # Node markers
     xs = [nodes[n][0] for n in sorted(nodes)]
@@ -1268,7 +1277,8 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
         f'<span style="color:#FF9800"><b>yellow</b></span> (0.33–0.66), '
         f'<span style="color:#F44336"><b>red</b></span> (0.66–0.90), '
         f'<span style="color:#B71C1C"><b>dark red</b></span> (&ge; 0.90). '
-        f"{n_crit} links above k<sub>c</sub>, {n_jam} near jam.</p>"
+        f"{n_crit} links above k<sub>c</sub>, {n_jam} near jam. "
+        f"Hover over links for details.</p>"
     )
 
 
