@@ -184,25 +184,6 @@ class AssignmentLoop:
             use_shared_memory=False,
         )
 
-    def _route_single(
-        self, engine: osrm_module.OSRM, trip: DemandTrip,
-        alternatives: bool = False,
-    ) -> Optional[dict]:
-        """Route a single OD pair with annotations."""
-        try:
-            kwargs = dict(
-                coordinates=[trip.origin, trip.destination],
-                annotations=["nodes", "distance", "duration", "speed"],
-            )
-            if alternatives:
-                kwargs["alternatives"] = True
-            result = engine.Route(**kwargs)
-            if result.get("code") == "Ok" and result.get("routes"):
-                return result
-        except Exception as e:
-            logger.debug(f"Route failed for {trip.origin}→{trip.destination}: {e}")
-        return None
-
     def _snap_trips(
         self,
         engine: osrm_module.OSRM,
@@ -262,26 +243,33 @@ class AssignmentLoop:
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
     ) -> NetworkState:
-        """Route all trips with alternatives to discover network edges.
+        """Route all trips via BatchRoute to discover network edges.
 
         IMPORTANT: ``engine`` must be a clean (uncustomized) OSRM instance
         so that annotation speed reflects the original profile speed from
         OSM ``maxspeed`` tags.  This speed is stored as ``freeflow_kmh``
         and is never updated — it is an immutable physical road attribute.
-
-        Segment-speed customization permanently mutates OSRM edge weights
-        (only re-extract from OSM resets them), so discovery cannot be
-        repeated on a contaminated instance.
-
-        Requests alternatives to capture non-shortest paths that may
-        become attractive under congestion.
         """
         logger.info("Discovering network edges from %d OD pairs...", len(trips))
-        route_results = []
-        for trip in trips:
-            result = self._route_single(engine, trip, alternatives=True)
-            if result:
-                route_results.append(result)
+
+        od_dict = {
+            "origin_lon": [t.origin[0] for t in trips],
+            "origin_lat": [t.origin[1] for t in trips],
+            "dest_lon": [t.destination[0] for t in trips],
+            "dest_lat": [t.destination[1] for t in trips],
+        }
+
+        raw_results = osrm_module.bulk_route(
+            engine, od_dict,
+            annotations=["nodes", "distance", "duration", "speed"],
+            raw_response=True,
+            show_progress=False,
+        )
+
+        route_results = [
+            r for r in raw_results.get("_response", [])
+            if r is not None and r.get("routes")
+        ]
 
         state = NetworkState.from_route_annotations(
             route_results,
