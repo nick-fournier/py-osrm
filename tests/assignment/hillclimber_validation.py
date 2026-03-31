@@ -254,61 +254,75 @@ def _add_batch_sections(
         f"{epoch_note}</p>"
     )
 
+    # --- Runtime: unified per-slice timing across all epochs ---
+    epoch_results = getattr(result, "epoch_results", []) or []
+
+    # Build unified x-labels and timing arrays
+    rt_labels = [f"E0:S{b.batch_index}" for b in result.batch_results]
+    rt_route = [b.route_time_s for b in result.batch_results]
+    rt_cust = [b.customize_time_s for b in result.batch_results]
+    rt_engine = [b.engine_time_s for b in result.batch_results]
+
+    for er in epoch_results:
+        for snap in er.slice_snapshots:
+            rt_labels.append(f"E{er.epoch}:S{snap.slice_index}")
+            rt_route.append(snap.route_time_s)
+            rt_cust.append(snap.customize_time_s)
+            rt_engine.append(snap.engine_time_s)
+
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=slice_labels,
-        y=[b.route_time_s for b in result.batch_results],
+        x=rt_labels, y=rt_route,
         mode="lines+markers",
         line=dict(color="#1565C0", width=2.0),
-        marker=dict(size=7),
+        marker=dict(size=5),
         name="Route time",
     ))
     fig.add_trace(go.Scatter(
-        x=slice_labels,
-        y=[b.customize_time_s for b in result.batch_results],
+        x=rt_labels, y=rt_cust,
         mode="lines+markers",
         line=dict(color="#8E24AA", width=2.0),
-        marker=dict(size=7),
+        marker=dict(size=5),
         name="Customize time",
     ))
     fig.add_trace(go.Scatter(
-        x=slice_labels,
-        y=[b.engine_time_s for b in result.batch_results],
+        x=rt_labels, y=rt_engine,
         mode="lines+markers",
         line=dict(color="#6D4C41", width=2.0),
-        marker=dict(size=7),
+        marker=dict(size=5),
         name="Engine reload time",
     ))
 
-    # Append epoch-level runtime bars if reroute epochs exist
-    epoch_results = getattr(result, "epoch_results", []) or []
+    # Vertical lines at epoch boundaries with gap on hover
+    n_greedy = len(result.batch_results)
+    for er in epoch_results:
+        x_end = n_greedy + er.epoch * len(er.slice_snapshots) - 0.5
+        gap_str = f"gap={er.gap:.6f}" if er.gap is not None else "gap=n/a"
+        fig.add_vline(
+            x=x_end, line_dash="dot", line_color="#E65100", line_width=1.5,
+            annotation_text=f"E{er.epoch} {gap_str}",
+            annotation_position="top",
+            annotation_font_size=9,
+            annotation_font_color="#E65100",
+        )
+    # Separator between greedy and reroute
     if epoch_results:
-        epoch_rt_labels = [f"E{e.epoch}" for e in epoch_results]
-        fig.add_trace(go.Bar(
-            x=epoch_rt_labels,
-            y=[e.epoch_time_s for e in epoch_results],
-            name="Epoch total time",
-            marker_color="#E65100",
-            opacity=0.7,
-        ))
+        fig.add_vline(
+            x=n_greedy - 0.5,
+            line_dash="dot", line_color="#666", line_width=1.5,
+        )
 
     fig.update_layout(
-        title="Slice & Epoch Runtime",
-        xaxis_title="Slice / Epoch",
+        title="Slice Runtime",
+        xaxis_title="Slice (Epoch:Slice)",
         yaxis_title="Time (s)",
         template="plotly_white",
     )
     figs.append(fig)
-    epoch_rt_note = ""
-    if epoch_results:
-        epoch_rt_note = (
-            " Orange bars show total wall-clock time per reroute epoch "
-            f"(each re-processes all {len(result.batch_results)} slices)."
-        )
     descriptions.append(
-        "<h2>Slice &amp; Epoch Runtime</h2>"
-        "<p>Per-slice routing, customize, and engine reload timings for the greedy phase."
-        f"{epoch_rt_note}</p>"
+        "<h2>Slice Runtime</h2>"
+        "<p>Per-slice routing, customize, and engine reload timings across all epochs. "
+        "Vertical lines mark epoch boundaries with the Wardrop gap at that point.</p>"
     )
 
 

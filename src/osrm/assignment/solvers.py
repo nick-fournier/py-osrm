@@ -163,6 +163,9 @@ class RerouteSliceSnapshot:
     tstt: float
     max_k_over_kj: float
     mean_speed_kmh: float
+    route_time_s: float = 0.0
+    customize_time_s: float = 0.0
+    engine_time_s: float = 0.0
 
 
 @dataclass
@@ -434,21 +437,28 @@ class MatrixFreeHillClimber:
                 loop._update_state(state)
 
                 # 2. Customize OSRM with reduced-state speeds
+                t_cust = time.monotonic()
                 csv_path = loop.writer.write_from_state(state, only_changed=True)
                 osrm_module.customize(
                     self.base_path,
                     segment_speed_file=str(csv_path),
                     verbosity="ERROR",  # OSRM C++ always quiet
                 )
+                rr_customize_time = time.monotonic() - t_cust
+
+                t_eng = time.monotonic()
                 del engine
                 engine = loop._create_engine()
+                rr_engine_time = time.monotonic() - t_eng
 
                 # 3. Re-route this slice's trips (randomize OD order)
                 shuffled_trips = list(entry.trips)
                 random.shuffle(shuffled_trips)
+                t_route = time.monotonic()
                 new_density, new_volume, new_tstt = loop._route_and_accumulate(
                     engine, shuffled_trips, state,
                 )
+                rr_route_time = time.monotonic() - t_route
 
                 # Pad if network grew during rerouting
                 if len(new_density) < state.n_edges:
@@ -489,6 +499,9 @@ class MatrixFreeHillClimber:
                     tstt=new_tstt,
                     max_k_over_kj=snap_k,
                     mean_speed_kmh=snap_speed,
+                    route_time_s=rr_route_time,
+                    customize_time_s=rr_customize_time,
+                    engine_time_s=rr_engine_time,
                 ))
 
                 now = time.monotonic()
