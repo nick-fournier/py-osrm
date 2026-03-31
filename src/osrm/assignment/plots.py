@@ -1186,9 +1186,16 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
         u, v = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
         edge_map[(u, v)] = i
 
-    mid_x, mid_y, mid_color, mid_hover, mid_size = [], [], [], [], []
+    # Group links by color bucket for efficient rendering
+    color_buckets = {
+        "#4CAF50": {"label": "k/kj < 0.33", "xs": [], "ys": []},
+        "#FF9800": {"label": "0.33 ≤ k/kj < 0.66", "xs": [], "ys": []},
+        "#F44336": {"label": "0.66 ≤ k/kj < 0.90", "xs": [], "ys": []},
+        "#B71C1C": {"label": "k/kj ≥ 0.90", "xs": [], "ys": []},
+        "#BDBDBD": {"label": "No demand", "xs": [], "ys": []},
+    }
+    mid_x, mid_y, mid_color, mid_hover = [], [], [], []
 
-    # Plot ALL links from link_attrs (TNTP network)
     for (u, v), attrs in link_attrs.items():
         if u not in nodes or v not in nodes:
             continue
@@ -1231,23 +1238,32 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
                 f"(no demand routed)"
             )
 
-        fig.add_trace(go.Scatter(
-            x=[x0, x1], y=[y0, y1], mode="lines",
-            line=dict(color=color, width=1),
-            hoverinfo="skip",
-            showlegend=False,
-        ))
+        # Append line segment with None separator for batching
+        bucket = color_buckets[color]
+        bucket["xs"].extend([x0, x1, None])
+        bucket["ys"].extend([y0, y1, None])
 
         mid_x.append((x0 + x1) / 2)
         mid_y.append((y0 + y1) / 2)
         mid_color.append(color)
-        mid_size.append(8)
         mid_hover.append(hover)
 
-    # Invisible midpoint markers for hover
+    # One trace per color bucket instead of one per link
+    for color, bucket in color_buckets.items():
+        if not bucket["xs"]:
+            continue
+        fig.add_trace(go.Scatter(
+            x=bucket["xs"], y=bucket["ys"], mode="lines",
+            line=dict(color=color, width=1),
+            hoverinfo="skip",
+            showlegend=False,
+            name=bucket["label"],
+        ))
+
+    # Single invisible midpoint marker trace for hover
     fig.add_trace(go.Scatter(
         x=mid_x, y=mid_y, mode="markers",
-        marker=dict(size=mid_size, color=mid_color, opacity=0),
+        marker=dict(size=8, color=mid_color, opacity=0),
         hovertext=mid_hover, hoverinfo="text",
         showlegend=False,
     ))

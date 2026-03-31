@@ -8,6 +8,7 @@ Usage::
     uv run python scripts/generate_reports.py anaheim   # Anaheim only
     uv run python scripts/generate_reports.py braess    # Braess only
     uv run python scripts/generate_reports.py sioux     # Sioux Falls only
+    uv run python scripts/generate_reports.py chi-sketch # Chicago Sketch only
 
 Reports are written to docs/plots/.
 """
@@ -54,11 +55,19 @@ def generate_anaheim() -> Path:
     return generate_anaheim_report(tempfile.mkdtemp())
 
 
+def generate_chicago() -> Path:
+    """Generate Chicago Sketch validation report."""
+    from tests.assignment.test_chicago_sketch import generate_chicago_report
+
+    return generate_chicago_report(tempfile.mkdtemp())
+
+
 REPORTS = {
     "vdf": ("VDF Theory", generate_vdf),
     "braess": ("Braess Paradox", generate_braess),
     "sioux": ("Sioux Falls", generate_sioux_falls),
     "anaheim": ("Anaheim", generate_anaheim),
+    "chi-sketch": ("Chicago Sketch", generate_chicago),
 }
 
 
