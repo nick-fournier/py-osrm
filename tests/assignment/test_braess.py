@@ -901,6 +901,84 @@ def generate_braess_hillclimber_report(
         detail_scale=1.0,
     )
 
+    # --- Route travel time table (insert after link table, index 2) ---
+    route_tt_html = (
+        "<h2>Route Travel Times</h2>"
+        "<p>Total travel time for each OD route, summed from link-level "
+        "t&nbsp;=&nbsp;L/v at the final network state after all batches.  "
+        "A dash (&mdash;) means no traffic used that route &mdash; notably, "
+        "the upper route (1&rarr;3&rarr;2) is completely abandoned once the "
+        "shortcut is available because the greedy router always prefers "
+        "1&rarr;3&rarr;4&rarr;2.</p>"
+        + _braess_route_tt_table(
+            case_with.result.network_state,
+            case_without.result.network_state,
+        )
+    )
+    figs.insert(2, None)
+    descriptions.insert(2, route_tt_html)
+
+    # --- Slice sweep: how TSTT delta changes with number of batches ---
+    sweep_slices = [1, 2, 4, 8, 16, 32]
+    sweep_pcts: list[float] = []
+    for ns in sweep_slices:
+        cw = run_hillclimber_case(
+            base_path=base_with, meta=meta_with,
+            copy_fn=lambda base, run_dir: base,
+            trip_builder=lambda meta, scale: [DemandTrip(
+                origin=meta["origin"], destination=meta["destination"],
+                volume=demand * scale,
+            )],
+            run_dir=tmp_path / f"sweep_w_{ns}",
+            demand_scale=1.0, n_slices=ns,
+            state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+        )
+        cwo = run_hillclimber_case(
+            base_path=base_without, meta=meta_without,
+            copy_fn=lambda base, run_dir: base,
+            trip_builder=lambda meta, scale: [DemandTrip(
+                origin=meta["origin"], destination=meta["destination"],
+                volume=demand * scale,
+            )],
+            run_dir=tmp_path / f"sweep_wo_{ns}",
+            demand_scale=1.0, n_slices=ns,
+            state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+        )
+        tw = sum(b.batch_tstt for b in cw.result.batch_results)
+        two = sum(b.batch_tstt for b in cwo.result.batch_results)
+        sweep_pcts.append((tw / two - 1) * 100 if two else 0.0)
+
+    fig_sweep = go.Figure()
+    fig_sweep.add_trace(go.Scatter(
+        x=sweep_slices, y=sweep_pcts,
+        mode="lines+markers",
+        line=dict(color="#D32F2F", width=2),
+        marker=dict(size=8),
+        hovertemplate="slices=%{x}<br>TSTT delta=%{y:+.1f}%<extra></extra>",
+    ))
+    fig_sweep.add_hline(y=0, line_dash="dot", line_color="#999")
+    fig_sweep.update_layout(
+        title="TSTT Delta vs Number of Departure Slices",
+        xaxis_title="Number of departure slices",
+        yaxis_title="TSTT delta (with vs without shortcut, %)",
+        template="plotly_white",
+        xaxis=dict(type="log", dtick=1, fixedrange=True),
+        yaxis=dict(fixedrange=True),
+    )
+    figs.append(fig_sweep)
+    descriptions.append(
+        "<h2>Slice Sweep: Does More Batching Reproduce the Paradox?</h2>"
+        "<p>TSTT delta (with-shortcut vs without-shortcut) as a function of "
+        "the number of departure slices.  The dotted line at 0% is where the "
+        "Braess paradox would emerge (positive delta).  Under hill-climber "
+        "loading the shortcut <b>always helps</b>, though the benefit narrows "
+        "as more slices approximate a steady-state loading.  The paradox is "
+        "an equilibrium phenomenon that requires global re-routing; greedy "
+        "incremental loading never reaches the collectively sub-optimal "
+        "state.</p>"
+    )
+
+    # --- TSTT bar comparison ---
     fig = go.Figure()
     labels = ["Without shortcut", "With shortcut"]
     total_tstt = [
@@ -931,24 +1009,18 @@ def generate_braess_hillclimber_report(
         "batch overloads it.</p>"
     )
 
-    # --- Route travel time table ---
-    figs.append(None)
-    descriptions.append(
-        "<h2>Route Travel Times</h2>"
-        "<p>Total travel time for each OD route, summed from link-level "
-        "t&nbsp;=&nbsp;L/v at the final network state after all batches.</p>"
-        + _braess_route_tt_table(
-            case_with.result.network_state,
-            case_without.result.network_state,
-        )
-    )
-
     _write_combined_report(
         title="Braess Hill-Climber Validation",
         intro=(
-            "<p>Matrix-free hill-climber validation on the Braess diamond. The same "
-            "demand is distributed across four deterministic departure slices for "
-            "both with-shortcut and without-shortcut scenarios.</p>"
+            "<p>Matrix-free hill-climber validation on the Braess diamond.  Demand "
+            f"(<b>{demand:,.0f}</b> vph) is distributed across four deterministic "
+            "departure slices for both with-shortcut and without-shortcut scenarios.</p>"
+            "<p><b>Key finding:</b> The Braess paradox does <i>not</i> appear under "
+            "incremental hill-climber loading.  The shortcut always reduces TSTT "
+            "because the greedy router never overloads it the way equilibrium does.  "
+            "The upper route (1&rarr;3&rarr;2) is completely abandoned once the "
+            "shortcut is available.  A slice-sweep confirms the gap narrows with "
+            "more batches but never crosses zero.</p>"
         ),
         figures=figs,
         descriptions=descriptions,
