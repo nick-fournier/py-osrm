@@ -388,3 +388,107 @@ OSRM patch, Valhalla is not a planned dependency.
 | OSRM `include/engine/datafacade/contiguous_internalmem_datafacade.hpp` | MLD facade impl, `GetCellMetric()` (**patch target: multi-period load**) |
 | OSRM `include/engine/routing_algorithms/routing_base_mld.hpp` | MLD search — `relaxOutgoingEdges()` (unchanged by patch) |
 | OSRM `include/engine/datafacade_provider.hpp` | WatchingProvider / ImmutableProvider / ExternalProvider |
+
+---
+
+## 11  Proposed OSRM core PRs for traffic assignment
+
+### 11.1  Raw route result API (bypass serialization)
+
+**Problem:** `OSRM::Route()` returns results only via `ResultT`, which is
+`variant<json::Object, string, FlatBufferBuilder>`. All three variants
+require full serialization of route geometry, annotations, and metadata.
+For traffic assignment, we only need per-segment annotation data (node IDs,
+distances, speeds) — not the full response.
+
+**Profiling evidence (Chicago Sketch, 93K OD pairs):**
+
+| Component | Time | Notes |
+|-----------|------|-------|
+| BatchRoute (TBB parallel routing) | ~1.7s | Irreducible OSRM routing |
+| JSON tree walking (C++ accumulation) | ~0.7s | String-keyed hash maps |
+| Total per load step | ~2.4s | 29% is serialization overhead |
+
+The 0.7s is spent walking `json::Object` trees: unordered_map string lookups
+and `std::variant` extraction for 1.24M segments. This overhead exists solely
+because OSRM serializes into JSON before we can access the data.
+
+**Proposed change:** Add a `RouteRaw()` method (or an `InternalRouteResult`
+output variant) that returns the pre-serialization internal route
+representation. The key data structure is `LegGeometry`, which contains
+exactly what assignment needs:
+
+```cpp
+struct LegGeometry {
+    std::vector<Coordinate> locations;    // lon/lat per node
+    std::vector<NodeID> node_ids;         // internal uint32 node IDs
+    std::vector<std::uint32_t> osm_node_ids;  // (not stored here — see facade)
+
+    // Per-segment annotation (between consecutive nodes):
+    std::vector<double> segment_distances;  // meters
+    std::vector<double> segment_durations;  // seconds
+
+    struct Annotation {
+        double distance;   // meters
+        double duration;   // seconds
+        double weight;     // OSRM weight
+        double speed;      // m/s
+        // datasource index, etc.
+    };
+    std::vector<Annotation> annotations;
+};
+```
+
+Internal `NodeID` (uint32) can be converted to OSM node IDs via
+`facade.GetOSMNodeIDOfNode(node_id)` → `OSMNodeID` (uint64).
+
+**Access barrier:** `OSRM::engine_` is `private` and `EngineInterface` only
+exposes `Route(params, ResultT)`. There is no way to intercept the routing
+result before serialization without modifying OSRM core.
+
+**Estimated scope:** ~100 lines across 3 files:
+- `include/engine/engine_interface.hpp` — add virtual `RouteRaw()` method
+- `include/engine/engine.hpp` / `src/engine/engine.cpp` — implement
+- Expose `InternalManyRoutesResult` or `LegGeometry` to callers
+
+**Expected impact:** Eliminates the 0.7s JSON walking overhead entirely.
+For a 20-step Chicago assignment, saves ~14s total. For larger networks
+with more segments per route, savings scale linearly.
+
+### 11.2  Flatbuffers uint32 node ID truncation bug
+
+**Bug:** OSRM's flatbuffers serialization truncates OSM node IDs from
+uint64 to uint32. OpenStreetMap node IDs currently exceed 12 billion
+(~12×10⁹), well beyond the uint32 maximum of ~4.3×10⁹.
+
+**Location:** `include/engine/api/route_api.hpp`, approximately line 505:
+
+```cpp
+// Flatbuffers path — truncates to uint32:
+nodes.emplace_back(static_cast<uint64_t>(
+    facade.GetOSMNodeIDOfNode(node_id)));
+// But nodes is declared as std::vector<uint32_t> in the flatbuffers
+// schema (Annotation.nodes: [uint32]), so the uint64 value is silently
+// truncated when written to the flatbuffer.
+```
+
+Compare with the JSON path (same file, approximately line 845):
+
+```cpp
+// JSON path — correct:
+nodes_annotation.values.push_back(
+    util::json::Number(static_cast<double>(
+        facade.GetOSMNodeIDOfNode(node_id))));
+// json::Number stores double, exact up to 2^53 — sufficient for OSM IDs.
+```
+
+**Fix:** Change the flatbuffers schema `Annotation.nodes` from `[uint32]`
+to `[uint64]`. Update `route_api.hpp` accordingly. This is a breaking
+change to the flatbuffers wire format but the current behavior is silently
+producing incorrect results for any network with node IDs > 4.3B.
+
+**Impact on py-osrm:** We initially attempted to use flatbuffers for
+zero-overhead annotation access in the C++ accumulation path. The uint32
+truncation makes flatbuffers unusable for real-world OSM networks. The
+current implementation uses JSON (correct at any scale) with a ~0.7s
+per-step overhead that the raw route API (§11.1) would eliminate.

@@ -1,10 +1,10 @@
 /*
  * C++ accumulation for traffic assignment.
  *
- * Combines OSRM BatchRoute + density/volume accumulation into a single
- * call.  Routes into flatbuffers (not JSON) so annotation data is
- * accessed via typed array pointers — no string-keyed hash maps, no
- * std::variant extraction, just direct memory reads.
+ * Combines OSRM routing + density/volume accumulation into a single
+ * call.  Accepts numpy coordinate/volume arrays directly, builds
+ * RouteParameters in C++, routes via OSRM, and accumulates — no
+ * Python per-trip overhead at all.
  *
  * The function mirrors the logic of
  *   assignment_loop.py :: _route_and_accumulate_with_paths
@@ -14,10 +14,10 @@
 #include "assignment_nb.h"
 
 #include "osrm/osrm.hpp"
+#include "osrm/coordinate.hpp"
 #include "osrm/route_parameters.hpp"
 #include "osrm/status.hpp"
-#include "engine/api/base_result.hpp"
-#include "engine/api/flatbuffers/fbresult_generated.h"
+#include "util/json_container.hpp"
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -33,13 +33,11 @@
 #include <vector>
 
 namespace nb = nanobind;
-namespace fbresult = osrm::engine::api::fbresult;
+namespace json = osrm::util::json;
 
 using osrm::OSRM;
 using osrm::engine::api::RouteParameters;
-using osrm::engine::api::ResultT;
 
-// ── hash for (uint64, uint64) edge keys ──────────────────────────────
 struct PairHash {
     std::size_t operator()(std::pair<uint64_t,uint64_t> const& p) const noexcept {
         auto h1 = std::hash<uint64_t>{}(p.first);
@@ -50,6 +48,16 @@ struct PairHash {
 };
 
 using EdgeMap = std::unordered_map<std::pair<uint64_t,uint64_t>, int, PairHash>;
+
+static inline double as_number(const json::Value& v) {
+    return std::get<json::Number>(v).value;
+}
+static inline const json::Array& as_array(const json::Value& v) {
+    return std::get<json::Array>(v);
+}
+static inline const json::Object& as_object(const json::Value& v) {
+    return std::get<json::Object>(v);
+}
 
 struct NewEdge {
     uint64_t from_id;
@@ -69,19 +77,46 @@ void init_Assignment(nb::module_& m) {
 
     m.def("batch_route_accumulate",
         [](OSRM* engine,
-           const std::vector<RouteParameters>& params,
+           nb::ndarray<double, nb::ndim<2>, nb::c_contig, nb::device::cpu> coords,
+           nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> volumes,
            nb::ndarray<uint64_t, nb::ndim<2>, nb::c_contig, nb::device::cpu> edge_ids,
            nb::ndarray<double,   nb::ndim<1>, nb::c_contig, nb::device::cpu> freeflow_kmh,
-           nb::ndarray<double,   nb::ndim<1>, nb::c_contig, nb::device::cpu> volumes,
            double bin_width_hr,
            double min_speed_kmh,
            double default_jam_density,
            int    default_n_lanes)
     {
-        const size_t n_trips  = params.size();
+        // coords shape: (n_trips, 4) — [o_lon, o_lat, d_lon, d_lat]
+        const size_t n_trips  = coords.shape(0);
         const size_t n_edges0 = edge_ids.shape(0);
+        const double* c_ptr   = coords.data();
+        const double* vol_ptr = volumes.data();
 
-        // ── 1. build edge lookup from numpy arrays ───────────────
+        // ── 1. build RouteParameters in C++ ──────────────────────
+        std::vector<RouteParameters> params(n_trips);
+        {
+            using osrm::util::FloatLongitude;
+            using osrm::util::FloatLatitude;
+            using osrm::util::Coordinate;
+
+            const auto ann_type =
+                RouteParameters::AnnotationsType::Nodes |
+                RouteParameters::AnnotationsType::Distance |
+                RouteParameters::AnnotationsType::Duration |
+                RouteParameters::AnnotationsType::Speed;
+
+            for (size_t i = 0; i < n_trips; ++i) {
+                auto& rp = params[i];
+                rp.annotations = true;
+                rp.annotations_type = ann_type;
+                rp.coordinates.push_back(
+                    Coordinate{FloatLongitude{c_ptr[i*4]}, FloatLatitude{c_ptr[i*4+1]}});
+                rp.coordinates.push_back(
+                    Coordinate{FloatLongitude{c_ptr[i*4+2]}, FloatLatitude{c_ptr[i*4+3]}});
+            }
+        }
+
+        // ── 2. build edge lookup from numpy arrays ───────────────
         EdgeMap emap;
         emap.reserve(n_edges0 * 2);
         const uint64_t* eid_ptr = edge_ids.data();
@@ -89,36 +124,22 @@ void init_Assignment(nb::module_& m) {
             emap[{eid_ptr[i * 2], eid_ptr[i * 2 + 1]}] = static_cast<int>(i);
         }
 
-        // ── 2. Route into flatbuffers (TBB parallel, GIL released) ──
-        //    Each thread gets its own FlatBufferBuilder.  After routing
-        //    we keep the finished buffer bytes for sequential walking.
-        struct FBRoute {
-            std::vector<uint8_t> buf;
-            osrm::engine::Status status;
-        };
-        std::vector<FBRoute> fb_routes(n_trips);
-
+        // ── 3. BatchRoute (TBB parallel, GIL released) ──────────
+        std::vector<json::Object>          results(n_trips);
+        std::vector<osrm::engine::Status>  statuses(n_trips);
         {
             nb::gil_scoped_release release;
             tbb::parallel_for(
                 tbb::blocked_range<size_t>(0, n_trips),
                 [&](const tbb::blocked_range<size_t>& range) {
                     for (size_t i = range.begin(); i != range.end(); ++i) {
-                        flatbuffers::FlatBufferBuilder fbb(1024);
-                        ResultT result = std::move(fbb);
-                        fb_routes[i].status = engine->Route(params[i], result);
-                        if (fb_routes[i].status == osrm::engine::Status::Ok) {
-                            auto& builder = std::get<flatbuffers::FlatBufferBuilder>(result);
-                            auto* ptr = builder.GetBufferPointer();
-                            auto  sz  = builder.GetSize();
-                            fb_routes[i].buf.assign(ptr, ptr + sz);
-                        }
+                        statuses[i] = engine->Route(params[i], results[i]);
                     }
                 }
             );
         }
 
-        // ── 3. accumulate (sequential, in C++) ──────────────────
+        // ── 4. accumulate (sequential, in C++) ──────────────────
         std::vector<double> density(n_edges0, 0.0);
         std::vector<double> volume(n_edges0, 0.0);
         double tstt = 0.0;
@@ -127,19 +148,19 @@ void init_Assignment(nb::module_& m) {
         std::vector<TripPath> paths;
         paths.reserve(n_trips);
 
-        const double* ff_ptr  = freeflow_kmh.data();
-        const double* vol_ptr = volumes.data();
+        const double* ff_ptr = freeflow_kmh.data();
 
         for (size_t ti = 0; ti < n_trips; ++ti) {
-            if (fb_routes[ti].status != osrm::engine::Status::Ok) continue;
-            if (fb_routes[ti].buf.empty()) continue;
+            if (statuses[ti] != osrm::engine::Status::Ok) continue;
 
-            auto* fb = fbresult::GetFBResult(fb_routes[ti].buf.data());
-            auto* routes = fb->routes();
-            if (!routes || routes->size() == 0) continue;
+            const auto& root = results[ti];
+            auto routes_it = root.values.find("routes");
+            if (routes_it == root.values.end()) continue;
+            const auto& routes_arr = as_array(routes_it->second);
+            if (routes_arr.values.empty()) continue;
 
-            auto* route = routes->Get(0);
-            double route_dur = static_cast<double>(route->duration());
+            const auto& route = as_object(routes_arr.values[0]);
+            double route_dur = as_number(route.values.at("duration"));
             double trip_vol  = vol_ptr[ti];
             tstt += trip_vol * route_dur;
 
@@ -147,23 +168,21 @@ void init_Assignment(nb::module_& m) {
             tp.trip_index = static_cast<int>(ti);
             tp.duration_s = route_dur;
 
-            auto* legs = route->legs();
-            if (!legs) { paths.push_back(std::move(tp)); continue; }
+            const auto& legs_arr = as_array(route.values.at("legs"));
 
-            for (size_t li = 0; li < legs->size(); ++li) {
-                auto* leg = legs->Get(li);
-                auto* ann = leg->annotations();
-                if (!ann) continue;
+            for (const auto& leg_val : legs_arr.values) {
+                const auto& leg = as_object(leg_val);
+                const auto& ann = as_object(leg.values.at("annotation"));
+                const auto& nodes_arr = as_array(ann.values.at("nodes"));
+                const auto& dist_arr  = as_array(ann.values.at("distance"));
+                const auto& speed_arr = as_array(ann.values.at("speed"));
 
-                auto* fb_nodes = ann->nodes();
-                auto* fb_speed = ann->speed();
-                auto* fb_dist  = ann->distance();
-                if (!fb_nodes || fb_nodes->size() < 2) continue;
-
-                size_t n_seg = fb_nodes->size() - 1;
+                size_t n_seg = nodes_arr.values.size() - 1;
                 for (size_t si = 0; si < n_seg; ++si) {
-                    uint64_t from_id = fb_nodes->Get(si);
-                    uint64_t to_id   = fb_nodes->Get(si + 1);
+                    uint64_t from_id = static_cast<uint64_t>(
+                        as_number(nodes_arr.values[si]));
+                    uint64_t to_id   = static_cast<uint64_t>(
+                        as_number(nodes_arr.values[si + 1]));
 
                     auto it = emap.find({from_id, to_id});
                     int idx;
@@ -176,22 +195,21 @@ void init_Assignment(nb::module_& m) {
                         density.push_back(0.0);
                         volume.push_back(0.0);
 
-                        double dist = (fb_dist && si < fb_dist->size())
-                            ? static_cast<double>(fb_dist->Get(si)) : 0.0;
-                        double spd  = (fb_speed && si < fb_speed->size())
-                            ? static_cast<double>(fb_speed->Get(si)) * 3.6 : 1.0;
+                        double dist = (si < dist_arr.values.size())
+                            ? as_number(dist_arr.values[si]) : 0.0;
+                        double spd  = (si < speed_arr.values.size())
+                            ? as_number(speed_arr.values[si]) * 3.6 : 1.0;
                         new_edges.push_back({from_id, to_id, dist, spd});
                     }
 
                     volume[idx] += trip_vol;
 
-                    double seg_speed_kmh = (fb_speed && si < fb_speed->size())
-                        ? static_cast<double>(fb_speed->Get(si)) * 3.6 : 0.0;
+                    double seg_speed_kmh = (si < speed_arr.values.size())
+                        ? as_number(speed_arr.values[si]) * 3.6 : 0.0;
                     if (seg_speed_kmh < min_speed_kmh) {
                         if (static_cast<size_t>(idx) < n_edges0) {
                             seg_speed_kmh = ff_ptr[idx];
                         } else {
-                            // newly discovered — annotation IS freeflow
                             seg_speed_kmh = new_edges[idx - n_edges0].speed_kmh;
                         }
                     }
@@ -206,7 +224,7 @@ void init_Assignment(nb::module_& m) {
             paths.push_back(std::move(tp));
         }
 
-        // ── 4. pack results into numpy / Python objects ─────────
+        // ── 5. pack results into numpy / Python objects ─────────
         size_t n_total = density.size();
 
         double* d_buf = new double[n_total];
@@ -253,16 +271,18 @@ void init_Assignment(nb::module_& m) {
         return nb::make_tuple(py_density, py_volume, tstt, py_paths, py_new_edges);
     },
     nb::arg("engine"),
-    nb::arg("params"),
+    nb::arg("coords"),
+    nb::arg("volumes"),
     nb::arg("edge_ids"),
     nb::arg("freeflow_kmh"),
-    nb::arg("volumes"),
     nb::arg("bin_width_hr"),
     nb::arg("min_speed_kmh"),
     nb::arg("default_jam_density"),
     nb::arg("default_n_lanes"),
     "Route OD pairs and accumulate link density/volume in C++.\n\n"
-    "Routes into flatbuffers for zero-overhead annotation access.\n\n"
+    "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
+    "builds RouteParameters internally — no Python param construction.\n"
+    "Uses JSON route results (correct uint64 OSM node IDs at any scale).\n\n"
     "Returns (density, volume, tstt, paths, new_edges)."
     );
 }

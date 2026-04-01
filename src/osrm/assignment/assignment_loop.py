@@ -362,16 +362,16 @@ class AssignmentLoop:
         state: NetworkState,
     ) -> Tuple[np.ndarray, np.ndarray, float, List[RoutedTripPath]]:
         """C++ fast path: route + accumulate in one native call."""
-        from osrm._params import RouteParameters as _RP, set_param as _sp
         from osrm.osrm_ext import batch_route_accumulate
 
-        params = []
-        volumes = np.empty(len(trips), dtype=np.float64)
+        n = len(trips)
+        coords = np.empty((n, 4), dtype=np.float64)
+        volumes = np.empty(n, dtype=np.float64)
         for i, t in enumerate(trips):
-            rp = _RP()
-            rp.coordinates = [t.origin, t.destination]
-            _sp(rp, "annotations", ["nodes", "distance", "duration", "speed"])
-            params.append(rp)
+            coords[i, 0] = t.origin[0]
+            coords[i, 1] = t.origin[1]
+            coords[i, 2] = t.destination[0]
+            coords[i, 3] = t.destination[1]
             volumes[i] = t.volume
 
         bin_width_hr = self.config.bin_width_s / 3600.0
@@ -380,10 +380,10 @@ class AssignmentLoop:
 
         density, volume, tstt, raw_paths, new_edges = batch_route_accumulate(
             engine._engine,
-            params,
+            coords,
+            volumes,
             state.edge_ids.astype(np.uint64),
             state.freeflow_kmh.astype(np.float64),
-            volumes,
             bin_width_hr,
             self.config.min_speed_kmh,
             default_jam,
