@@ -7,7 +7,9 @@ drift apart.
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -104,15 +106,26 @@ def run_hillclimber_case(
     gap_threshold: float = 0.01,
 ):
     """Run one shared hill-climber validation case from scenario metadata."""
+    logger = logging.getLogger(__name__)
     if sample_rate <= 0.0:
         raise ValueError("sample_rate must be positive")
     load_steps = _sampled_load_steps(sample_rate)
 
+    logger.info("Building trips (demand_scale=%.2f)...", demand_scale)
+    t0 = time.monotonic()
     trips = trip_builder(meta, demand_scale)
+    logger.info("Built %d OD pairs in %.1fs", len(trips), time.monotonic() - t0)
+
+    logger.info("Slicing into %d departure bins...", load_steps)
+    t0 = time.monotonic()
     sliced_trips = slice_trips_by_departure(
         trips,
         n_slices=load_steps,
         bin_width_s=bin_width_s,
+    )
+    logger.info(
+        "Sliced to %d trip-records in %.1fs",
+        len(sliced_trips), time.monotonic() - t0,
     )
     run_base = copy_fn(base_path, run_dir)
     config = AssignmentConfig(
