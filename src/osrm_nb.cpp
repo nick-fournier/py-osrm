@@ -34,6 +34,7 @@
 #include "parameters/tableparameter_nb.h"
 #include "parameters/tileparameter_nb.h"
 #include "parameters/tripparameter_nb.h"
+#include "assignment_nb.h"
 
 namespace nb = nanobind;
 
@@ -76,6 +77,7 @@ NB_MODULE(osrm_ext, m) {
     init_MatchParameters(m);
     init_TripParameters(m);
     init_TileParameters(m);
+    init_Assignment(m);
 
     nb::class_<OSRM>(m, "OSRM", nb::is_final())
         .def(nb::init<EngineConfig&>(), "Instantiates an instance of OSRM.\n\n"

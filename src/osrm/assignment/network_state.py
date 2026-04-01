@@ -196,6 +196,17 @@ class NetworkState:
         return idx
 
     @classmethod
+    def empty(cls) -> "NetworkState":
+        """Create an empty state with no edges (populated during routing)."""
+        return cls(
+            edge_ids=np.empty((0, 2), dtype=np.uint64),
+            length_m=np.empty(0, dtype=np.float64),
+            freeflow_kmh=np.empty(0, dtype=np.float64),
+            jam_density=np.empty(0, dtype=np.float64),
+            n_lanes=np.empty(0, dtype=np.uint8),
+        )
+
+    @classmethod
     def from_edges(
         cls,
         from_ids: np.ndarray,

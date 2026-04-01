@@ -202,7 +202,8 @@ class AssignmentLoop:
             if not lg.handlers:
                 handler = logging.StreamHandler()
                 handler.setFormatter(logging.Formatter(
-                    "[%(levelname)s] %(message)s"
+                    "%(asctime)s [%(levelname)s] %(message)s",
+                    datefmt="%H:%M:%S",
                 ))
                 lg.addHandler(handler)
         self.vdf = BiParabolicVDF(
@@ -334,19 +335,8 @@ class AssignmentLoop:
     ) -> Tuple[np.ndarray, np.ndarray, float, List[RoutedTripPath]]:
         """Route all trips, accumulate link density and volume.
 
-        Routes OD pairs in parallel using a thread pool (OSRM releases
-        the GIL during C++ routing), then accumulates results
-        sequentially to safely mutate shared NetworkState.
-
-        Returns two per-link arrays:
-
-        * **aon_density** (supply-side): average density contribution
-          ``Δk = volume / (v_kmh × T_hr)`` using OSRM annotation speed.
-        * **aon_volume** (demand-side): total vehicles routed through
-          each link, always conserves with total demand.
-
-        Any edges not yet in ``state`` are dynamically registered so
-        that density is never silently dropped.
+        Uses C++ accumulation when available — route results never cross
+        the C++/Python boundary, eliminating the Python per-segment loop.
 
         Returns
         -------
@@ -356,7 +346,86 @@ class AssignmentLoop:
             All-or-nothing demand volume (vehicles) per link.
         aon_tstt : float
             AON total system travel time (vehicle-seconds).
+        routed_paths : list[RoutedTripPath]
+            Per-trip path records for refinement.
         """
+        try:
+            return self._route_and_accumulate_cpp(engine, trips, state)
+        except Exception:
+            logger.debug("C++ accumulation unavailable, using Python fallback")
+            return self._route_and_accumulate_py(engine, trips, state)
+
+    def _route_and_accumulate_cpp(
+        self,
+        engine: osrm_module.OSRM,
+        trips: List[DemandTrip],
+        state: NetworkState,
+    ) -> Tuple[np.ndarray, np.ndarray, float, List[RoutedTripPath]]:
+        """C++ fast path: route + accumulate in one native call."""
+        from osrm._params import RouteParameters as _RP, set_param as _sp
+        from osrm.osrm_ext import batch_route_accumulate
+
+        params = []
+        volumes = np.empty(len(trips), dtype=np.float64)
+        for i, t in enumerate(trips):
+            rp = _RP()
+            rp.coordinates = [t.origin, t.destination]
+            _sp(rp, "annotations", ["nodes", "distance", "duration", "speed"])
+            params.append(rp)
+            volumes[i] = t.volume
+
+        bin_width_hr = self.config.bin_width_s / 3600.0
+        default_jam = (self.config.default_jam_density_per_lane
+                       * self.config.default_n_lanes)
+
+        density, volume, tstt, raw_paths, new_edges = batch_route_accumulate(
+            engine._engine,
+            params,
+            state.edge_ids.astype(np.uint64),
+            state.freeflow_kmh.astype(np.float64),
+            volumes,
+            bin_width_hr,
+            self.config.min_speed_kmh,
+            default_jam,
+            self.config.default_n_lanes,
+        )
+
+        # Register any newly discovered edges
+        for from_id, to_id, length_m, speed_kmh in new_edges:
+            state.register_edge(
+                int(from_id), int(to_id), float(length_m),
+                float(speed_kmh), default_jam, self.config.default_n_lanes,
+            )
+
+        # Convert C++ path tuples to RoutedTripPath objects
+        routed_paths = [
+            RoutedTripPath(
+                trip_index=int(ti),
+                edge_indices=ei.tolist(),
+                density_contribution=dc.tolist(),
+                duration_s=float(dur),
+            )
+            for ti, dur, ei, dc in raw_paths
+        ]
+
+        # Ensure arrays cover all edges (including newly registered ones)
+        density = np.asarray(density, dtype=np.float64)
+        volume = np.asarray(volume, dtype=np.float64)
+        if len(density) < state.n_edges:
+            density = np.append(density,
+                                np.zeros(state.n_edges - len(density)))
+            volume = np.append(volume,
+                               np.zeros(state.n_edges - len(volume)))
+
+        return density, volume, float(tstt), routed_paths
+
+    def _route_and_accumulate_py(
+        self,
+        engine: osrm_module.OSRM,
+        trips: List[DemandTrip],
+        state: NetworkState,
+    ) -> Tuple[np.ndarray, np.ndarray, float, List[RoutedTripPath]]:
+        """Python fallback: original per-segment accumulation loop."""
         new_density = np.zeros(state.n_edges, dtype=np.float64)
         new_volume = np.zeros(state.n_edges, dtype=np.float64)
         tstt = 0.0
@@ -586,10 +655,6 @@ class AssignmentLoop:
         )
         log: List[IterationResult] = []
 
-        # 1. Discover network on current OSRM state.
-        # IMPORTANT: the engine MUST be clean (no prior segment-speed
-        # customization) so annotation speed = freeflow from OSM maxspeed.
-        # See class docstring for the freeflow invariant.
         engine = self._create_engine()
 
         # Pre-snap trip coordinates to OSRM waypoints so routes
@@ -597,13 +662,14 @@ class AssignmentLoop:
         # points.  Eliminates numerator/denominator gap inconsistency.
         trips = self._snap_trips(engine, trips)
 
-        state = self._discover_network(engine, trips)
+        # Start with an empty network — edges are discovered continuously
+        # during routing via register_edge().  Annotation speed on a clean
+        # engine (or on edges not in the segment-speed CSV) is always
+        # freeflow, so first-seen speed is correct regardless of step.
+        state = NetworkState.empty()
 
         if state_patch:
             state_patch(state)
-
-        # Build smoothing adjacency once
-        self.smoother.build_adjacency(state.edge_ids, state.length_m)
 
         prev_density = np.zeros(state.n_edges, dtype=np.float64)
         prev_volume = np.zeros(state.n_edges, dtype=np.float64)

@@ -1135,10 +1135,9 @@ class MatrixFreeHillClimber:
 
         snapped_trips = loop._snap_trips(engine, all_trips)
         snapped_stream = TripStreamAdapter(snapped_trips, sort_by_departure=False)
-        state = loop._discover_network(engine, snapped_trips)
+        state = NetworkState.empty()
         if state_patch:
             state_patch(state)
-        loop.smoother.build_adjacency(state.edge_ids, state.length_m)
         planned_load_steps = len(
             self.iter_time_slices(snapped_trips, max_batch_size=max_batch_size)
         )

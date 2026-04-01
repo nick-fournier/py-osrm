@@ -136,11 +136,10 @@ def test_matrix_free_solver_runs_statefully_across_slices(monkeypatch):
         def _snap_trips(self, engine, trips):
             return list(trips)
 
-        def _discover_network(self, engine, trips):
-            return state
-
         def _route_and_accumulate_with_paths(self, engine, trips, state_obj):
             route_calls.append(len(trips))
+            if state_obj.n_edges == 0:
+                state_obj.register_edge(1, 2, 100.0, 60.0, 150.0, 1)
             if len(route_calls) == 1:
                 return (
                     np.array([2.0]),
@@ -237,11 +236,11 @@ def test_matrix_free_solver_runs_sampled_heal(monkeypatch):
         def _snap_trips(self, engine, trips):
             return list(trips)
 
-        def _discover_network(self, engine, trips):
-            return state
-
         def _route_and_accumulate_with_paths(self, engine, trips, state_obj):
             route_calls.append(len(trips))
+            if state_obj.n_edges == 0:
+                state_obj.register_edge(1, 2, 100.0, 60.0, 150.0, 1)
+                state_obj.register_edge(2, 3, 100.0, 60.0, 150.0, 1)
             if len(route_calls) == 1:
                 return (
                     np.array([2.0, 1.0]),
