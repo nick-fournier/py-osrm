@@ -1,12 +1,13 @@
 """Cross-network slice sweep: convergence sensitivity to N slices.
 
-Runs the hill-climber at varying slice counts on Sioux Falls, Anaheim,
-and Chicago Sketch with reroute epochs (max_epochs=10, gap_threshold=0.001).
-Produces a standalone HTML report comparing epochs-to-converge, final gap,
-and total runtime as a function of slice count and network size.
+Runs the hill-climber at varying slice counts on Monaco, Sioux Falls,
+Anaheim, and Chicago Sketch with reroute epochs (max_epochs=10,
+gap_threshold=0.001).  Produces a standalone HTML report comparing
+epochs-to-converge, final gap, and total runtime as a function of
+slice count and network size.
 
-Sioux Falls and Anaheim sweep [2, 4, 8, 16, 32]; Chicago uses a reduced
-sweep [2, 4, 8] for performance.
+Monaco and Chicago use a reduced sweep [2, 4, 8] for performance;
+Sioux Falls and Anaheim sweep [2, 4, 8, 16, 32].
 """
 
 from __future__ import annotations
@@ -40,8 +41,79 @@ class NetworkSpec:
     n_links: int = 0
 
 
+def _prepare_monaco_for_sweep(tmp_path: Path) -> tuple[str, dict]:
+    """Prepare Monaco and build a synthetic OD matrix for sweep compatibility."""
+    import numpy as np
+    import osrm as _osrm
+    from osrm.assignment.network_state import NetworkState
+
+    work = tmp_path / "monaco_assignment"
+    work.mkdir(parents=True, exist_ok=True)
+    pbf = Path("tests/data/monaco.osm.pbf")
+    if not pbf.exists():
+        raise FileNotFoundError(f"Monaco PBF not found at {pbf}")
+
+    base = str(work / "monaco")
+    _osrm.extract(str(pbf), profile="car", output_path=base, verbosity="ERROR")
+    _osrm.partition(base, verbosity="ERROR")
+    _osrm.customize(base, verbosity="ERROR")
+
+    # Build synthetic zone centroids from routable coords
+    from .test_assignment_loop import _get_sample_coords
+    coords = _get_sample_coords(base, n=12, seed=42)
+    n = len(coords)
+    rng = np.random.default_rng(42)
+    od = rng.uniform(20, 120, size=(n, n))
+    np.fill_diagonal(od, 0.0)
+
+    # Discover edge count from an initial engine load
+    engine = _osrm.OSRM(
+        storage_config=base, algorithm="MLD", use_shared_memory=False,
+    )
+    state = NetworkState.from_engine(engine)
+    n_edges = state.n_edges
+    del engine
+
+    meta = {
+        "zone_centroids": {i + 1: c for i, c in enumerate(coords)},
+        "od_matrix": od,
+        "nodes": {i + 1: c for i, c in enumerate(coords)},
+        "link_attrs": {i: {} for i in range(n_edges)},
+    }
+    return base, meta
+
+
+def _copy_monaco_osrm(base_path: str, run_dir: Path) -> str:
+    """Copy clean Monaco OSRM files for each sweep point."""
+    import shutil
+    src = Path(base_path).parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for f in src.glob("monaco.osrm*"):
+        shutil.copy2(f, run_dir / f.name)
+    return str(run_dir / Path(base_path).name)
+
+
+def _build_monaco_sweep_trips(meta: dict, demand_scale: float):
+    """Convert Monaco synthetic OD matrix to DemandTrip list."""
+    import numpy as np
+    from osrm.assignment import DemandTrip
+
+    centroids = meta["zone_centroids"]
+    od = meta["od_matrix"] * demand_scale
+    trips = []
+    for i in range(od.shape[0]):
+        for j in range(od.shape[1]):
+            if od[i, j] > 0 and i != j:
+                trips.append(DemandTrip(
+                    origin=centroids[i + 1],
+                    destination=centroids[j + 1],
+                    volume=od[i, j],
+                ))
+    return trips
+
+
 def _build_specs() -> list[NetworkSpec]:
-    """Lazily import and return the three network specs."""
+    """Lazily import and return the network specs."""
     from .test_sioux_falls import (
         _prepare_sf_network,
         _copy_clean_osrm as sf_copy,
@@ -63,6 +135,15 @@ def _build_specs() -> list[NetworkSpec]:
     )
 
     return [
+        NetworkSpec(
+            name="Monaco",
+            color="#FF6F00",
+            prepare_fn=_prepare_monaco_for_sweep,
+            copy_fn=_copy_monaco_osrm,
+            trip_builder=_build_monaco_sweep_trips,
+            detail_scale=1.00,
+            sweep_slices=[2, 4, 8],
+        ),
         NetworkSpec(
             name="Sioux Falls",
             color="#1565C0",
