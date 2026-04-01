@@ -419,6 +419,7 @@ class MatrixFreeHillClimber:
 
         # --- Reroute epochs (tail-eating) ---
         epoch_results: List[RerouteEpochResult] = []
+        prev_tstt = sum(e.tstt for e in ledger) if len(ledger) > 0 else 0.0
         for epoch_idx in range(max_epochs):
             epoch_start = time.monotonic()
             routes_changed = 0
@@ -521,11 +522,13 @@ class MatrixFreeHillClimber:
             del engine
             engine = loop._create_engine()
 
-            # Gap check via sampled Table
-            gap = self._sampled_gap(
-                engine, ledger, state, loop,
-                sample_floor=gap_sample_floor,
-            )
+            # Gap check: relative TSTT change from previous epoch
+            epoch_tstt = sum(e.tstt for e in ledger)
+            if prev_tstt > 0:
+                gap = abs(epoch_tstt - prev_tstt) / prev_tstt
+            else:
+                gap = None
+            prev_tstt = epoch_tstt
 
             max_k_over_kj = float(
                 np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))

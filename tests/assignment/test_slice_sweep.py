@@ -1,9 +1,12 @@
 """Cross-network slice sweep: convergence sensitivity to N slices.
 
-Runs the hill-climber at [2, 4, 8, 16, 32] slices on Sioux Falls and Anaheim
-with reroute epochs (max_epochs=10, gap_threshold=0.001).
+Runs the hill-climber at varying slice counts on Sioux Falls, Anaheim,
+and Chicago Sketch with reroute epochs (max_epochs=10, gap_threshold=0.001).
 Produces a standalone HTML report comparing epochs-to-converge, final gap,
 and total runtime as a function of slice count and network size.
+
+Sioux Falls and Anaheim sweep [2, 4, 8, 16, 32]; Chicago uses a reduced
+sweep [2, 4, 8] for performance.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ class NetworkSpec:
     trip_builder: object
     detail_scale: float
     state_patch_factory: object | None = None
+    sweep_slices: list[int] | None = None
     n_nodes: int = 0
     n_links: int = 0
 
@@ -52,6 +56,12 @@ def _build_specs() -> list[NetworkSpec]:
     )
     from osrm.assignment.osm_synthesis import patch_lanes
 
+    from .test_chicago_sketch import (
+        _prepare_chicago_network,
+        _copy_clean_osrm as chi_copy,
+        _build_hillclimber_trips as chi_trips,
+    )
+
     return [
         NetworkSpec(
             name="Sioux Falls",
@@ -69,6 +79,16 @@ def _build_specs() -> list[NetworkSpec]:
             copy_fn=ana_copy,
             trip_builder=ana_trips,
             detail_scale=1.00,
+            state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
+        ),
+        NetworkSpec(
+            name="Chicago Sketch",
+            color="#D32F2F",
+            prepare_fn=_prepare_chicago_network,
+            copy_fn=chi_copy,
+            trip_builder=chi_trips,
+            detail_scale=1.00,
+            sweep_slices=[2, 4, 8],
             state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
         ),
     ]
@@ -108,7 +128,8 @@ def _run_sweep(spec: NetworkSpec, tmp_root: Path) -> NetworkSweepResult:
     spec.n_links = len(meta["link_attrs"])
 
     logger.info("── %s (%d nodes, %d links) ──", spec.name, spec.n_nodes, spec.n_links)
-    for ns in SWEEP_SLICES:
+    slices = spec.sweep_slices or SWEEP_SLICES
+    for ns in slices:
         t0 = time.perf_counter()
         case = run_hillclimber_case(
             base_path=base,
