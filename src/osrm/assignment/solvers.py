@@ -1131,15 +1131,15 @@ class MatrixFreeHillClimber:
         if sampled_mode:
             logger.info(
                 "HC started: %d trip-records (~%d unique ODs, %.0f total demand), "
-                "sample_rate=%.2f, rounds=%d",
+                "sample_rate=%.2f, rounds=%d, n_threads=%d",
                 n_records, unique_ods, total_demand,
-                sample_rate, max_rounds,
+                sample_rate, max_rounds, loop.config.n_threads,
             )
         else:
             logger.info(
                 "HC started: %d trip-records (~%d unique ODs, %.0f total demand), "
-                "greedy-only",
-                n_records, unique_ods, total_demand,
+                "greedy-only, n_threads=%d",
+                n_records, unique_ods, total_demand, loop.config.n_threads,
             )
         engine = loop._create_engine()
 

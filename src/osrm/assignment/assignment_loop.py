@@ -102,7 +102,11 @@ class AssignmentConfig:
     incremental_steps: Tuple[float, ...] = (0.25, 0.50, 0.75, 1.0)
     stagnation_tol: float = 0.001
     stagnation_window: int = 3
-    n_threads: int = 0  # 0 = use all cores; positive = cap TBB parallelism
+    n_threads: int = -1  # -1 = cpu_count - 2; 0 = all cores; >0 = explicit cap
+
+    def __post_init__(self):
+        if self.n_threads == -1:
+            self.n_threads = max(1, (os.cpu_count() or 4) - 2)
 
 
 @dataclass
@@ -251,8 +255,8 @@ class AssignmentLoop:
                     unique_coords[coord] = list(coord)
 
         logger.info(
-            "Snapping %d unique coordinates to network...",
-            len(unique_coords),
+            "Snapping %d unique coordinates (%d trip-records)...",
+            len(unique_coords), len(trips),
         )
         t0 = time.monotonic()
 
@@ -268,7 +272,19 @@ class AssignmentLoop:
             except Exception:
                 snapped[coord] = list(coord)
 
+        n_moved = sum(
+            1 for c in unique_coords
+            if abs(snapped[c][0] - c[0]) > 1e-8 or abs(snapped[c][1] - c[1]) > 1e-8
+        )
+        t_nearest = time.monotonic() - t0
+        logger.info(
+            "Nearest done in %.1fs (%d/%d adjusted)",
+            t_nearest, n_moved, len(unique_coords),
+        )
+
         # Rebuild trips with snapped coordinates
+        logger.info("Rebuilding %d trip-records with snapped coords...", len(trips))
+        t1 = time.monotonic()
         snapped_trips = []
         for trip in trips:
             snapped_trips.append(DemandTrip(
@@ -277,14 +293,9 @@ class AssignmentLoop:
                 volume=trip.volume,
                 departure_time_s=trip.departure_time_s,
             ))
-
-        n_moved = sum(
-            1 for c in unique_coords
-            if abs(snapped[c][0] - c[0]) > 1e-8 or abs(snapped[c][1] - c[1]) > 1e-8
-        )
         logger.info(
-            "Snapped %d/%d coords in %.2fs",
-            n_moved, len(unique_coords), time.monotonic() - t0,
+            "Trip rebuild in %.1fs, snap total %.1fs",
+            time.monotonic() - t1, time.monotonic() - t0,
         )
         return snapped_trips
 
@@ -658,8 +669,9 @@ class AssignmentLoop:
         t_start = time.monotonic()
         n_trips = len(trips)
         logger.info(
-            "%s started: %d trips, max_iter=%d",
+            "%s started: %d trips, max_iter=%d, n_threads=%d",
             self.config.method.upper(), n_trips, self.config.max_iterations,
+            self.config.n_threads,
         )
         log: List[IterationResult] = []
 
