@@ -138,23 +138,25 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    logger = logging.getLogger("generate_reports")
+
     for scene in args.scenes:
         for method in methods:
             if method not in SCENES[scene]:
                 if args.method != "all":
-                    print(f"  ⚠ {scene} has no '{method}' method, skipping")
+                    logger.warning("%s has no '%s' method, skipping", scene, method)
                 continue
             label, fn = SCENES[scene][method]
-            print(f"Generating {label}...", flush=True)
+            logger.info("Generating %s...", label)
             t0 = time.perf_counter()
             path = fn()
             elapsed = time.perf_counter() - t0
-            print(
-                f"  → {path} ({path.stat().st_size / 1024:.0f} KB, "
-                f"{elapsed:.1f}s)"
+            logger.info(
+                "  → %s (%d KB, %.1fs)",
+                path, path.stat().st_size / 1024, elapsed,
             )
 
-    print("Done.")
+    logger.info("Done.")
 
 
 if __name__ == "__main__":
