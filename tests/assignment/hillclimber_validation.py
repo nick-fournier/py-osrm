@@ -7,6 +7,7 @@ drift apart.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -38,6 +39,7 @@ class HillClimberValidationCase:
     sliced_trips: list[DemandTrip]
     result: object
     total_demand: float
+    load_steps: int
 
 
 def slice_trips_by_departure(
@@ -67,6 +69,25 @@ def slice_trips_by_departure(
     return sliced
 
 
+def _sampled_load_steps(sample_rate: float) -> int:
+    """Derive greedy load-step count from sample_rate.
+
+    Sampled refinement treats the greedy initializer as repeated equal-volume
+    load steps, where each step size matches the refinement sample share.
+    That means sample_rate must be the reciprocal of an integer step count:
+    100% -> 1 step, 50% -> 2, 25% -> 4, 10% -> 10, etc.
+    """
+    if not (0.0 < sample_rate <= 1.0):
+        raise ValueError("sample_rate must be in (0, 1]")
+    load_steps = max(1, int(round(1.0 / sample_rate)))
+    if not math.isclose(sample_rate * load_steps, 1.0, rel_tol=1e-9, abs_tol=1e-9):
+        raise ValueError(
+            "sampled mode requires sample_rate to be the reciprocal of an integer "
+            "load-step count (for example 1.0, 0.5, 0.25, 0.2, 0.1, 0.05)"
+        )
+    return load_steps
+
+
 def run_hillclimber_case(
     *,
     base_path: str,
@@ -75,18 +96,22 @@ def run_hillclimber_case(
     trip_builder: Callable[[dict, float], list[DemandTrip]],
     run_dir: Path,
     demand_scale: float = 1.0,
-    n_slices: int = 4,
     bin_width_s: float = 3600.0,
     max_batch_size: int | None = None,
     state_patch_factory: Callable[[dict], Callable] | None = None,
-    max_epochs: int = 0,
+    sample_rate: float,
+    max_rounds: int = 0,
     gap_threshold: float = 0.01,
 ):
     """Run one shared hill-climber validation case from scenario metadata."""
+    if sample_rate <= 0.0:
+        raise ValueError("sample_rate must be positive")
+    load_steps = _sampled_load_steps(sample_rate)
+
     trips = trip_builder(meta, demand_scale)
     sliced_trips = slice_trips_by_departure(
         trips,
-        n_slices=n_slices,
+        n_slices=load_steps,
         bin_width_s=bin_width_s,
     )
     run_base = copy_fn(base_path, run_dir)
@@ -105,7 +130,8 @@ def run_hillclimber_case(
         sliced_trips,
         max_batch_size=max_batch_size,
         state_patch=state_patch,
-        max_epochs=max_epochs,
+        sample_rate=sample_rate,
+        max_rounds=max_rounds,
         gap_threshold=gap_threshold,
     )
     return HillClimberValidationCase(
@@ -115,7 +141,100 @@ def run_hillclimber_case(
         sliced_trips=sliced_trips,
         result=result,
         total_demand=sum(t.volume for t in trips),
+        load_steps=load_steps,
     )
+
+
+def hillclimber_final_gap(result: object) -> float | None:
+    """Return the final sampled-refinement gap, if available."""
+    refinement_results = getattr(result, "refinement_results", []) or []
+    if refinement_results:
+        return refinement_results[-1].sampled_gap
+
+    od_ledger = getattr(result, "od_ledger", None)
+    if od_ledger is not None and len(od_ledger) > 0:
+        numerator = 0.0
+        denominator = 0.0
+        for entry in od_ledger:
+            if entry.current_gap is None:
+                continue
+            numerator += float(entry.total_volume) * float(entry.current_gap)
+            denominator += float(entry.total_volume)
+        if denominator > 0.0:
+            return numerator / denominator
+
+    return None
+
+
+def hillclimber_final_tstt(
+    result: object,
+    *,
+    min_speed_kmh: float = 1.08,
+) -> float:
+    """Estimate final TSTT from the active sampled path-set state."""
+    refinement_results = getattr(result, "refinement_results", []) or []
+    od_ledger = getattr(result, "od_ledger", None)
+    state = getattr(result, "network_state", None)
+    if refinement_results and od_ledger is not None and len(od_ledger) > 0 and state is not None:
+        total_tstt = 0.0
+        for entry in od_ledger:
+            for route in entry.routes:
+                route_cost_s = 0.0
+                for edge_idx in route.edge_indices:
+                    if edge_idx < 0 or edge_idx >= state.n_edges:
+                        continue
+                    speed_kmh = max(float(state.speed_kmh[edge_idx]), min_speed_kmh)
+                    route_cost_s += float(state.length_m[edge_idx]) / (speed_kmh / 3.6)
+                total_tstt += (
+                    float(entry.total_volume)
+                    * float(route.volume_fraction)
+                    * route_cost_s
+                )
+        return float(total_tstt)
+
+    batch_results = getattr(result, "batch_results", []) or []
+    if batch_results:
+        return float(batch_results[-1].network_tstt)
+    return 0.0
+
+
+def _load_step_label(batch_index: int) -> str:
+    return f"Load {batch_index + 1}"
+
+
+def _refinement_step_label(round_index: int) -> str:
+    return f"Refine {round_index}"
+
+
+def _refinement_series(result: object) -> dict:
+    """Return plotting arrays for sampled path-set refinement, if present."""
+    refinement_results = getattr(result, "refinement_results", []) or []
+    if refinement_results:
+        return {
+            "kind": "refinement",
+            "labels": [
+                _refinement_step_label(round_result.round_index)
+                for round_result in refinement_results
+            ],
+            "network_tstt": [round_result.network_tstt for round_result in refinement_results],
+            "speeds": [round_result.mean_speed_kmh for round_result in refinement_results],
+            "k": [round_result.max_k_over_kj for round_result in refinement_results],
+            "route_times": [round_result.route_time_s for round_result in refinement_results],
+            "customize_times": [round_result.customize_time_s for round_result in refinement_results],
+            "engine_times": [round_result.engine_time_s for round_result in refinement_results],
+            "gaps": [round_result.sampled_gap for round_result in refinement_results],
+        }
+    return {
+        "kind": None,
+        "labels": [],
+        "network_tstt": [],
+        "speeds": [],
+        "k": [],
+        "route_times": [],
+        "customize_times": [],
+        "engine_times": [],
+        "gaps": [],
+    }
 
 
 def _add_batch_sections(
@@ -125,72 +244,77 @@ def _add_batch_sections(
     *,
     detail_scale: float,
 ) -> None:
-    """Add hill-climber slice evolution plots."""
+    """Add hill-climber load-step evolution plots."""
     result = case.result
-    slice_labels = [f"E0:S{b.batch_index}" for b in result.batch_results]
+    greedy_labels = [_load_step_label(b.batch_index) for b in result.batch_results]
+    greedy_tstt = [b.network_tstt for b in result.batch_results]
+    refinement = _refinement_series(result)
+
+    convergence_labels = greedy_labels + refinement["labels"]
+    convergence_tstt = list(greedy_tstt)
+    convergence_tstt.extend(refinement["network_tstt"])
+
+    gap_values = [None] * len(greedy_labels) + refinement["gaps"]
 
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=slice_labels,
-        y=[b.n_trips for b in result.batch_results],
-        name="Trips",
-        marker_color="#1976D2",
-    ))
     fig.add_trace(go.Scatter(
-        x=slice_labels,
-        y=[b.batch_tstt for b in result.batch_results],
-        name="Slice TSTT",
-        yaxis="y2",
+        x=convergence_labels,
+        y=convergence_tstt,
+        name="TSTT",
         mode="lines+markers",
         line=dict(color="#D32F2F", width=2.5),
+        marker=dict(size=7),
     ))
+    fig.add_trace(go.Scatter(
+        x=convergence_labels,
+        y=gap_values,
+        name="Gap",
+        yaxis="y2",
+        mode="lines+markers",
+        line=dict(color="#1976D2", width=2.5),
+        marker=dict(size=7),
+        connectgaps=False,
+    ))
+    if refinement["kind"] is not None:
+        fig.add_vline(
+            x=len(greedy_labels) - 0.5,
+            line_dash="dot",
+            line_color="#666",
+            line_width=1.5,
+        )
     fig.update_layout(
-        title="Slice Timeline",
-        xaxis_title="Slice",
-        yaxis=dict(title="Trips"),
+        title="Convergence",
+        xaxis_title="Load / refinement step",
+        yaxis=dict(title="Network TSTT (veh-seconds)"),
         yaxis2=dict(
-            title="Slice TSTT (veh-seconds)",
+            title="Gap",
             overlaying="y",
             side="right",
+            type="log" if any(gap is not None for gap in gap_values) else "linear",
         ),
         template="plotly_white",
     )
     figs.append(fig)
+    final_gap = hillclimber_final_gap(result)
+    gap_str = f"{final_gap:.6f}" if final_gap is not None else "n/a"
+    final_tstt = hillclimber_final_tstt(result)
     descriptions.append(
-        "<h2>Slice Timeline</h2>"
-        "<p>Trips are loaded sequentially by departure slice on a shared mutable "
-        "network state. Bars show trips per slice; the line shows per-slice total "
-        "system travel time.</p>"
+        "<h2>Convergence</h2>"
+        "<p>Network TSTT is shown across greedy loading and any post-greedy refinement, "
+        "with the corresponding gap on the secondary axis. This replaces the old "
+        "slice-timeline view so convergence quality is explicit and comparable from start to finish. "
+        f"Final TSTT = {final_tstt:,.0f} veh-seconds; final gap = {gap_str}.</p>"
     )
 
-    # --- State Evolution: unified E0:S0 … E0:SN → E1:S0 … E1:SN timeline ---
+    # --- State Evolution: unified load / refinement timeline ---
     fig = go.Figure()
 
     # Build unified x-axis labels and y-values
-    greedy_labels = [f"E0:S{b.batch_index}" for b in result.batch_results]
     greedy_speeds = [b.mean_speed_kmh for b in result.batch_results]
     greedy_k = [b.max_k_over_kj for b in result.batch_results]
-
-    epoch_results = getattr(result, "epoch_results", []) or []
-    reroute_labels: list[str] = []
-    reroute_speeds: list[float] = []
-    reroute_k: list[float] = []
-    gap_annotations: list[tuple[int, float]] = []  # (x_index, gap_value)
-
-    for er in epoch_results:
-        for snap in er.slice_snapshots:
-            reroute_labels.append(f"E{er.epoch}:S{snap.slice_index}")
-            reroute_speeds.append(snap.mean_speed_kmh)
-            reroute_k.append(snap.max_k_over_kj)
-        if er.gap is not None:
-            gap_annotations.append((
-                len(greedy_labels) + len(reroute_labels) - 1,
-                er.gap,
-            ))
-
-    all_labels = greedy_labels + reroute_labels
-    all_speeds = greedy_speeds + reroute_speeds
-    all_k = greedy_k + reroute_k
+    all_labels = greedy_labels + refinement["labels"]
+    all_speeds = greedy_speeds + refinement["speeds"]
+    all_k = greedy_k + refinement["k"]
 
     # Mean speed trace (continuous)
     fig.add_trace(go.Scatter(
@@ -212,17 +336,18 @@ def _add_batch_sections(
         yaxis="y2",
     ))
 
-    # Vertical separator between greedy and reroute phases
-    if epoch_results:
+    # Vertical separator between greedy and post-greedy refinement phases
+    if refinement["kind"] is not None:
         fig.add_vline(
             x=len(greedy_labels) - 0.5,
             line_dash="dot", line_color="#666", line_width=1.5,
-            annotation_text="⟵ greedy | reroute ⟶",
-            annotation_position="top",
         )
 
-    # Gap annotations at epoch boundaries
-    for x_idx, gap_val in gap_annotations:
+    # Gap annotations at refinement boundaries / rounds
+    for ref_idx, gap_val in enumerate(refinement["gaps"]):
+        if gap_val is None:
+            continue
+        x_idx = len(greedy_labels) + ref_idx
         fig.add_annotation(
             x=all_labels[x_idx], y=all_speeds[x_idx],
             text=f"gap={gap_val:.4f}",
@@ -233,44 +358,42 @@ def _add_batch_sections(
 
     fig.update_layout(
         title="State Evolution",
-        xaxis_title="Slice (Epoch:Slice)",
+        xaxis_title="Load / refinement step",
         yaxis=dict(title="Mean speed (km/h)"),
         yaxis2=dict(title="Max k/kj", overlaying="y", side="right"),
         template="plotly_white",
     )
     figs.append(fig)
-    epoch_note = ""
-    if epoch_results:
-        n_reroute = sum(er.slices_rerouted for er in epoch_results)
-        final_gap = epoch_results[-1].gap
-        gap_str = f" Converged after {len(epoch_results)} epoch(s), final gap={final_gap:.6f}." if final_gap is not None else ""
-        epoch_note = (
-            f" After greedy loading (E0), {len(epoch_results)} reroute epoch(s) "
-            f"re-processed all {result.batch_results[-1].batch_index + 1} slices "
-            f"({n_reroute} total reroutes). Gap computed once per epoch.{gap_str}"
+    refinement_note = ""
+    if refinement["kind"] == "refinement":
+        refinement_results = getattr(result, "refinement_results", []) or []
+        accepted_updates = sum(round_result.accepted_updates for round_result in refinement_results)
+        final_gap = hillclimber_final_gap(result)
+        gap_str = (
+            f" Final sampled gap={final_gap:.6f}."
+            if final_gap is not None else ""
+        )
+        refinement_note = (
+            f" After greedy loading, {len(refinement_results)} sampled refinement round(s) "
+            f"rebalanced OD path sets with {accepted_updates} accepted OD updates."
+            f"{gap_str}"
         )
     descriptions.append(
         f"<h2>State Evolution</h2>"
         f"<p>Final loaded demand is {case.total_demand:,.0f} "
-        "vph, distributed deterministically across departure slices."
-        f"{epoch_note}</p>"
+        f"vph. Greedy loading ran across {case.load_steps} load step(s)."
+        f"{refinement_note}</p>"
     )
 
-    # --- Runtime: unified per-slice timing across all epochs ---
-    epoch_results = getattr(result, "epoch_results", []) or []
-
-    # Build unified x-labels and timing arrays
-    rt_labels = [f"E0:S{b.batch_index}" for b in result.batch_results]
+    # --- Runtime: unified per-step timing ---
+    rt_labels = [_load_step_label(b.batch_index) for b in result.batch_results]
     rt_route = [b.route_time_s for b in result.batch_results]
     rt_cust = [b.customize_time_s for b in result.batch_results]
     rt_engine = [b.engine_time_s for b in result.batch_results]
-
-    for er in epoch_results:
-        for snap in er.slice_snapshots:
-            rt_labels.append(f"E{er.epoch}:S{snap.slice_index}")
-            rt_route.append(snap.route_time_s)
-            rt_cust.append(snap.customize_time_s)
-            rt_engine.append(snap.engine_time_s)
+    rt_labels.extend(refinement["labels"])
+    rt_route.extend(refinement["route_times"])
+    rt_cust.extend(refinement["customize_times"])
+    rt_engine.extend(refinement["engine_times"])
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -295,36 +418,30 @@ def _add_batch_sections(
         name="Engine reload time",
     ))
 
-    # Vertical lines at epoch boundaries with gap on hover
+    # Vertical separator between greedy and refinement
     n_greedy = len(result.batch_results)
-    for er in epoch_results:
-        x_end = n_greedy + er.epoch * len(er.slice_snapshots) - 0.5
-        gap_str = f"gap={er.gap:.6f}" if er.gap is not None else "gap=n/a"
-        fig.add_vline(
-            x=x_end, line_dash="dot", line_color="#E65100", line_width=1.5,
-            annotation_text=f"E{er.epoch} {gap_str}",
-            annotation_position="top",
-            annotation_font_size=9,
-            annotation_font_color="#E65100",
-        )
-    # Separator between greedy and reroute
-    if epoch_results:
+    if refinement["kind"] is not None:
         fig.add_vline(
             x=n_greedy - 0.5,
             line_dash="dot", line_color="#666", line_width=1.5,
         )
 
     fig.update_layout(
-        title="Slice Runtime",
-        xaxis_title="Slice (Epoch:Slice)",
+        title="Runtime",
+        xaxis_title="Load / refinement step",
         yaxis_title="Time (s)",
         template="plotly_white",
     )
     figs.append(fig)
+    runtime_note = (
+        "Per-step routing, customize, and engine reload timings across greedy loading "
+        "and sampled path-set refinement rounds."
+        if refinement["kind"] == "refinement" else
+        "Per-step routing, customize, and engine reload timings across greedy loading."
+    )
     descriptions.append(
-        "<h2>Slice Runtime</h2>"
-        "<p>Per-slice routing, customize, and engine reload timings across all epochs. "
-        "Vertical lines mark epoch boundaries with the Wardrop gap at that point.</p>"
+        "<h2>Runtime</h2>"
+        f"<p>{runtime_note}</p>"
     )
 
 
@@ -337,12 +454,12 @@ def generate_hillclimber_validation_report(
     tmp_path: str | Path,
     output_path: str,
     detail_scale: float,
-    n_slices: int = 4,
     bin_width_s: float = 3600.0,
     max_batch_size: int | None = None,
     state_patch_factory: Callable[[dict], Callable] | None = None,
     intro_html: str = "",
-    max_epochs: int = 3,
+    sample_rate: float,
+    max_rounds: int = 0,
     gap_threshold: float = 0.01,
 ) -> Path:
     """Generate a shared hill-climber validation report for one scenario."""
@@ -357,11 +474,11 @@ def generate_hillclimber_validation_report(
         trip_builder=trip_builder,
         run_dir=tmp_path / "hc_detail",
         demand_scale=detail_scale,
-        n_slices=n_slices,
         bin_width_s=bin_width_s,
         max_batch_size=max_batch_size,
         state_patch_factory=state_patch_factory,
-        max_epochs=max_epochs,
+        sample_rate=sample_rate,
+        max_rounds=max_rounds,
         gap_threshold=gap_threshold,
     )
 
@@ -407,16 +524,33 @@ def generate_hillclimber_validation_report(
         speed_desc = ", ".join(str(s) for s in speed_set)
     else:
         speed_desc = f"{speed_set[0]}&ndash;{speed_set[-1]} ({len(speed_set)} unique)"
+    sampled_mode = max_rounds > 0
+    refinement_intro = ""
+    if sampled_mode:
+        refinement_intro = (
+            f" Greedy loading uses {case.load_steps} load step(s) derived from the "
+            f"{sample_rate:.0%} sample rate. Sampled path-set rebalancing then runs "
+            f"for up to {max_rounds} round(s)."
+        )
+    else:
+        refinement_intro = (
+            f" Greedy loading uses {case.load_steps} load step(s) derived from the "
+            f"{sample_rate:.0%} sample rate."
+        )
+
+    load_distribution = (
+        f"loaded in {case.load_steps} greedy load step(s). "
+        f"Trips: {len(case.trips):,} OD movements expanded into "
+        f"{len(case.sliced_trips):,} load-stepped records. "
+    )
+
     intro = (
         f"<p>Validation of the <b>matrix-free hill-climber MVP</b> on "
         f"<b>{network_name}</b>. Final loaded demand: {case.total_demand:,.0f} vph "
-        f"({detail_scale:.0%} of the scenario demand basis), distributed across "
-        f"{n_slices} departure slices of {bin_width_s / 3600:.1f} hour(s) each. "
-        f"Trips: {len(case.trips):,} OD movements materialized as "
-        f"{len(case.sliced_trips):,} departure-sliced loads. "
+        f"({detail_scale:.0%} of the scenario demand basis), {load_distribution}"
         f"Lanes: {min(lane_counts)}&ndash;{max(lane_counts)}. "
         f"Freeflow speeds: {speed_desc} km/h. "
-        f"Total runtime: {case.result.total_time_s:.2f}s.</p>"
+        f"Total runtime: {case.result.total_time_s:.2f}s.{refinement_intro}</p>"
     )
     if intro_html:
         intro += intro_html

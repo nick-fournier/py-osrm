@@ -19,9 +19,9 @@ from osrm.assignment.solvers import (
     HillClimberResult,
     MatrixAssignmentSolver,
     MatrixFreeHillClimber,
-    RerouteEpochResult,
-    SliceLedger,
-    SliceLedgerEntry,
+    ODLedger,
+    ODLedgerEntry,
+    RouteAssignment,
 )
 from osrm.assignment import plots
 
@@ -44,8 +44,8 @@ __all__ = [
     "HillClimberResult",
     "MatrixAssignmentSolver",
     "MatrixFreeHillClimber",
-    "RerouteEpochResult",
-    "SliceLedger",
-    "SliceLedgerEntry",
+    "ODLedger",
+    "ODLedgerEntry",
+    "RouteAssignment",
     "plots",
 ]

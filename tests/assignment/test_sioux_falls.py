@@ -4,9 +4,11 @@ Validates the density-based assignment against the canonical Sioux Falls
 benchmark (24 nodes, 76 links, 528 OD pairs).
 
 The TNTP demand (360,600 total) represents a BPR-calibrated hourly volume
-that exceeds the physical capacity of realistic 2–3 lane roads.  We scale
-demand to 15% (54,090 vph) which is representative of an actual peak hour
-for a ~200k population city.
+that exceeds the physical capacity of realistic 2–3 lane roads. Matrix
+validation stays at 15% demand (54,090 vph), which is representative of an
+actual peak hour for a ~200k population city. Hill-climber validation uses
+30% demand (108,180 vph) so sampled refinement is exercised on a more
+meaningfully loaded network.
 
 Structural (VDF-independent) checks:
   - Wardrop relative gap < threshold
@@ -209,7 +211,7 @@ class TestSiouxFalls:
             )
 
     def test_hillclimber_smoke(self, tmp_path):
-        """Hill-climber loads Sioux Falls across multiple slices."""
+        """Hill-climber loads Sioux Falls with sampled refinement enabled."""
         base, meta = _prepare_sf_network(tmp_path)
         case = run_hillclimber_case(
             base_path=base,
@@ -217,13 +219,14 @@ class TestSiouxFalls:
             copy_fn=_copy_clean_osrm,
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "hc_run",
-            demand_scale=0.15,
-            n_slices=4,
+            demand_scale=0.30,
             state_patch_factory=lambda m: lambda s: patch_sioux_falls_lanes(s, m),
+            sample_rate=0.10,
+            max_rounds=10,
         )
         state = case.result.network_state
         assert state is not None
-        assert case.result.n_batches == 4
+        assert case.result.n_batches == 10
         assert state.n_edges > 0
         assert np.all(state.flow_vph >= 0)
         assert np.all(state.speed_kmh > 0)
@@ -274,13 +277,14 @@ def generate_sioux_falls_hillclimber_report(
         trip_builder=_build_hillclimber_trips,
         tmp_path=tmp_path,
         output_path=output_path,
-        detail_scale=0.15,
-        n_slices=4,
+        detail_scale=0.30,
         bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_sioux_falls_lanes(state, meta),
+        sample_rate=0.10,
+        max_rounds=10,
         intro_html=(
-            "<p>Hill-climber validation uses the same 15% Sioux Falls demand level as "
-            "matrix validation, but distributes that demand across deterministic "
-            "departure slices instead of solving a matrix equilibrium loop.</p>"
+            "<p>Hill-climber validation intentionally runs at <b>30% Sioux Falls demand</b> "
+            "with 10 greedy load steps and sampled path-set refinement, rather than "
+            "the lighter 15% matrix-validation setting.</p>"
         ),
     )

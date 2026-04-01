@@ -271,7 +271,7 @@ class TestAnaheim:
         )
 
     def test_hillclimber_smoke(self, anaheim_net, tmp_path_factory):
-        """Hill-climber loads Anaheim across multiple slices."""
+        """Hill-climber loads Anaheim across greedy load steps."""
         base, meta = anaheim_net
         case = run_hillclimber_case(
             base_path=base,
@@ -280,8 +280,9 @@ class TestAnaheim:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path_factory.mktemp("ana_hc"),
             demand_scale=1.00,
-            n_slices=4,
             state_patch_factory=lambda m: lambda s: patch_lanes(s, m),
+            sample_rate=0.25,
+            max_rounds=1,
         )
         state = case.result.network_state
         assert state is not None
@@ -332,9 +333,10 @@ def generate_anaheim_hillclimber_report(
         tmp_path=tmp_path,
         output_path=output_path,
         detail_scale=1.00,
-        n_slices=4,
         bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
+        sample_rate=0.10,
+        max_rounds=10,
         intro_html=(
             "<p>Hill-climber validation uses <b>100% Anaheim demand</b>, matching the "
             "matrix validation target rather than a reduced detail slice.</p>"

@@ -6,11 +6,9 @@ Usage::
     uv run python scripts/generate_reports.py              # all default reports
     uv run python scripts/generate_reports.py vdf           # VDF theory only
     uv run python scripts/generate_reports.py braess        # Braess unified validation
-    uv run python scripts/generate_reports.py monaco        # Monaco hill-climber validation
     uv run python scripts/generate_reports.py sioux         # Sioux Falls hill-climber validation
     uv run python scripts/generate_reports.py anaheim       # Anaheim hill-climber validation
     uv run python scripts/generate_reports.py chi-sketch    # Chicago Sketch hill-climber validation
-    uv run python scripts/generate_reports.py slice-sweep   # Cross-network slice sweep
     uv run python scripts/generate_reports.py sioux-matrix  # Sioux Falls matrix validation
     uv run python scripts/generate_reports.py anaheim-matrix   # Anaheim matrix validation
     uv run python scripts/generate_reports.py chi-sketch-matrix # Chicago Sketch matrix validation
@@ -67,13 +65,6 @@ def generate_chicago_matrix() -> Path:
     return generate_chicago_report(tempfile.mkdtemp())
 
 
-def generate_monaco() -> Path:
-    """Generate Monaco hill-climber validation report."""
-    from tests.assignment.test_assignment_loop import generate_monaco_hillclimber_report
-
-    return generate_monaco_hillclimber_report(tempfile.mkdtemp())
-
-
 def generate_sioux_falls() -> Path:
     """Generate Sioux Falls hill-climber validation report."""
     from tests.assignment.test_sioux_falls import generate_sioux_falls_hillclimber_report
@@ -95,27 +86,18 @@ def generate_chicago() -> Path:
     return generate_chicago_hillclimber_report(tempfile.mkdtemp())
 
 
-def generate_slice_sweep() -> Path:
-    """Generate cross-network slice convergence sweep report."""
-    from tests.assignment.test_slice_sweep import generate_slice_sweep_report
-
-    return generate_slice_sweep_report(tempfile.mkdtemp())
-
-
 REPORTS = {
     "vdf": ("VDF Theory", generate_vdf),
     "braess": ("Braess Paradox Validation", generate_braess),
-    "monaco": ("Monaco Hill-Climber Validation", generate_monaco),
     "sioux": ("Sioux Falls Hill-Climber Validation", generate_sioux_falls),
     "anaheim": ("Anaheim Hill-Climber Validation", generate_anaheim),
     "chi-sketch": ("Chicago Sketch Hill-Climber Validation", generate_chicago),
-    "slice-sweep": ("Slice Convergence Sweep", generate_slice_sweep),
     "sioux-matrix": ("Sioux Falls Matrix Validation", generate_sioux_falls_matrix),
     "anaheim-matrix": ("Anaheim Matrix Validation", generate_anaheim_matrix),
     "chi-sketch-matrix": ("Chicago Sketch Matrix Validation", generate_chicago_matrix),
 }
 
-DEFAULT_REPORTS = ["vdf", "braess", "monaco", "sioux", "anaheim", "chi-sketch"]
+DEFAULT_REPORTS = ["vdf", "braess", "sioux", "anaheim", "chi-sketch"]
 
 
 def main() -> None:

@@ -187,9 +187,10 @@ def generate_chicago_hillclimber_report(
         tmp_path=tmp_path,
         output_path=output_path,
         detail_scale=1.00,
-        n_slices=4,
         bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
+        sample_rate=0.10,
+        max_rounds=10,
         intro_html=(
             "<p>Chicago Sketch hill-climber validation intentionally keeps "
             "<b>100% demand</b>. This is a full-load scalability and behavior "

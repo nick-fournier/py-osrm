@@ -13,6 +13,7 @@ from osrm.assignment import (
     ODMatrixAdapter,
     TripStreamAdapter,
 )
+from osrm.assignment.solvers import ODLedgerEntry, RouteAssignment
 
 
 def _trip(dep_s: float, volume: float = 1.0) -> DemandTrip:
@@ -138,11 +139,37 @@ def test_matrix_free_solver_runs_statefully_across_slices(monkeypatch):
         def _discover_network(self, engine, trips):
             return state
 
-        def _route_and_accumulate(self, engine, trips, state_obj):
+        def _route_and_accumulate_with_paths(self, engine, trips, state_obj):
             route_calls.append(len(trips))
             if len(route_calls) == 1:
-                return np.array([2.0]), np.array([20.0]), 100.0
-            return np.array([3.0]), np.array([30.0]), 200.0
+                return (
+                    np.array([2.0]),
+                    np.array([20.0]),
+                    100.0,
+                    [
+                        types.SimpleNamespace(
+                            trip_index=i,
+                            edge_indices=[0],
+                            density_contribution=[1.0],
+                            duration_s=50.0,
+                        )
+                        for i in range(len(trips))
+                    ],
+                )
+            return (
+                np.array([3.0]),
+                np.array([30.0]),
+                200.0,
+                [
+                    types.SimpleNamespace(
+                        trip_index=i,
+                        edge_indices=[0],
+                        density_contribution=[1.5],
+                        duration_s=200.0,
+                    )
+                    for i in range(len(trips))
+                ],
+            )
 
         def _update_state(self, state_obj):
             state_obj.speed_kmh = np.maximum(state_obj.freeflow_kmh - state_obj.density_vpkm, 1.0)
@@ -160,3 +187,222 @@ def test_matrix_free_solver_runs_statefully_across_slices(monkeypatch):
     assert np.isclose(result.network_state.density_vpkm[0], 5.0)
     assert [b.departure_bin for b in result.batch_results] == [0, 1]
     assert [b.n_trips for b in result.batch_results] == [2, 1]
+    assert result.od_ledger is not None
+    assert len(result.od_ledger) == 1
+    assert result.od_ledger[0].total_volume == 3.0
+    assert np.isclose(result.od_ledger[0].assigned_cost_s, 100.0)
+
+
+def test_matrix_free_solver_runs_sampled_heal(monkeypatch):
+    solver = MatrixFreeHillClimber("network.osrm", AssignmentConfig(bin_width_s=3600))
+    stream = TripStreamAdapter([
+        _trip(0.0, volume=1.0),
+        _trip(10.0, volume=1.0),
+        DemandTrip(
+            origin=(7.43, 43.75),
+            destination=(7.44, 43.76),
+            volume=1.0,
+            departure_time_s=20.0,
+        ),
+    ])
+
+    state = NetworkState.from_edges(
+        from_ids=np.array([1, 2], dtype=np.uint64),
+        to_ids=np.array([2, 3], dtype=np.uint64),
+        lengths_m=np.array([100.0, 120.0]),
+        freeflow_kmh=np.array([60.0, 50.0]),
+        jam_density=np.array([150.0, 150.0]),
+        n_lanes=np.array([1, 1], dtype=np.uint8),
+    )
+
+    route_calls = []
+    table_calls = []
+    customize_calls = []
+
+    class FakeEngine:
+        def Table(self, **kwargs):
+            table_calls.append(kwargs)
+            return {"durations": [[1.0, 80.0], [80.0, 40.0]]}
+
+    class FakeLoop:
+        def __init__(self):
+            self.base_path = "network.osrm"
+            self.config = AssignmentConfig(bin_width_s=3600, verbosity="ERROR")
+            self.smoother = types.SimpleNamespace(build_adjacency=lambda *args, **kwargs: None)
+            self.writer = types.SimpleNamespace(write_from_state=lambda state, only_changed=True: "/tmp/speeds.csv")
+
+        def _create_engine(self):
+            return FakeEngine()
+
+        def _snap_trips(self, engine, trips):
+            return list(trips)
+
+        def _discover_network(self, engine, trips):
+            return state
+
+        def _route_and_accumulate_with_paths(self, engine, trips, state_obj):
+            route_calls.append(len(trips))
+            if len(route_calls) == 1:
+                return (
+                    np.array([2.0, 1.0]),
+                    np.array([20.0, 10.0]),
+                    180.0,
+                    [
+                        types.SimpleNamespace(
+                            trip_index=0,
+                            edge_indices=[0],
+                            density_contribution=[1.0],
+                            duration_s=50.0,
+                        ),
+                        types.SimpleNamespace(
+                            trip_index=1,
+                            edge_indices=[0],
+                            density_contribution=[1.0],
+                            duration_s=50.0,
+                        ),
+                        types.SimpleNamespace(
+                            trip_index=2,
+                            edge_indices=[1],
+                            density_contribution=[1.0],
+                            duration_s=70.0,
+                        ),
+                    ],
+                )
+            return (
+                np.array([0.0, 1.0]),
+                np.array([0.0, 10.0]),
+                40.0,
+                [
+                    types.SimpleNamespace(
+                        trip_index=0,
+                        edge_indices=[1],
+                        density_contribution=[1.0],
+                        duration_s=35.0,
+                    ),
+                ],
+            )
+
+        def _update_state(self, state_obj):
+            state_obj.speed_kmh = np.maximum(state_obj.freeflow_kmh - state_obj.density_vpkm, 1.0)
+            state_obj.flow_vph = state_obj.density_vpkm * state_obj.speed_kmh
+
+    solver._make_loop = lambda: FakeLoop()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "osrm.assignment.solvers.osrm_module.customize",
+        lambda *args, **kwargs: customize_calls.append(args),
+    )
+
+    result = solver.run_stream(
+        stream,
+        sample_rate=1.0,
+        max_rounds=2,
+        gap_threshold=0.0001,
+    )
+
+    assert len(result.refinement_results) >= 1
+    assert route_calls[:2] == [3, 1]
+    assert len(table_calls) >= 1
+    assert len(customize_calls) >= 2
+    assert result.refinement_results[0].accepted_updates == 0
+    assert result.od_ledger is not None
+    assert len(result.od_ledger) == 2
+    assert len(result.od_ledger[0].routes) <= 2
+
+
+def test_propose_path_swap_rebalances_known_paths_without_discovery():
+    solver = MatrixFreeHillClimber("network.osrm", AssignmentConfig(bin_width_s=3600))
+    state = NetworkState.from_edges(
+        from_ids=np.array([1, 2], dtype=np.uint64),
+        to_ids=np.array([2, 3], dtype=np.uint64),
+        lengths_m=np.array([1000.0, 1000.0], dtype=np.float64),
+        freeflow_kmh=np.array([60.0, 60.0], dtype=np.float64),
+        jam_density=np.array([150.0, 150.0], dtype=np.float64),
+        n_lanes=np.array([1, 1], dtype=np.uint8),
+    )
+    state.speed_kmh = np.array([30.0, 60.0], dtype=np.float64)
+
+    entry = ODLedgerEntry(
+        origin=(0.0, 0.0),
+        destination=(1.0, 1.0),
+        total_volume=1.0,
+        departure_time_s=0.0,
+        routes=[
+            RouteAssignment(
+                edge_indices=[0],
+                density_contribution=[1.0],
+                volume_fraction=0.8,
+                assigned_cost_s=120.0,
+            ),
+            RouteAssignment(
+                edge_indices=[1],
+                density_contribution=[1.0],
+                volume_fraction=0.2,
+                assigned_cost_s=120.0,
+            ),
+        ],
+    )
+
+    proposal, used_discovery = solver._propose_path_swap(
+        entry,
+        state,
+        shortest_cost=120.0,
+        discovered_path=None,
+    )
+
+    assert used_discovery is False
+    assert len(proposal.routes) == 2
+    shares = {
+        tuple(route.edge_indices): route.volume_fraction for route in proposal.routes
+    }
+    assert shares[(1,)] > 0.2
+    assert shares[(0,)] < 0.8
+    assert np.isclose(sum(shares.values()), 1.0)
+
+
+def test_propose_path_swap_uses_discovered_path_when_better():
+    solver = MatrixFreeHillClimber("network.osrm", AssignmentConfig(bin_width_s=3600))
+    state = NetworkState.from_edges(
+        from_ids=np.array([1, 2, 3], dtype=np.uint64),
+        to_ids=np.array([2, 3, 4], dtype=np.uint64),
+        lengths_m=np.array([1000.0, 2000.0, 500.0], dtype=np.float64),
+        freeflow_kmh=np.array([30.0, 60.0, 60.0], dtype=np.float64),
+        jam_density=np.array([150.0, 150.0, 150.0], dtype=np.float64),
+        n_lanes=np.array([1, 1, 1], dtype=np.uint8),
+    )
+    state.speed_kmh = np.array([30.0, 60.0, 60.0], dtype=np.float64)
+
+    entry = ODLedgerEntry(
+        origin=(0.0, 0.0),
+        destination=(1.0, 1.0),
+        total_volume=1.0,
+        departure_time_s=0.0,
+        routes=[
+            RouteAssignment(
+                edge_indices=[0],
+                density_contribution=[1.0],
+                volume_fraction=1.0,
+                assigned_cost_s=120.0,
+            ),
+        ],
+    )
+
+    discovered_path = types.SimpleNamespace(
+        edge_indices=[2],
+        density_contribution=[1.0],
+        duration_s=30.0,
+    )
+
+    proposal, used_discovery = solver._propose_path_swap(
+        entry,
+        state,
+        shortest_cost=30.0,
+        discovered_path=discovered_path,
+    )
+
+    assert used_discovery is True
+    shares = {
+        tuple(route.edge_indices): route.volume_fraction for route in proposal.routes
+    }
+    assert (2,) in shares
+    assert shares[(2,)] > 0.0
+    assert shares[(0,)] < 1.0

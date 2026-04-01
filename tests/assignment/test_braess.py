@@ -14,18 +14,14 @@ import numpy as np
 import pytest
 
 import osrm
-from osrm.assignment import (
-    AssignmentConfig,
-    AssignmentLoop,
-    DensitySmoothingConfig,
-    MatrixFreeHillClimber,
-)
+from osrm.assignment import AssignmentConfig, AssignmentLoop, DensitySmoothingConfig
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import braess_network
 from .hillclimber_validation import (
     build_hillclimber_report_sections,
+    hillclimber_final_gap,
+    hillclimber_final_tstt,
     run_hillclimber_case,
-    slice_trips_by_departure,
 )
 
 
@@ -297,8 +293,8 @@ class TestBraessParadox:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "with_run",
             demand_scale=1.0,
-            n_slices=10,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+            sample_rate=0.10,
         )
         case_without = run_hillclimber_case(
             base_path=base_without,
@@ -307,8 +303,8 @@ class TestBraessParadox:
             trip_builder=_build_hillclimber_trips,
             run_dir=tmp_path / "without_run",
             demand_scale=1.0,
-            n_slices=10,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
+            sample_rate=0.10,
         )
 
         with_tstt = sum(b.batch_tstt for b in case_with.result.batch_results)
@@ -319,61 +315,73 @@ class TestBraessParadox:
             f"but with={with_tstt:,.0f} >= without={without_tstt:,.0f}"
         )
 
-    def test_reroute_epochs_reproduce_paradox(self, tmp_path):
-        """Reroute epochs restore equilibrium and reproduce the paradox.
+    def test_sampled_refinement_reproduces_paradox_without_oscillation(self, tmp_path):
+        """Sampled path-set refinement should recover the paradox cleanly.
 
-        After the initial HC greedy load (which sees no paradox), a single
-        reroute epoch iterates through slices oldest-first, subtracting
-        old density and re-routing on the updated state. This approaches
-        Wardrop equilibrium and the Braess paradox should emerge.
+        This is the new single-method refinement path: greedy initialization
+        followed by sampled path-set swaps with route discovery only when needed.
+        It should stop when further sampled updates do not improve the state.
         """
         from osrm.assignment.osm_synthesis import patch_braess_lanes
 
         demand = self.DEMAND
 
-        def _run_with_reroute(base, meta):
-            trips = [DemandTrip(
-                origin=meta["origin"],
-                destination=meta["destination"],
-                volume=demand,
-            )]
-            sliced = slice_trips_by_departure(
-                trips, n_slices=10, bin_width_s=3600.0,
-            )
-            config = AssignmentConfig(bin_width_s=3600.0, verbosity="NONE")
-            hc = MatrixFreeHillClimber(base, config)
-            return hc.run_stream(
-                sliced,
-                state_patch=lambda s: patch_braess_lanes(s, meta),
-                max_epochs=5,
+        def _run_with_sampled_refinement(base, meta):
+            case = run_hillclimber_case(
+                base_path=base,
+                meta=meta,
+                copy_fn=lambda base_path, run_dir: base_path,
+                trip_builder=lambda case_meta, scale: [DemandTrip(
+                    origin=case_meta["origin"],
+                    destination=case_meta["destination"],
+                    volume=demand * scale,
+                )],
+                run_dir=tmp_path / f"refinement_{Path(base).stem}",
+                demand_scale=1.0,
+                sample_rate=0.10,
+                max_rounds=10,
                 gap_threshold=0.001,
+                state_patch_factory=lambda case_meta: lambda state: patch_braess_lanes(state, case_meta),
             )
+            return case.result
 
-        base_with, meta_with = _prepare_network(tmp_path / "with", with_shortcut=True)
+        base_with, meta_with = _prepare_network(tmp_path / "refinement_with", with_shortcut=True)
         base_without, meta_without = _prepare_network(
-            tmp_path / "without", with_shortcut=False,
+            tmp_path / "refinement_without", with_shortcut=False,
         )
-        result_w = _run_with_reroute(base_with, meta_with)
-        result_wo = _run_with_reroute(base_without, meta_without)
+        result_w = _run_with_sampled_refinement(base_with, meta_with)
+        result_wo = _run_with_sampled_refinement(base_without, meta_without)
 
-        tstt_w = sum(e.tstt for e in result_w.slice_ledger)
-        tstt_wo = sum(e.tstt for e in result_wo.slice_ledger)
+        tstt_w = hillclimber_final_tstt(result_w)
+        tstt_wo = hillclimber_final_tstt(result_wo)
         pct = (tstt_w / tstt_wo - 1) * 100
 
-        # Paradox should appear: shortcut INCREASES TSTT after rerouting
         assert tstt_w > tstt_wo, (
-            f"Expected Braess paradox after reroute epochs, "
+            f"Expected Braess paradox after sampled refinement, "
             f"but with={tstt_w:,.0f} <= without={tstt_wo:,.0f} ({pct:+.1f}%)"
         )
-        # Should be a material increase, not noise
         assert pct > 2.0, (
-            f"Paradox too weak: {pct:.1f}% TSTT increase, expected >2%"
+            f"Paradox too weak under sampled refinement: {pct:.1f}% TSTT increase"
         )
-        # Gap should be near-zero
-        assert result_w.epoch_results, "Expected at least one reroute epoch"
-        assert result_w.epoch_results[-1].gap < 0.01, (
-            f"Gap too large: {result_w.epoch_results[-1].gap:.6f}"
+
+        gap_w = hillclimber_final_gap(result_w)
+        gap_wo = hillclimber_final_gap(result_wo)
+        assert gap_w is not None and gap_w < 0.01, (
+            f"Sampled-refinement shortcut gap too large: {gap_w}"
         )
+        assert gap_wo is not None and gap_wo < 0.01, (
+            f"Sampled-refinement no-shortcut gap too large: {gap_wo}"
+        )
+
+        if result_w.refinement_results:
+            gaps_w = [
+                round_result.sampled_gap
+                for round_result in result_w.refinement_results
+                if round_result.sampled_gap is not None
+            ]
+            assert gaps_w == sorted(gaps_w, reverse=True), (
+                f"Expected sampled-refinement gap to decrease monotonically, got {gaps_w}"
+            )
 
 
 
@@ -531,7 +539,7 @@ def generate_braess_report(
     """Run unified Braess validation and generate an interactive HTML report.
 
     Combines matrix-based equilibrium (MSA & Frank-Wolfe) and matrix-free
-    hill-climber (greedy + reroute epochs) on a 4-node diamond network.
+    hill-climber (greedy + sampled path-set refinement) on a 4-node diamond network.
 
     Parameters
     ----------
@@ -572,7 +580,7 @@ def generate_braess_report(
     result_fw_with = _run_assignment(base_fw_w, meta_fw_w, demand, max_iter, method="fw")
     result_fw_without = _run_assignment(base_fw_wo, meta_fw_wo, demand, max_iter, method="fw")
 
-    # HC (greedy + reroute in a single run per scenario)
+    # HC sampled path-set refinement
     base_hc_w, meta_hc_w = _prepare_network(tmp_path / "hc", with_shortcut=True)
     base_hc_wo, meta_hc_wo = _prepare_network(tmp_path / "hc", with_shortcut=False)
 
@@ -590,9 +598,9 @@ def generate_braess_report(
         trip_builder=_hc_trip_builder,
         run_dir=tmp_path / "hc_with_run",
         demand_scale=1.0,
-        n_slices=10,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        max_epochs=10,
+        sample_rate=0.10,
+        max_rounds=10,
         gap_threshold=0.001,
     )
     case_without = run_hillclimber_case(
@@ -602,9 +610,9 @@ def generate_braess_report(
         trip_builder=_hc_trip_builder,
         run_dir=tmp_path / "hc_without_run",
         demand_scale=1.0,
-        n_slices=10,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        max_epochs=10,
+        sample_rate=0.10,
+        max_rounds=10,
         gap_threshold=0.001,
     )
 
@@ -618,17 +626,17 @@ def generate_braess_report(
     hc_tstt_w = sum(b.batch_tstt for b in case_with.result.batch_results)
     hc_pct = (hc_tstt_w / hc_tstt_wo - 1) * 100 if hc_tstt_wo else 0.0
 
-    rr_tstt_w = sum(e.tstt for e in case_with.result.slice_ledger)
-    rr_tstt_wo = sum(e.tstt for e in case_without.result.slice_ledger)
+    rr_tstt_w = hillclimber_final_tstt(case_with.result)
+    rr_tstt_wo = hillclimber_final_tstt(case_without.result)
     rr_pct = (rr_tstt_w / rr_tstt_wo - 1) * 100 if rr_tstt_wo else 0.0
 
     fw_tstt_w = result_fw_with.iteration_log[-1].tstt
     fw_tstt_wo = result_fw_without.iteration_log[-1].tstt
     fw_pct = (fw_tstt_w / fw_tstt_wo - 1) * 100 if fw_tstt_wo else 0.0
 
-    n_epochs_w = len(case_with.result.epoch_results)
-    rr_gap_w = case_with.result.epoch_results[-1].gap if case_with.result.epoch_results else None
-    rr_gap_wo = case_without.result.epoch_results[-1].gap if case_without.result.epoch_results else None
+    n_rounds_w = len(case_with.result.refinement_results)
+    rr_gap_w = hillclimber_final_gap(case_with.result)
+    rr_gap_wo = hillclimber_final_gap(case_without.result)
     rr_gap_w_str = f"{rr_gap_w:.6f}" if rr_gap_w is not None else "n/a"
     rr_gap_wo_str = f"{rr_gap_wo:.6f}" if rr_gap_wo is not None else "n/a"
 
@@ -754,14 +762,14 @@ def generate_braess_report(
         (result_without.network_state, "Without (MSA)"),
         (result_with.network_state, "With (MSA)"),
         (result_fw_with.network_state, "With (FW)"),
-        (case_with.result.network_state, "With (HC Rerouted)"),
+        (case_with.result.network_state, "With (HC Sampled)"),
     ]
 
     figs.append(None)
     descriptions.append(
         """<h2>Link State Comparison</h2>
         <p>Four scenarios compared: MSA without and with shortcut,
-        FW with shortcut, and HC Rerouted with shortcut.
+        FW with shortcut, and HC Sampled with shortcut.
         Density (k, veh/km), speed (v, km/h), flow (q = k&times;v, veh/hr), and travel
         time (t = L/v) at the converged state.
         <span style="color:#F44336;font-weight:600;">Red density</span>
@@ -781,7 +789,7 @@ def generate_braess_report(
         """<h2>Route Travel Times</h2>
         <p>Total travel time for each OD route, summed from link-level t = L/v.
         At user equilibrium (Wardrop), all <i>used</i> routes between an OD pair
-        should have equal travel time.  Comparing MSA, FW, and HC Rerouted
+        should have equal travel time.  Comparing MSA, FW, and HC Sampled
         convergence toward this condition.</p>"""
         + _braess_route_tt_table(state_scenarios)
     )
@@ -809,7 +817,7 @@ def generate_braess_report(
         marker_color="#FFB74D",
     ))
     fig_bar.add_trace(go.Bar(
-        name="HC Rerouted",
+        name="HC Sampled",
         x=["Without Shortcut", "With Shortcut"],
         y=[rr_tstt_wo, rr_tstt_w],
         marker_color="#E65100",
@@ -827,8 +835,8 @@ def generate_braess_report(
         "<p>Total system travel time across all methods. At equilibrium (MSA, FW), "
         "the Braess paradox is confirmed: adding the shortcut <i>increases</i> TSTT "
         f"by <b>+{pct:.1f}%</b> (MSA) / <b>+{fw_pct:.1f}%</b> (FW). Under HC Greedy loading, the "
-        f"shortcut <i>reduces</i> TSTT by <b>{abs(hc_pct):.1f}%</b>. After reroute epochs, HC Rerouted "
-        f"converges toward equilibrium and the paradox re-emerges at <b>{rr_pct:+.1f}%</b>.</p>"
+        f"shortcut <i>reduces</i> TSTT by <b>{abs(hc_pct):.1f}%</b>. After sampled path-set refinement, "
+        f"HC Sampled converges toward equilibrium and the paradox re-emerges at <b>{rr_pct:+.1f}%</b>.</p>"
     )
 
     # ===================================================================
@@ -1007,36 +1015,36 @@ def generate_braess_report(
     figs.append(None)
     descriptions.append(
         "<h2>Hill-Climber Convergence</h2>"
-        "<p>Convergence diagnostics for the matrix-free hill-climber. Demand is divided into 10 departure "
-        "slices loaded sequentially (greedy phase), then refined via reroute epochs that "
-        "iterate through slices oldest-first, subtracting and re-routing each slice's demand.</p>"
+        "<p>Convergence diagnostics for the matrix-free hill-climber. Greedy loading uses "
+        "load steps derived from sample rate, then refinement uses sampled path-set rounds "
+        "that rebalance known OD paths and only discover new paths when needed.</p>"
     )
 
     # -------------------------------------------------------------------
-    # 7a. Slice Timeline / State / Runtime
+    # 7a. Convergence / State / Runtime
     # -------------------------------------------------------------------
     hc_figs, hc_descriptions = build_hillclimber_report_sections(
         network_name="Braess",
         case=case_with,
         detail_scale=1.0,
     )
-    # [0]=congestion map, [1]=link table, [2]=slice timeline, [3]=state evolution,
-    # [4]=slice runtime, [5]=MFD (combined), [6]=correlation (combined, if ref)
+    # [0]=congestion map, [1]=link table, [2]=convergence, [3]=state evolution,
+    # [4]=runtime, [5]=MFD (combined), [6]=correlation (combined, if ref)
     for i in range(2, 5):
         hc_descriptions[i] = hc_descriptions[i].replace("<h2>", "<h3>").replace("</h2>", "</h3>")
 
-    # Enrich state evolution description with convergence summary
+    # Enrich state evolution description with sampled refinement summary
     rr_paradox_text = (
         f"The Braess paradox emerges at {rr_pct:+.1f}% &mdash; confirming "
         "convergence toward approximate Wardrop equilibrium."
         if rr_pct > 0 else
         f"The Braess paradox does not emerge ({rr_pct:+.1f}%)."
     )
-    epochs_w = case_with.result.epoch_results
-    epochs_wo = case_without.result.epoch_results
+    rounds_w = case_with.result.refinement_results
+    rounds_wo = case_without.result.refinement_results
     hc_descriptions[3] += (
-        f"<p><b>Reroute convergence:</b> {n_epochs_w} epoch(s) with shortcut, "
-        f"{len(epochs_wo)} without. "
+        f"<p><b>Sampled refinement:</b> {n_rounds_w} round(s) with shortcut, "
+        f"{len(rounds_wo)} without. "
         f"Final gap: with&nbsp;=&nbsp;{rr_gap_w_str}, without&nbsp;=&nbsp;{rr_gap_wo_str}. "
         f"{rr_paradox_text}</p>"
     )
@@ -1045,19 +1053,20 @@ def generate_braess_report(
     descriptions.extend(hc_descriptions[2:5])
 
     # -------------------------------------------------------------------
-    # 7b. Slice Sensitivity
+    # 7b. Load-Step Sensitivity
     # -------------------------------------------------------------------
-    sweep_slices = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
+    sweep_steps = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
     sweep_pcts: list[float] = []
     sweep_base_w, sweep_meta_w = _prepare_network(tmp_path / "sweep_w", with_shortcut=True)
     sweep_base_wo, sweep_meta_wo = _prepare_network(tmp_path / "sweep_wo", with_shortcut=False)
-    for ns in sweep_slices:
+    for ns in sweep_steps:
         cw = run_hillclimber_case(
             base_path=sweep_base_w, meta=sweep_meta_w,
             copy_fn=lambda base, run_dir: base,
             trip_builder=_hc_trip_builder,
             run_dir=tmp_path / f"sweep_w_{ns}",
-            demand_scale=1.0, n_slices=ns,
+            demand_scale=1.0,
+            sample_rate=1.0 / ns,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         cwo = run_hillclimber_case(
@@ -1065,7 +1074,8 @@ def generate_braess_report(
             copy_fn=lambda base, run_dir: base,
             trip_builder=_hc_trip_builder,
             run_dir=tmp_path / f"sweep_wo_{ns}",
-            demand_scale=1.0, n_slices=ns,
+            demand_scale=1.0,
+            sample_rate=1.0 / ns,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         tw = sum(b.batch_tstt for b in cw.result.batch_results)
@@ -1074,11 +1084,11 @@ def generate_braess_report(
 
     fig_sweep = go.Figure()
     fig_sweep.add_trace(go.Scatter(
-        x=sweep_slices, y=sweep_pcts,
+        x=sweep_steps, y=sweep_pcts,
         mode="lines+markers",
         line=dict(color="#D32F2F", width=2),
         marker=dict(size=7),
-        hovertemplate="slices=%{x}<br>TSTT delta=%{y:+.1f}%<extra></extra>",
+        hovertemplate="load steps=%{x}<br>TSTT delta=%{y:+.1f}%<extra></extra>",
     ))
     fig_sweep.add_hline(y=0, line_dash="dot", line_color="#999",
                         annotation_text="paradox threshold")
@@ -1087,32 +1097,32 @@ def generate_braess_report(
                         annotation_text=f"asymptote \u2248 {asymptote:+.1f}%",
                         annotation_position="bottom right")
     fig_sweep.update_layout(
-        title="TSTT Delta vs Number of Departure Slices",
-        xaxis_title="Number of departure slices",
+        title="TSTT Delta vs Number of Greedy Load Steps",
+        xaxis_title="Number of greedy load steps",
         yaxis_title="TSTT delta (with vs without shortcut, %)",
         template="plotly_white",
         xaxis=dict(
             type="log",
-            tickvals=sweep_slices,
-            ticktext=[str(s) for s in sweep_slices],
+            tickvals=sweep_steps,
+            ticktext=[str(s) for s in sweep_steps],
             fixedrange=True,
         ),
         yaxis=dict(fixedrange=True),
     )
     figs.append(fig_sweep)
     descriptions.append(
-        "<h3>Slice Sensitivity (Greedy Only)</h3>"
+        "<h3>Load-Step Sensitivity (Greedy Only)</h3>"
         "<p>TSTT delta (with-shortcut vs without-shortcut) as a function of "
-        "the number of departure slices, using greedy loading only (E0, no reroute epochs).  "
+        "the number of greedy load steps, using greedy loading only (no post-load refinement).  "
         "The dotted grey line at 0% is where "
         "the Braess paradox would emerge (positive delta).  The delta never "
         "crosses zero &mdash; the shortcut <b>always helps</b> under hill-climber "
         "loading.</p>"
         "<p>Two regimes are visible: a <b>rapid convergence</b> phase "
-        "(1&ndash;8 slices) where the delta drops from &minus;19% to "
-        "&minus;4%, and a <b>plateau</b> beyond ~8 slices where additional "
-        "slicing barely changes the result (asymptoting to ~&minus;3%).  "
-        "This suggests 8&ndash;16 slices is a practical sweet spot for "
+        "(1&ndash;8 load steps) where the delta drops from &minus;19% to "
+        "&minus;4%, and a <b>plateau</b> beyond ~8 load steps where additional "
+        "load steps barely change the result (asymptoting to ~&minus;3%).  "
+        "This suggests 8&ndash;16 load steps is a practical sweet spot for "
         "hill-climber accuracy on small networks.  The paradox is an "
         "equilibrium phenomenon that requires global re-routing; greedy "
         "incremental loading never reaches the collectively sub-optimal "
@@ -1128,13 +1138,14 @@ def generate_braess_report(
         intro=(
             "<p>Unified Braess paradox validation on a 4-node diamond network, comparing "
             "matrix-based equilibrium (MSA, Frank-Wolfe) and matrix-free hill-climber "
-            "(HC Greedy, HC Rerouted).</p>"
+            "(HC Greedy, HC Sampled).</p>"
             f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.  "
             f"FW: Beckmann line search, {max_iter} iterations.  "
-            "HC: 10 departure slices, up to 10 reroute epochs, gap &lt; 0.001.</p>"
+            f"HC: {case_with.load_steps} greedy load step(s) (sample rate 10%), "
+            "up to 10 sampled path-set rounds, gap &lt; 0.001.</p>"
             f"<p><b>Key finding:</b> MSA and FW confirm the Braess paradox (+{pct:.1f}%). "
-            f"HC Greedy does <i>not</i> reproduce it ({hc_pct:+.1f}%). After reroute epochs, "
-            f"HC Rerouted converges to approximate equilibrium ({rr_pct:+.1f}%).</p>"
+            f"HC Greedy does <i>not</i> reproduce it ({hc_pct:+.1f}%). After sampled path-set refinement, "
+            f"HC Sampled converges to approximate equilibrium ({rr_pct:+.1f}%).</p>"
         ),
         figures=figs,
         descriptions=descriptions,

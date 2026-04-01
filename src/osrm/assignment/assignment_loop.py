@@ -147,6 +147,21 @@ class AssignmentResult:
         }
 
 
+@dataclass
+class RoutedTripPath:
+    """Per-trip path data captured during routing.
+
+    This is used by the matrix-free hill-climber to retain enough path-level
+    information to support later selective healing without re-running a full
+    all-trip assignment pass.
+    """
+
+    trip_index: int
+    edge_indices: List[int]
+    density_contribution: List[float]
+    duration_s: float
+
+
 class AssignmentLoop:
     """Orchestrates iterative traffic assignment using OSRM.
 
@@ -311,12 +326,12 @@ class AssignmentLoop:
         logger.info("Discovered %d unique directed edges", state.n_edges)
         return state
 
-    def _route_and_accumulate(
+    def _route_and_accumulate_with_paths(
         self,
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
         state: NetworkState,
-    ) -> Tuple[np.ndarray, np.ndarray, float]:
+    ) -> Tuple[np.ndarray, np.ndarray, float, List[RoutedTripPath]]:
         """Route all trips, accumulate link density and volume.
 
         Routes OD pairs in parallel using a thread pool (OSRM releases
@@ -346,6 +361,7 @@ class AssignmentLoop:
         new_volume = np.zeros(state.n_edges, dtype=np.float64)
         tstt = 0.0
         bin_width_hr = self.config.bin_width_s / 3600.0
+        routed_paths: List[RoutedTripPath] = []
 
         raw_results = self._batch_route_raw(engine, trips)
 
@@ -357,7 +373,10 @@ class AssignmentLoop:
             if not routes:
                 continue
             route = routes[0]
-            tstt += trip.volume * float(route["duration"])
+            route_duration_s = float(route["duration"])
+            tstt += trip.volume * route_duration_s
+            trip_edge_indices: List[int] = []
+            trip_density: List[float] = []
 
             for leg in route["legs"]:
                 ann = leg["annotation"]
@@ -387,8 +406,30 @@ class AssignmentLoop:
                     seg_speed_kmh = (speeds[i] * 3.6) if i < len(speeds) else 0.0
                     if seg_speed_kmh < self.config.min_speed_kmh:
                         seg_speed_kmh = state.freeflow_kmh[idx]
-                    new_density[idx] += trip.volume / (seg_speed_kmh * bin_width_hr)
+                    density_delta = trip.volume / (seg_speed_kmh * bin_width_hr)
+                    new_density[idx] += density_delta
+                    trip_edge_indices.append(idx)
+                    trip_density.append(density_delta)
 
+            routed_paths.append(RoutedTripPath(
+                trip_index=trip_idx,
+                edge_indices=trip_edge_indices,
+                density_contribution=trip_density,
+                duration_s=route_duration_s,
+            ))
+
+        return new_density, new_volume, tstt, routed_paths
+
+    def _route_and_accumulate(
+        self,
+        engine: osrm_module.OSRM,
+        trips: List[DemandTrip],
+        state: NetworkState,
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Route all trips, accumulate link density and volume."""
+        new_density, new_volume, tstt, _ = self._route_and_accumulate_with_paths(
+            engine, trips, state,
+        )
         return new_density, new_volume, tstt
 
     def _compute_relative_gap(
