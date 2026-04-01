@@ -1121,15 +1121,20 @@ class MatrixFreeHillClimber:
 
         loop = self._make_loop()
         sampled_mode = sample_rate > 0.0 and max_rounds > 0
+        unique_ods = len({(t.origin, t.destination) for t in all_trips})
+        total_demand = sum(t.volume for t in all_trips)
         if sampled_mode:
             logger.info(
-                "HC started: %d trips, sample_rate=%.2f, rounds=%d",
-                len(all_trips), sample_rate, max_rounds,
+                "HC started: %d trip-records (%d unique ODs, %.0f total demand), "
+                "sample_rate=%.2f, rounds=%d",
+                len(all_trips), unique_ods, total_demand,
+                sample_rate, max_rounds,
             )
         else:
             logger.info(
-                "HC started: %d trips, greedy-only",
-                len(all_trips),
+                "HC started: %d trip-records (%d unique ODs, %.0f total demand), "
+                "greedy-only",
+                len(all_trips), unique_ods, total_demand,
             )
         engine = loop._create_engine()
 

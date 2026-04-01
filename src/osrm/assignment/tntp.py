@@ -129,10 +129,16 @@ def parse_net(path: str | Path) -> TNTPNetwork:
 def parse_trips(path: str | Path) -> Tuple[int, np.ndarray]:
     """Parse a TNTP trips (OD demand) file.
 
+    Supported formats:
+
+    - ``.tntp`` — standard TNTP whitespace format
+    - ``.npz`` — compressed numpy archive with keys ``origin``, ``destination``,
+      ``volume``, ``n_zones`` (sparse triplet format)
+
     Parameters
     ----------
     path : str or Path
-        Path to the ``*.trips.tntp`` file.
+        Path to the trips file.
 
     Returns
     -------
@@ -142,6 +148,25 @@ def parse_trips(path: str | Path) -> Tuple[int, np.ndarray]:
         OD demand matrix of shape ``(n_zones, n_zones)``.
         Entry ``[i, j]`` is demand from zone ``i+1`` to zone ``j+1``.
     """
+    path = Path(path)
+    if path.suffix.lower() == ".npz":
+        return _parse_trips_npz(path)
+    return _parse_trips_tntp(path)
+
+
+def _parse_trips_npz(path: Path) -> Tuple[int, np.ndarray]:
+    """Load OD matrix from compressed numpy archive."""
+    data = np.load(path)
+    n_zones = int(data["n_zones"][0])
+    origins = data["origin"].astype(int)
+    destinations = data["destination"].astype(int)
+    volumes = data["volume"].astype(np.float64)
+    matrix = np.zeros((n_zones, n_zones), dtype=np.float64)
+    matrix[origins - 1, destinations - 1] = volumes
+    return n_zones, matrix
+
+
+def _parse_trips_tntp(path: Path) -> Tuple[int, np.ndarray]:
     path = Path(path)
     text = path.read_text()
 
