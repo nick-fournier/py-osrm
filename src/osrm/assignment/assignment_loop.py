@@ -102,6 +102,7 @@ class AssignmentConfig:
     incremental_steps: Tuple[float, ...] = (0.25, 0.50, 0.75, 1.0)
     stagnation_tol: float = 0.001
     stagnation_window: int = 3
+    n_threads: int = 0  # 0 = use all cores; positive = cap TBB parallelism
 
 
 @dataclass
@@ -220,11 +221,15 @@ class AssignmentLoop:
 
     def _create_engine(self) -> osrm_module.OSRM:
         """Create a fresh OSRM engine instance."""
-        return osrm_module.OSRM(
+        logger.info("Loading OSRM engine from %s", self.base_path)
+        t0 = time.monotonic()
+        eng = osrm_module.OSRM(
             storage_config=self.base_path,
             algorithm="MLD",
             use_shared_memory=False,
         )
+        logger.info("Engine loaded in %.2fs", time.monotonic() - t0)
+        return eng
 
     def _snap_trips(
         self,
@@ -244,6 +249,12 @@ class AssignmentLoop:
             for coord in (tuple(trip.origin), tuple(trip.destination)):
                 if coord not in unique_coords:
                     unique_coords[coord] = list(coord)
+
+        logger.info(
+            "Snapping %d unique coordinates to network...",
+            len(unique_coords),
+        )
+        t0 = time.monotonic()
 
         # Snap each unique coordinate via Nearest
         snapped: Dict[Tuple[float, float], list] = {}
@@ -271,13 +282,9 @@ class AssignmentLoop:
             1 for c in unique_coords
             if abs(snapped[c][0] - c[0]) > 1e-8 or abs(snapped[c][1] - c[1]) > 1e-8
         )
-        logger.debug(
-            "Snapped %d/%d unique coordinates (max shift: %.2fm)",
-            n_moved, len(unique_coords),
-            max(
-                ((snapped[c][0] - c[0])**2 + (snapped[c][1] - c[1])**2)**0.5 * 111_000
-                for c in unique_coords
-            ) if unique_coords else 0,
+        logger.info(
+            "Snapped %d/%d coords in %.2fs",
+            n_moved, len(unique_coords), time.monotonic() - t0,
         )
         return snapped_trips
 
@@ -388,6 +395,7 @@ class AssignmentLoop:
             self.config.min_speed_kmh,
             default_jam,
             self.config.default_n_lanes,
+            self.config.n_threads,
         )
 
         # Register any newly discovered edges
@@ -718,10 +726,11 @@ class AssignmentLoop:
 
             # Customize OSRM with partial-demand speeds
             csv_path = self.writer.write_from_state(state, only_changed=True)
+            logger.info("Customizing OSRM (incremental step %d)...", n_inc)
             osrm_module.customize(
                 self.base_path,
                 segment_speed_file=str(csv_path),
-                verbosity="ERROR",  # OSRM C++ always quiet
+                verbosity="ERROR",
             )
             del engine
             engine = self._create_engine()
@@ -815,11 +824,11 @@ class AssignmentLoop:
             # 6. Write CSV and re-customize
             t_cust = time.monotonic()
             csv_path = self.writer.write_from_state(state, only_changed=True)
-
+            logger.info("Customizing OSRM (iter %d)...", n)
             osrm_module.customize(
                 self.base_path,
                 segment_speed_file=str(csv_path),
-                verbosity="ERROR",  # OSRM C++ always quiet
+                verbosity="ERROR",
             )
             customize_time = time.monotonic() - t_cust
 

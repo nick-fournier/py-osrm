@@ -618,12 +618,14 @@ class MatrixFreeHillClimber:
     ) -> Tuple[object, float, float]:
         t_cust = time.monotonic()
         csv_path = loop.writer.write_from_state(state, only_changed=True)
+        logger.info("Customizing OSRM...")
         osrm_module.customize(
             self.base_path,
             segment_speed_file=str(csv_path),
             verbosity="ERROR",
         )
         customize_time = time.monotonic() - t_cust
+        logger.info("Customized in %.2fs", customize_time)
 
         t_engine = time.monotonic()
         del engine
@@ -1192,10 +1194,11 @@ class MatrixFreeHillClimber:
 
             t_cust = time.monotonic()
             csv_path = loop.writer.write_from_state(state, only_changed=True)
+            logger.info("Customizing OSRM (batch %d)...", batch.batch_index)
             osrm_module.customize(
                 self.base_path,
                 segment_speed_file=str(csv_path),
-                verbosity="ERROR",  # OSRM C++ always quiet
+                verbosity="ERROR",
             )
             customize_time = time.monotonic() - t_cust
 

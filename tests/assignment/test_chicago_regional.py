@@ -16,7 +16,9 @@ fixture under 4 MB (the raw TNTP trips file is 64 MB).
 Source: bstabler/TransportationNetworks — Chicago Area Transportation Study.
 """
 
+import logging
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,7 @@ from osrm.assignment.tntp import parse_net, parse_trips, load_node_coords, parse
 from .hillclimber_validation import generate_hillclimber_validation_report
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "chicago_regional"
+logger = logging.getLogger(__name__)
 
 # ── classification overrides ──────────────────────────────────────────
 
@@ -73,26 +76,46 @@ def _prepare_regional_network(tmp_path: Path):
     work = tmp_path / "chi_regional"
     work.mkdir(parents=True, exist_ok=True)
 
+    logger.info("Parsing TNTP network and demand...")
+    t0 = time.monotonic()
     net = parse_net(FIXTURE_DIR / "ChicagoRegional_net.tntp")
     n_zones, od_matrix = parse_trips(FIXTURE_DIR / "ChicagoRegional_trips.npz")
     node_coords = load_node_coords(
         FIXTURE_DIR / "chicago_regional_nodes.geojson"
     )
     ref_flows = parse_flow(FIXTURE_DIR / "ChicagoRegional_flow.tntp")
+    logger.info(
+        "Parsed in %.1fs: %d links, %d zones, %.0f total demand",
+        time.monotonic() - t0, len(net.links), n_zones, od_matrix.sum(),
+    )
 
+    logger.info("Synthesizing OSM XML...")
+    t0 = time.monotonic()
     osm_path, meta = tntp_to_osm(
         net, node_coords, od_matrix, work / "chi_regional.osm",
         ref_flows=ref_flows,
         speed_units="auto",
         classify_override=_regional_classify_override,
     )
+    logger.info("OSM synthesis in %.1fs", time.monotonic() - t0)
     base = str(work / "chi_regional.osrm")
 
+    logger.info("Extracting...")
+    t0 = time.monotonic()
     osrm.extract(
         str(osm_path), profile="car", output_path=base, verbosity="ERROR"
     )
+    logger.info("Extracted in %.1fs", time.monotonic() - t0)
+
+    logger.info("Partitioning...")
+    t0 = time.monotonic()
     osrm.partition(base, verbosity="ERROR")
+    logger.info("Partitioned in %.1fs", time.monotonic() - t0)
+
+    logger.info("Customizing...")
+    t0 = time.monotonic()
     osrm.customize(base, verbosity="ERROR")
+    logger.info("Customized in %.1fs", time.monotonic() - t0)
 
     return base, meta
 

@@ -27,6 +27,7 @@
 
 #include <tbb/parallel_for.h>
 #include <tbb/blocked_range.h>
+#include <tbb/global_control.h>
 
 #include <cstdint>
 #include <unordered_map>
@@ -84,8 +85,17 @@ void init_Assignment(nb::module_& m) {
            double bin_width_hr,
            double min_speed_kmh,
            double default_jam_density,
-           int    default_n_lanes)
+           int    default_n_lanes,
+           int    n_threads)
     {
+        // Optionally cap TBB parallelism
+        std::unique_ptr<tbb::global_control> tbb_ctl;
+        if (n_threads > 0) {
+            tbb_ctl = std::make_unique<tbb::global_control>(
+                tbb::global_control::max_allowed_parallelism,
+                static_cast<size_t>(n_threads));
+        }
+
         // coords shape: (n_trips, 4) — [o_lon, o_lat, d_lon, d_lat]
         const size_t n_trips  = coords.shape(0);
         const size_t n_edges0 = edge_ids.shape(0);
@@ -279,10 +289,12 @@ void init_Assignment(nb::module_& m) {
     nb::arg("min_speed_kmh"),
     nb::arg("default_jam_density"),
     nb::arg("default_n_lanes"),
+    nb::arg("n_threads") = 0,
     "Route OD pairs and accumulate link density/volume in C++.\n\n"
     "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
     "builds RouteParameters internally — no Python param construction.\n"
     "Uses JSON route results (correct uint64 OSM node IDs at any scale).\n\n"
+    "n_threads: 0 = use all cores, >0 = cap TBB parallelism.\n\n"
     "Returns (density, volume, tstt, paths, new_edges)."
     );
 }
