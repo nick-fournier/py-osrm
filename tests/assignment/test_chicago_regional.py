@@ -253,12 +253,21 @@ def test_chicago_regional_hillclimber(tmp_path):
     base, meta = _prepare_regional_network(tmp_path)
 
     from osrm.assignment.solvers import MatrixFreeHillClimber, TripStreamAdapter
-    from .hillclimber_validation import slice_trips_by_departure
+    from .hillclimber_validation import (
+        compute_volume_threshold,
+        slice_trips_by_departure,
+        _median_link_speed_from_meta,
+    )
 
     trips = _build_hillclimber_trips(meta, demand_scale=1.0)
     load_steps = 10
+    median_speed = _median_link_speed_from_meta(meta) or 30.0
+    vol_threshold = compute_volume_threshold(
+        median_speed_kmh=median_speed, n_slices=load_steps,
+    )
     sliced = slice_trips_by_departure(
-        trips, n_slices=load_steps, bin_width_s=3600.0
+        trips, n_slices=load_steps, bin_width_s=3600.0,
+        volume_threshold=vol_threshold,
     )
 
     config = AssignmentConfig(

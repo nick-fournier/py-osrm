@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
 
+import numpy as np
 import plotly.graph_objects as go
 
 from osrm.assignment import (
@@ -30,6 +31,8 @@ from osrm.assignment.plots import (
     _write_combined_report,
 )
 
+_DEFAULT_ASSUMED_SPEED_KMH = 30.0
+
 
 @dataclass
 class HillClimberValidationCase:
@@ -44,56 +47,106 @@ class HillClimberValidationCase:
     load_steps: int
 
 
+def _median_link_speed_from_meta(meta: dict) -> float | None:
+    """Extract median freeflow speed from meta['link_attrs'] if available."""
+    link_attrs = meta.get("link_attrs")
+    if not link_attrs:
+        return None
+    speeds = [a["ff_speed_kmh"] for a in link_attrs.values() if "ff_speed_kmh" in a]
+    if not speeds:
+        return None
+    return float(np.median(speeds))
+
+
+def compute_volume_threshold(
+    *,
+    median_speed_kmh: float,
+    jam_density_per_lane: float = 150.0,
+    n_lanes: int = 1,
+    n_slices: int,
+    bin_width_hr: float = 1.0,
+) -> float:
+    """Per-card volume threshold: each card contributes ≤ kj/n_slices density.
+
+    ``threshold = (kj / n_slices) * speed * bin_width``
+
+    A single OD pair routed at this volume adds at most ``kj / n_slices``
+    density to every link on its path, preventing any one card from
+    oversaturating the network.
+    """
+    kj = jam_density_per_lane * n_lanes
+    return (kj / n_slices) * median_speed_kmh * bin_width_hr
+
+
 def slice_trips_by_departure(
     trips: Sequence[DemandTrip],
     *,
     n_slices: int,
     bin_width_s: float,
+    volume_threshold: float,
+    seed: int = 42,
 ) -> list[DemandTrip]:
-    """Partition OD trips into departure-time slices for incremental loading.
+    """Replicate-shuffle-deal OD trips into departure-time slices.
 
-    When the trip count exceeds ``n_slices``, trips are partitioned into
-    contiguous blocks sorted by volume descending (high-demand first).
-    Each trip appears in exactly one slice at its full volume, so total
-    routing work = len(trips) rather than n_slices × len(trips).
+    Dual-axis slicing separates spatial OD sampling from volumetric
+    demand splitting:
 
-    When the trip count is small (≤ n_slices), falls back to volume-
-    splitting: each trip is replicated across all slices with 1/n_slices
-    of its original volume.  This preserves gradual loading behaviour
-    for tiny networks (e.g. Braess with 1 OD pair).
+    1. **Replicate** – OD pairs with ``volume > volume_threshold`` are
+       split into ``ceil(volume / volume_threshold)`` cards, each
+       carrying an equal share of the original volume.  Low-volume
+       pairs produce one card at full volume.
+    2. **Shuffle** – The full deck is randomly permuted (seeded for
+       reproducibility) so each slice gets a spatially diverse mix.
+    3. **Deal** – The shuffled deck is divided into *n_slices* contiguous
+       blocks, each assigned a successive departure time.
+
+    On large spread networks (e.g. Chicago Regional) most OD pairs have
+    sub-threshold volume, so the deck ≈ n_od_pairs and spatial sampling
+    dominates.  On small concentrated networks (e.g. Braess) the single
+    high-volume pair is replicated into many cards and volumetric
+    splitting dominates.
     """
     if n_slices <= 0:
         raise ValueError("n_slices must be positive")
     if bin_width_s <= 0:
         raise ValueError("bin_width_s must be positive")
+    if volume_threshold <= 0:
+        raise ValueError("volume_threshold must be positive")
 
     positive_trips = [t for t in trips if t.volume > 0]
+    n_ods = len(positive_trips)
+    if n_ods == 0:
+        return []
 
-    if len(positive_trips) <= n_slices:
-        # Small network: volume-split across all slices
-        sliced: list[DemandTrip] = []
-        for trip in positive_trips:
-            per_slice = trip.volume / n_slices
-            for slice_idx in range(n_slices):
-                sliced.append(DemandTrip(
-                    origin=trip.origin,
-                    destination=trip.destination,
-                    volume=per_slice,
-                    departure_time_s=slice_idx * bin_width_s,
-                ))
-        return sliced
+    # Per-OD minimum cards so every slice gets at least one card
+    spatial_floor = max(1, math.ceil(n_slices / n_ods))
 
-    # Large network: partition into contiguous blocks, high demand first
-    sorted_trips = sorted(positive_trips, key=lambda t: t.volume, reverse=True)
+    # Step 1: Replicate high-volume pairs
+    origins: list = []
+    destinations: list = []
+    volumes: list[float] = []
+    for trip in positive_trips:
+        n_cards = max(spatial_floor, math.ceil(trip.volume / volume_threshold))
+        per_card = trip.volume / n_cards
+        for _ in range(n_cards):
+            origins.append(trip.origin)
+            destinations.append(trip.destination)
+            volumes.append(per_card)
 
-    n = len(sorted_trips)
-    sliced = []
-    for i, trip in enumerate(sorted_trips):
-        slice_idx = min(i * n_slices // n, n_slices - 1)
+    n = len(origins)
+
+    # Step 2: Shuffle
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(n)
+
+    # Step 3: Deal into slices
+    sliced: list[DemandTrip] = []
+    for rank, idx in enumerate(perm):
+        slice_idx = min(rank * n_slices // n, n_slices - 1)
         sliced.append(DemandTrip(
-            origin=trip.origin,
-            destination=trip.destination,
-            volume=trip.volume,
+            origin=origins[idx],
+            destination=destinations[idx],
+            volume=volumes[idx],
             departure_time_s=slice_idx * bin_width_s,
         ))
     return sliced
@@ -132,6 +185,7 @@ def run_hillclimber_case(
     sample_rate: float,
     max_rounds: int = 0,
     gap_threshold: float = 0.01,
+    assumed_speed_kmh: float | None = None,
 ):
     """Run one shared hill-climber validation case from scenario metadata."""
     logger = logging.getLogger(__name__)
@@ -144,16 +198,41 @@ def run_hillclimber_case(
     trips = trip_builder(meta, demand_scale)
     logger.info("Built %d OD pairs in %.1fs", len(trips), time.monotonic() - t0)
 
-    logger.info("Partitioning into %d load slices (high-demand first)...", load_steps)
+    # Determine median network speed for volume threshold
+    if assumed_speed_kmh is not None:
+        median_speed = assumed_speed_kmh
+    else:
+        median_speed = _median_link_speed_from_meta(meta)
+        if median_speed is None:
+            median_speed = _DEFAULT_ASSUMED_SPEED_KMH
+            logger.info(
+                "No link_attrs in meta; using default assumed speed %.0f km/h",
+                median_speed,
+            )
+
+    vol_threshold = compute_volume_threshold(
+        median_speed_kmh=median_speed,
+        n_slices=load_steps,
+        bin_width_hr=bin_width_s / 3600.0,
+    )
+    n_above = sum(1 for t in trips if t.volume > vol_threshold)
+    logger.info(
+        "Volume threshold %.0f veh/hr (median speed %.1f km/h, %d slices); "
+        "%d/%d OD pairs will be replicated",
+        vol_threshold, median_speed, load_steps, n_above, len(trips),
+    )
+
+    logger.info("Replicate-shuffle-deal into %d load slices...", load_steps)
     t0 = time.monotonic()
     sliced_trips = slice_trips_by_departure(
         trips,
         n_slices=load_steps,
         bin_width_s=bin_width_s,
+        volume_threshold=vol_threshold,
     )
     logger.info(
-        "Partitioned %d OD pairs into %d slices in %.1fs (total routes = %d)",
-        len(trips), load_steps, time.monotonic() - t0, len(sliced_trips),
+        "Dealt %d cards from %d OD pairs into %d slices in %.1fs",
+        len(sliced_trips), len(trips), load_steps, time.monotonic() - t0,
     )
     run_base = copy_fn(base_path, run_dir)
     config = AssignmentConfig(
@@ -502,6 +581,7 @@ def generate_hillclimber_validation_report(
     sample_rate: float,
     max_rounds: int = 0,
     gap_threshold: float = 0.01,
+    assumed_speed_kmh: float | None = None,
 ) -> Path:
     """Generate a shared hill-climber validation report for one scenario."""
     tmp_path = Path(tmp_path)
@@ -521,6 +601,7 @@ def generate_hillclimber_validation_report(
         sample_rate=sample_rate,
         max_rounds=max_rounds,
         gap_threshold=gap_threshold,
+        assumed_speed_kmh=assumed_speed_kmh,
     )
 
     state = case.result.network_state
@@ -580,9 +661,9 @@ def generate_hillclimber_validation_report(
         )
 
     load_distribution = (
-        f"loaded in {case.load_steps} greedy load step(s). "
-        f"Trips: {len(case.trips):,} OD movements expanded into "
-        f"{len(case.sliced_trips):,} load-stepped records. "
+        f"loaded via replicate-shuffle-deal into {case.load_steps} greedy load step(s). "
+        f"Trips: {len(case.trips):,} OD pairs dealt into "
+        f"{len(case.sliced_trips):,} cards. "
     )
 
     intro = (
