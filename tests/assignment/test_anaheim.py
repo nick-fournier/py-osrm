@@ -281,7 +281,7 @@ class TestAnaheim:
             run_dir=tmp_path_factory.mktemp("ana_hc"),
             demand_scale=1.00,
             state_patch_factory=lambda m: lambda s: patch_lanes(s, m),
-            sample_rate=0.25,
+            load_rate=0.25,
             max_rounds=1,
         )
         state = case.result.network_state
@@ -317,7 +317,7 @@ def generate_anaheim_report(
         detail_scale=1.00,
         bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
-        sample_rate=0.10,
+        load_rate=0.10,
         max_rounds=max_rounds,
         method=method,
         intro_html=(

@@ -272,7 +272,7 @@ def test_matrix_free_solver_runs_msa(monkeypatch):
 
     result = solver.run_stream(
         stream,
-        sample_rate=1.0,
+        max_od=100_000,
         max_rounds=2,
         gap_threshold=0.0001,
     )
@@ -300,7 +300,7 @@ def test_fw_rejects_large_sampled_networks():
     with pytest.raises(NotImplementedError, match="Frank-Wolfe requires full-pass"):
         solver.run_stream(
             trips,
-            sample_rate=0.10,
+            max_od=100_000,
             max_rounds=1,
             method="fw",
         )

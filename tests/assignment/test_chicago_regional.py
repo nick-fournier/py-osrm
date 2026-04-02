@@ -206,7 +206,7 @@ def generate_regional_report(
         detail_scale=1.00,
         bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
-        sample_rate=0.10,
+        load_rate=0.10,
         max_rounds=max_rounds,
         method=method,
         intro_html=(
@@ -273,7 +273,7 @@ def test_chicago_regional_hillclimber(tmp_path):
     result = solver.run_stream(
         sliced,
         state_patch=lane_patch,
-        sample_rate=0.10,
+        max_od=100_000,
         max_rounds=3,
         gap_threshold=0.05,
     )

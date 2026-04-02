@@ -294,7 +294,7 @@ class TestBraessParadox:
             run_dir=tmp_path / "with_run",
             demand_scale=1.0,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-            sample_rate=0.10,
+            load_rate=0.10,
         )
         case_without = run_hillclimber_case(
             base_path=base_without,
@@ -304,7 +304,7 @@ class TestBraessParadox:
             run_dir=tmp_path / "without_run",
             demand_scale=1.0,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-            sample_rate=0.10,
+            load_rate=0.10,
         )
 
         with_tstt = sum(b.batch_tstt for b in case_with.result.batch_results)
@@ -338,7 +338,7 @@ class TestBraessParadox:
                 )],
                 run_dir=tmp_path / f"refinement_{Path(base).stem}",
                 demand_scale=1.0,
-                sample_rate=0.10,
+                load_rate=0.10,
                 max_rounds=10,
                 gap_threshold=0.001,
                 state_patch_factory=lambda case_meta: lambda state: patch_braess_lanes(state, case_meta),
@@ -596,7 +596,7 @@ def generate_braess_report(
         run_dir=tmp_path / "hc_with_run",
         demand_scale=1.0,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        sample_rate=0.10,
+        load_rate=0.10,
         max_rounds=10,
         gap_threshold=0.001,
     )
@@ -608,7 +608,7 @@ def generate_braess_report(
         run_dir=tmp_path / "hc_without_run",
         demand_scale=1.0,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        sample_rate=0.10,
+        load_rate=0.10,
         max_rounds=10,
         gap_threshold=0.001,
     )
@@ -942,7 +942,7 @@ def generate_braess_report(
             trip_builder=_hc_trip_builder,
             run_dir=tmp_path / f"sweep_w_{ns}",
             demand_scale=1.0,
-            sample_rate=1.0 / ns,
+            load_rate=1.0 / ns,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         cwo = run_hillclimber_case(
@@ -951,7 +951,7 @@ def generate_braess_report(
             trip_builder=_hc_trip_builder,
             run_dir=tmp_path / f"sweep_wo_{ns}",
             demand_scale=1.0,
-            sample_rate=1.0 / ns,
+            load_rate=1.0 / ns,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         tw = sum(b.batch_tstt for b in cw.result.batch_results)

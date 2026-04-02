@@ -170,7 +170,7 @@ def generate_chicago_report(
         detail_scale=1.00,
         bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
-        sample_rate=0.10,
+        load_rate=0.10,
         max_rounds=max_rounds,
         method=method,
         intro_html=(

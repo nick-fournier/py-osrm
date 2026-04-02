@@ -313,7 +313,7 @@ class TrafficAssignmentSolver:
         initial_volume: np.ndarray,
         state_patch,
         progress_callback,
-        sample_rate: float,
+        max_od: int,
         max_rounds: int,
         gap_threshold: float,
         method: str = "msa",
@@ -327,19 +327,23 @@ class TrafficAssignmentSolver:
              - MSA: α = 1/(m+1)
              - FW:  α from Beckmann line search
           4. Clip, update VDF, customize, reload
+
+        Parameters
+        ----------
+        max_od : int
+            Maximum OD pairs routed per iteration.  When the trip list is
+            larger, MSA sub-samples; FW always requires full-pass so the
+            guard in ``run_stream`` rejects oversized networks.
         """
         msa_results: List[MSAIterationResult] = []
         use_fw = method == "fw"
-        # FW line search requires accurate (full-demand) gradients.
-        # Sampled AON volumes are too noisy for reliable bisection.
-        # FW always uses full-pass; the trip-count guard is in run_stream().
-        natural_full_pass = sample_rate >= 1.0 or len(trips) <= 1
-        if use_fw and not natural_full_pass:
+        n_trips = len(trips)
+        full_pass = n_trips <= max_od or use_fw
+        if use_fw and n_trips > max_od:
             logger.info(
-                "FW: forcing full-pass routing (%d trips per iteration)",
-                len(trips),
+                "FW: full-pass routing required (%d trips, max_od=%d)",
+                n_trips, max_od,
             )
-        full_pass = natural_full_pass or use_fw
         prev_volume = initial_volume.copy()
 
         for m in range(1, max_rounds + 1):
@@ -352,7 +356,7 @@ class TrafficAssignmentSolver:
             if full_pass:
                 route_trips = trips
             else:
-                n_sample = max(1, int(len(trips) * sample_rate))
+                n_sample = min(n_trips, max_od)
                 route_trips = random.sample(trips, n_sample)
 
             t_route = time.monotonic()
@@ -372,9 +376,10 @@ class TrafficAssignmentSolver:
 
             # Scale up sampled density/volume to full-demand estimate
             if not full_pass:
-                aon_density = aon_density / sample_rate
-                aon_volume = aon_volume / sample_rate
-                aon_tstt = aon_tstt / sample_rate
+                scale_factor = n_trips / len(route_trips)
+                aon_density = aon_density * scale_factor
+                aon_volume = aon_volume * scale_factor
+                aon_tstt = aon_tstt * scale_factor
 
             # Compute Wardrop gap on FROZEN state before blending.
             # Both numerator and denominator use the same VDF link costs,
@@ -534,7 +539,7 @@ class TrafficAssignmentSolver:
         max_batch_size: Optional[int] = None,
         state_patch=None,
         progress_callback=None,
-        sample_rate: float = 0.0,
+        max_od: int = 100_000,
         max_rounds: int = 0,
         gap_threshold: float = 0.01,
         method: str = "msa",
@@ -550,15 +555,24 @@ class TrafficAssignmentSolver:
         3. Recomputes VDF speeds
         4. Re-customizes OSRM and reloads the engine
 
-        After the greedy load, convergence iterations optionally run when
-        ``sample_rate > 0`` and ``max_rounds > 0``. Each iteration:
+        After the greedy load, convergence iterations run when
+        ``max_rounds > 0``. Each iteration:
 
         1. Freezes the current link-density state
-        2. Routes all demand (or a weighted subsample) on the frozen network
+        2. Routes all demand (or up to ``max_od`` OD pairs for MSA) on the
+           frozen network
         3. Blends auxiliary density with current state: k = (1-α)k + αk̂
            - MSA: α = 1/(m+1) (diminishing step, guaranteed convergence)
            - FW:  α from Beckmann line search (optimal step)
         4. Re-customizes and reloads the engine
+
+        Parameters
+        ----------
+        max_od : int
+            Maximum OD pairs routed per convergence iteration.  MSA will
+            sub-sample and scale up when demand exceeds this.  FW always
+            requires full-pass; raises ``NotImplementedError`` if the trip
+            list exceeds *max_od*.
         """
         started = time.monotonic()
         adapter = stream if isinstance(stream, TripStreamAdapter) else TripStreamAdapter(stream)
@@ -572,35 +586,30 @@ class TrafficAssignmentSolver:
             )
 
         loop = self._make_loop()
-        sampled_mode = sample_rate > 0.0 and max_rounds > 0
+        converge = max_rounds > 0
         n_records = len(all_trips)
         total_demand = sum(t.volume for t in all_trips)
 
-        # FW requires full-pass routing in convergence — fail fast if
-        # the network is too large for that.
-        _FW_TRIP_LIMIT = 100_000
-        if method == "fw" and sampled_mode and n_records > _FW_TRIP_LIMIT:
+        # FW requires full-pass routing — fail fast if network too large.
+        if method == "fw" and converge and n_records > max_od:
             raise NotImplementedError(
                 f"Frank-Wolfe requires full-pass routing but network has "
-                f"{n_records:,} trip-records (limit {_FW_TRIP_LIMIT:,}). "
+                f"{n_records:,} trip-records (max_od={max_od:,}). "
                 f"Use method='msa' for large-scale sampled assignment."
             )
 
-        # Unique ODs: count from first time-slice to avoid iterating all records
-        load_steps = max(1, round(1.0 / sample_rate)) if sample_rate > 0 else 1
-        unique_ods = n_records // load_steps if load_steps > 1 else n_records
-        if sampled_mode:
+        if converge:
             logger.info(
-                "Started: %d trip-records (~%d unique ODs, %.0f total demand), "
-                "method=%s, sample_rate=%.2f, rounds=%d, n_threads=%d",
-                n_records, unique_ods, total_demand,
-                method, sample_rate, max_rounds, loop.config.n_threads,
+                "Started: %d trip-records (%.0f total demand), "
+                "method=%s, max_od=%d, rounds=%d, n_threads=%d",
+                n_records, total_demand,
+                method, max_od, max_rounds, loop.config.n_threads,
             )
         else:
             logger.info(
-                "Started: %d trip-records (~%d unique ODs, %.0f total demand), "
+                "Started: %d trip-records (%.0f total demand), "
                 "greedy-only, n_threads=%d",
-                n_records, unique_ods, total_demand, loop.config.n_threads,
+                n_records, total_demand, loop.config.n_threads,
             )
         engine = loop._create_engine()
 
@@ -720,7 +729,7 @@ class TrafficAssignmentSolver:
                 progress_callback(batch_result)
 
         msa_results: List[MSAIterationResult] = []
-        if sampled_mode:
+        if converge:
             engine, msa_results = self._run_convergence(
                 engine=engine,
                 loop=loop,
@@ -729,7 +738,7 @@ class TrafficAssignmentSolver:
                 initial_volume=accumulated_volume,
                 state_patch=state_patch,
                 progress_callback=progress_callback,
-                sample_rate=sample_rate,
+                max_od=max_od,
                 max_rounds=max_rounds,
                 gap_threshold=gap_threshold,
                 method=method,

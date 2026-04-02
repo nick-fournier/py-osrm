@@ -221,7 +221,7 @@ class TestSiouxFalls:
             run_dir=tmp_path / "hc_run",
             demand_scale=0.30,
             state_patch_factory=lambda m: lambda s: patch_sioux_falls_lanes(s, m),
-            sample_rate=0.10,
+            load_rate=0.10,
             max_rounds=10,
         )
         state = case.result.network_state
@@ -257,7 +257,7 @@ def generate_sioux_falls_report(
         detail_scale=0.30,
         bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_sioux_falls_lanes(state, meta),
-        sample_rate=0.10,
+        load_rate=0.10,
         max_rounds=max_rounds,
         method=method,
         intro_html=(

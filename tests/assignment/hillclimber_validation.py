@@ -151,20 +151,19 @@ def slice_trips_by_departure(
     return sliced
 
 
-def _sampled_load_steps(sample_rate: float) -> int:
-    """Derive greedy load-step count from sample_rate.
+def _load_steps_from_rate(load_rate: float) -> int:
+    """Derive greedy load-step count from load_rate.
 
-    Sampled refinement treats the greedy initializer as repeated equal-volume
-    load steps, where each step size matches the refinement sample share.
-    That means sample_rate must be the reciprocal of an integer step count:
+    ``load_rate`` is the fraction of demand per greedy slice and must be
+    the reciprocal of an integer step count:
     100% -> 1 step, 50% -> 2, 25% -> 4, 10% -> 10, etc.
     """
-    if not (0.0 < sample_rate <= 1.0):
-        raise ValueError("sample_rate must be in (0, 1]")
-    load_steps = max(1, int(round(1.0 / sample_rate)))
-    if not math.isclose(sample_rate * load_steps, 1.0, rel_tol=1e-9, abs_tol=1e-9):
+    if not (0.0 < load_rate <= 1.0):
+        raise ValueError("load_rate must be in (0, 1]")
+    load_steps = max(1, int(round(1.0 / load_rate)))
+    if not math.isclose(load_rate * load_steps, 1.0, rel_tol=1e-9, abs_tol=1e-9):
         raise ValueError(
-            "sampled mode requires sample_rate to be the reciprocal of an integer "
+            "load_rate must be the reciprocal of an integer "
             "load-step count (for example 1.0, 0.5, 0.25, 0.2, 0.1, 0.05)"
         )
     return load_steps
@@ -181,7 +180,8 @@ def run_hillclimber_case(
     bin_width_s: float = 3600.0,
     max_batch_size: int | None = None,
     state_patch_factory: Callable[[dict], Callable] | None = None,
-    sample_rate: float,
+    load_rate: float = 0.10,
+    max_od: int = 100_000,
     max_rounds: int = 0,
     gap_threshold: float = 0.01,
     assumed_speed_kmh: float | None = None,
@@ -189,9 +189,9 @@ def run_hillclimber_case(
 ):
     """Run one shared assignment validation case from scenario metadata."""
     logger = logging.getLogger(__name__)
-    if sample_rate <= 0.0:
-        raise ValueError("sample_rate must be positive")
-    load_steps = _sampled_load_steps(sample_rate)
+    if load_rate <= 0.0:
+        raise ValueError("load_rate must be positive")
+    load_steps = _load_steps_from_rate(load_rate)
 
     logger.info("Building trips (demand_scale=%.2f)...", demand_scale)
     t0 = time.monotonic()
@@ -250,7 +250,7 @@ def run_hillclimber_case(
         sliced_trips,
         max_batch_size=max_batch_size,
         state_patch=state_patch,
-        sample_rate=sample_rate,
+        max_od=max_od,
         max_rounds=max_rounds,
         gap_threshold=gap_threshold,
         method=method,
@@ -574,7 +574,8 @@ def generate_hillclimber_validation_report(
     max_batch_size: int | None = None,
     state_patch_factory: Callable[[dict], Callable] | None = None,
     intro_html: str = "",
-    sample_rate: float,
+    load_rate: float = 0.10,
+    max_od: int = 100_000,
     max_rounds: int = 0,
     gap_threshold: float = 0.01,
     assumed_speed_kmh: float | None = None,
@@ -595,7 +596,8 @@ def generate_hillclimber_validation_report(
         bin_width_s=bin_width_s,
         max_batch_size=max_batch_size,
         state_patch_factory=state_patch_factory,
-        sample_rate=sample_rate,
+        load_rate=load_rate,
+        max_od=max_od,
         max_rounds=max_rounds,
         gap_threshold=gap_threshold,
         assumed_speed_kmh=assumed_speed_kmh,
@@ -644,18 +646,19 @@ def generate_hillclimber_validation_report(
         speed_desc = ", ".join(str(s) for s in speed_set)
     else:
         speed_desc = f"{speed_set[0]}&ndash;{speed_set[-1]} ({len(speed_set)} unique)"
-    sampled_mode = max_rounds > 0
+    converge = max_rounds > 0
     refinement_intro = ""
-    if sampled_mode:
+    if converge:
         refinement_intro = (
-            f" Greedy loading uses {case.load_steps} load step(s) derived from the "
-            f"{sample_rate:.0%} sample rate. Sampled path-set rebalancing then runs "
-            f"for up to {max_rounds} round(s)."
+            f" Greedy loading uses {case.load_steps} load step(s) "
+            f"(load_rate={load_rate:.0%}). "
+            f"{method.upper()} convergence then runs "
+            f"for up to {max_rounds} round(s) (max_od={max_od:,})."
         )
     else:
         refinement_intro = (
-            f" Greedy loading uses {case.load_steps} load step(s) derived from the "
-            f"{sample_rate:.0%} sample rate."
+            f" Greedy loading uses {case.load_steps} load step(s) "
+            f"(load_rate={load_rate:.0%})."
         )
 
     load_distribution = (

@@ -51,7 +51,7 @@ def _run_network(
     state_patch_factory,
     tmp_path: Path,
     max_rounds: int,
-    sample_rate: float = 0.10,
+    load_rate: float = 0.10,
 ) -> _NetworkComparison:
     """Run both MSA and FW on a single network."""
     base, meta = prepare_fn(tmp_path)
@@ -63,7 +63,7 @@ def _run_network(
         demand_scale=1.0,
         bin_width_s=3600.0,
         state_patch_factory=state_patch_factory,
-        sample_rate=sample_rate,
+        load_rate=load_rate,
         max_rounds=max_rounds,
         gap_threshold=0.001,
     )
@@ -146,7 +146,7 @@ def _add_convergence_comparison(
     # ── TSTT ──
     fig_tstt = go.Figure()
 
-    # Greedy phase (shared — same for both since same demand/sample_rate)
+    # Greedy phase (shared — same for both since same demand/load_rate)
     greedy_labels = [f"Load {i+1}" for i in range(len(msa_batches))]
     greedy_tstt = [b.network_tstt for b in msa_batches]
     n_greedy = len(greedy_labels)
