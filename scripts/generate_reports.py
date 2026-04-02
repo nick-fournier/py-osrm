@@ -3,10 +3,10 @@
 
 Usage::
 
-    uv run python scripts/generate_reports.py                          # all default scenes (hc)
-    uv run python scripts/generate_reports.py chi-sketch               # HC (default method)
-    uv run python scripts/generate_reports.py chi-sketch --method matrix
-    uv run python scripts/generate_reports.py chi-region --method matrix
+    uv run python scripts/generate_reports.py                          # all default scenes (msa)
+    uv run python scripts/generate_reports.py chi-sketch               # MSA (default method)
+    uv run python scripts/generate_reports.py chi-sketch --method fw
+    uv run python scripts/generate_reports.py chi-region --method fw
     uv run python scripts/generate_reports.py vdf braess               # multiple scenes
     uv run python scripts/generate_reports.py --method all             # all methods for defaults
 
@@ -14,11 +14,11 @@ Scenes:
     vdf, braess, sioux, anaheim, chi-sketch, chi-region
 
 Methods:
-    hc       Hill-climber (default)
-    matrix   Matrix-based Frank-Wolfe
-    all      Both hc and matrix
+    msa      MSA convergence (default)
+    fw       Frank-Wolfe convergence
+    all      Both msa and fw
 
-Reports are written to docs/plots/.
+Reports are written to plots/.
 """
 
 from __future__ import annotations
@@ -48,61 +48,61 @@ def _scene_braess():
     from tests.assignment.test_braess import generate_braess_report
     return generate_braess_report(tempfile.mkdtemp())
 
-def _scene_sioux_hc():
-    from tests.assignment.test_sioux_falls import generate_sioux_falls_hillclimber_report
-    return generate_sioux_falls_hillclimber_report(tempfile.mkdtemp())
-
-def _scene_sioux_matrix():
+def _scene_sioux_msa():
     from tests.assignment.test_sioux_falls import generate_sioux_falls_report
-    return generate_sioux_falls_report(tempfile.mkdtemp())
+    return generate_sioux_falls_report(tempfile.mkdtemp(), method="msa")
 
-def _scene_anaheim_hc():
-    from tests.assignment.test_anaheim import generate_anaheim_hillclimber_report
-    return generate_anaheim_hillclimber_report(tempfile.mkdtemp())
+def _scene_sioux_fw():
+    from tests.assignment.test_sioux_falls import generate_sioux_falls_report
+    return generate_sioux_falls_report(tempfile.mkdtemp(), method="fw")
 
-def _scene_anaheim_matrix():
+def _scene_anaheim_msa():
     from tests.assignment.test_anaheim import generate_anaheim_report
-    return generate_anaheim_report(tempfile.mkdtemp())
+    return generate_anaheim_report(tempfile.mkdtemp(), method="msa")
 
-def _scene_chi_sketch_hc():
-    from tests.assignment.test_chicago_sketch import generate_chicago_hillclimber_report
-    return generate_chicago_hillclimber_report(tempfile.mkdtemp())
+def _scene_anaheim_fw():
+    from tests.assignment.test_anaheim import generate_anaheim_report
+    return generate_anaheim_report(tempfile.mkdtemp(), method="fw")
 
-def _scene_chi_sketch_matrix():
+def _scene_chi_sketch_msa():
     from tests.assignment.test_chicago_sketch import generate_chicago_report
-    return generate_chicago_report(tempfile.mkdtemp())
+    return generate_chicago_report(tempfile.mkdtemp(), method="msa")
 
-def _scene_chi_region_hc():
-    from tests.assignment.test_chicago_regional import generate_regional_hillclimber_report
-    return generate_regional_hillclimber_report(tempfile.mkdtemp())
+def _scene_chi_sketch_fw():
+    from tests.assignment.test_chicago_sketch import generate_chicago_report
+    return generate_chicago_report(tempfile.mkdtemp(), method="fw")
 
-def _scene_chi_region_matrix():
+def _scene_chi_region_msa():
     from tests.assignment.test_chicago_regional import generate_regional_report
-    return generate_regional_report(tempfile.mkdtemp())
+    return generate_regional_report(tempfile.mkdtemp(), method="msa")
+
+def _scene_chi_region_fw():
+    from tests.assignment.test_chicago_regional import generate_regional_report
+    return generate_regional_report(tempfile.mkdtemp(), method="fw")
 
 
 SCENES = {
     "vdf": {
-        "hc": ("VDF Theory", _scene_vdf),
+        "msa": ("VDF Theory", _scene_vdf),
     },
     "braess": {
-        "hc": ("Braess Paradox Validation", _scene_braess),
+        "msa": ("Braess Paradox Validation", _scene_braess),
     },
     "sioux": {
-        "hc":     ("Sioux Falls Hill-Climber", _scene_sioux_hc),
-        "matrix": ("Sioux Falls Matrix FW", _scene_sioux_matrix),
+        "msa": ("Sioux Falls MSA", _scene_sioux_msa),
+        "fw":  ("Sioux Falls FW", _scene_sioux_fw),
     },
     "anaheim": {
-        "hc":     ("Anaheim Hill-Climber", _scene_anaheim_hc),
-        "matrix": ("Anaheim Matrix FW", _scene_anaheim_matrix),
+        "msa": ("Anaheim MSA", _scene_anaheim_msa),
+        "fw":  ("Anaheim FW", _scene_anaheim_fw),
     },
     "chi-sketch": {
-        "hc":     ("Chicago Sketch Hill-Climber", _scene_chi_sketch_hc),
-        "matrix": ("Chicago Sketch Matrix FW", _scene_chi_sketch_matrix),
+        "msa": ("Chicago Sketch MSA", _scene_chi_sketch_msa),
+        "fw":  ("Chicago Sketch FW", _scene_chi_sketch_fw),
     },
     "chi-region": {
-        "hc":     ("Chicago Regional Hill-Climber", _scene_chi_region_hc),
-        "matrix": ("Chicago Regional Matrix FW", _scene_chi_region_matrix),
+        "msa": ("Chicago Regional MSA", _scene_chi_region_msa),
+        "fw":  ("Chicago Regional FW", _scene_chi_region_fw),
     },
 }
 
@@ -119,8 +119,8 @@ def main() -> None:
              f"Available: {', '.join(SCENES)}",
     )
     parser.add_argument(
-        "--method", default="hc", choices=["hc", "matrix", "all"],
-        help="Assignment method (default: hc)",
+        "--method", default="msa", choices=["msa", "fw", "all"],
+        help="Assignment method (default: msa)",
     )
     args = parser.parse_args()
 
@@ -130,7 +130,7 @@ def main() -> None:
                 f"Unknown scene: {scene!r}. Choose from: {', '.join(SCENES)}"
             )
 
-    methods = ["hc", "matrix"] if args.method == "all" else [args.method]
+    methods = ["msa", "fw"] if args.method == "all" else [args.method]
 
     logging.basicConfig(
         level=logging.INFO,

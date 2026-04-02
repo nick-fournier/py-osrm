@@ -234,42 +234,38 @@ class TestSiouxFalls:
 
 def generate_sioux_falls_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/sioux_falls_matrix_validation.html",
+    output_path: str = "plots/sioux_falls_validation.html",
     max_iter: int = 50,
+    method: str = "msa",
 ) -> Path:
-    """Generate Sioux Falls validation report using the generic reporter.
+    """Generate Sioux Falls validation report.
 
-    Call directly::
-
-        from tests.assignment.test_sioux_falls import generate_sioux_falls_report
-        generate_sioux_falls_report("/tmp/work")
+    Parameters
+    ----------
+    method : str
+        ``"msa"`` (default) uses greedy loading + MSA convergence.
+        ``"fw"`` uses Frank-Wolfe via AssignmentLoop.
     """
-    from osrm.assignment.plots import generate_validation_report
+    if method == "fw":
+        from osrm.assignment.plots import generate_validation_report
 
-    return generate_validation_report(
-        network_name="Sioux Falls",
-        prepare_fn=_prepare_sf_network,
-        run_fn=_run_sf_assignment,
-        copy_fn=_copy_clean_osrm,
-        tmp_path=Path(tmp_path),
-        output_path=output_path,
-        max_iter=max_iter,
-        detail_scale=0.15,
-        intro_html=(
-            "<p>Road classification from real Sioux Falls geography: "
-            "I-29 (3 lanes, 105 km/h), I-229 (2 lanes, 105 km/h), "
-            "arterials (2 lanes, 65 km/h). "
-            "TNTP &lsquo;capacity&rsquo; values are BPR math artifacts, "
-            "<b>not</b> physical road capacity.</p>"
-        ),
-    )
-
-
-def generate_sioux_falls_hillclimber_report(
-    tmp_path: str | Path,
-    output_path: str = "docs/plots/sioux_falls_hillclimber_validation.html",
-) -> Path:
-    """Generate Sioux Falls hill-climber validation report."""
+        return generate_validation_report(
+            network_name="Sioux Falls",
+            prepare_fn=_prepare_sf_network,
+            run_fn=_run_sf_assignment,
+            copy_fn=_copy_clean_osrm,
+            tmp_path=Path(tmp_path),
+            output_path=output_path,
+            max_iter=max_iter,
+            detail_scale=0.15,
+            intro_html=(
+                "<p>Road classification from real Sioux Falls geography: "
+                "I-29 (3 lanes, 105 km/h), I-229 (2 lanes, 105 km/h), "
+                "arterials (2 lanes, 65 km/h). "
+                "TNTP &lsquo;capacity&rsquo; values are BPR math artifacts, "
+                "<b>not</b> physical road capacity.</p>"
+            ),
+        )
     return generate_hillclimber_validation_report(
         network_name="Sioux Falls",
         prepare_fn=_prepare_sf_network,
@@ -283,8 +279,16 @@ def generate_sioux_falls_hillclimber_report(
         sample_rate=0.10,
         max_rounds=10,
         intro_html=(
-            "<p>Hill-climber validation intentionally runs at <b>30% Sioux Falls demand</b> "
-            "with 10 greedy load steps and sampled path-set refinement, rather than "
-            "the lighter 15% matrix-validation setting.</p>"
+            "<p>MSA validation runs at <b>30% Sioux Falls demand</b> "
+            "with 10 greedy load steps and MSA convergence.</p>"
         ),
     )
+
+
+# Backward-compat aliases
+def generate_sioux_falls_hillclimber_report(
+    tmp_path: str | Path,
+    output_path: str = "plots/sioux_falls_validation.html",
+) -> Path:
+    """Backward-compatible wrapper — delegates to unified report."""
+    return generate_sioux_falls_report(tmp_path, output_path=output_path, method="msa")

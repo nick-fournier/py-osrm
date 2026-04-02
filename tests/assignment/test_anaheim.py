@@ -294,37 +294,33 @@ class TestAnaheim:
 
 def generate_anaheim_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/anaheim_matrix_validation.html",
+    output_path: str = "plots/anaheim_validation.html",
     max_iter: int = 50,
+    method: str = "msa",
 ) -> Path:
-    """Generate Anaheim validation report using the generic reporter.
+    """Generate Anaheim validation report.
 
-    Call directly::
-
-        from tests.assignment.test_anaheim import generate_anaheim_report
-        generate_anaheim_report("/tmp/work")
+    Parameters
+    ----------
+    method : str
+        ``"msa"`` (default) uses greedy loading + MSA convergence.
+        ``"fw"`` uses Frank-Wolfe via AssignmentLoop.
     """
-    from osrm.assignment.plots import generate_validation_report
+    if method == "fw":
+        from osrm.assignment.plots import generate_validation_report
 
-    return generate_validation_report(
-        network_name="Anaheim",
-        prepare_fn=_prepare_anaheim_network,
-        run_fn=_run_anaheim_assignment,
-        copy_fn=_copy_clean_osrm,
-        tmp_path=Path(tmp_path),
-        output_path=output_path,
-        max_iter=max_iter,
-        detail_scale=1.00,
-        sweep_scales=[0.30, 0.50, 0.75, 1.00],
-        vc_scales=[0.10, 0.20, 0.30, 0.50],
-    )
-
-
-def generate_anaheim_hillclimber_report(
-    tmp_path: str | Path,
-    output_path: str = "docs/plots/anaheim_hillclimber_validation.html",
-) -> Path:
-    """Generate Anaheim hill-climber validation report."""
+        return generate_validation_report(
+            network_name="Anaheim",
+            prepare_fn=_prepare_anaheim_network,
+            run_fn=_run_anaheim_assignment,
+            copy_fn=_copy_clean_osrm,
+            tmp_path=Path(tmp_path),
+            output_path=output_path,
+            max_iter=max_iter,
+            detail_scale=1.00,
+            sweep_scales=[0.30, 0.50, 0.75, 1.00],
+            vc_scales=[0.10, 0.20, 0.30, 0.50],
+        )
     return generate_hillclimber_validation_report(
         network_name="Anaheim",
         prepare_fn=_prepare_anaheim_network,
@@ -338,7 +334,16 @@ def generate_anaheim_hillclimber_report(
         sample_rate=0.10,
         max_rounds=10,
         intro_html=(
-            "<p>Hill-climber validation uses <b>100% Anaheim demand</b>, matching the "
-            "matrix validation target rather than a reduced detail slice.</p>"
+            "<p>MSA validation uses <b>100% Anaheim demand</b> with "
+            "10 greedy load steps and MSA convergence.</p>"
         ),
     )
+
+
+# Backward-compat alias
+def generate_anaheim_hillclimber_report(
+    tmp_path: str | Path,
+    output_path: str = "plots/anaheim_validation.html",
+) -> Path:
+    """Backward-compatible wrapper — delegates to unified report."""
+    return generate_anaheim_report(tmp_path, output_path=output_path, method="msa")

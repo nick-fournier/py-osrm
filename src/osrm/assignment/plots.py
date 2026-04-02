@@ -328,7 +328,7 @@ def vdf_multi_class(
     return _save_or_show(fig, path)
 
 
-def vdf_theory(output_dir: str = "docs/plots") -> Path:
+def vdf_theory(output_dir: str = "plots") -> Path:
     """Generate a single combined VDF theory validation report.
 
     Uses the same parameters as the assignment loop defaults so the
@@ -568,7 +568,7 @@ def convergence_report(
     iteration_log: dict,
     network_state=None,
     vdf: BiParabolicVDF | None = None,
-    path: str = "docs/plots/assignment_report.html",
+    path: str = "plots/assignment_report.html",
 ) -> Path:
     """Generate a combined convergence + network diagnostics report.
 
@@ -822,7 +822,7 @@ def observed_vs_mfd(
 def network_diagnostics(
     network_state,
     vdf: BiParabolicVDF | None = None,
-    output_dir: str = "docs/plots",
+    output_dir: str = "plots",
 ) -> list[Path]:
     """Generate all network state diagnostic plots.
 
@@ -973,7 +973,7 @@ def generate_validation_report(
     copy_fn,
     tmp_path: Path,
     *,
-    output_path: str = "docs/plots/validation.html",
+    output_path: str = "plots/validation.html",
     max_iter: int = 50,
     detail_scale: float = 0.15,
     sweep_scales: Sequence[float] | None = None,

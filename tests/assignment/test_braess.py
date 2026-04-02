@@ -533,7 +533,7 @@ def _braess_route_tt_table(scenarios: list[tuple]) -> str:
 
 def generate_braess_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/braess_validation.html",
+    output_path: str = "plots/braess_validation.html",
     demand: float = 2500.0,
     max_iter: int = 100,
 ) -> Path:
@@ -1157,7 +1157,7 @@ def generate_braess_report(
 
 def generate_braess_hillclimber_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/braess_validation.html",
+    output_path: str = "plots/braess_validation.html",
     demand: float = 2500.0,
 ) -> Path:
     """Backward-compatible wrapper — delegates to unified report."""

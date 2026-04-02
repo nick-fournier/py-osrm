@@ -1,8 +1,7 @@
-"""Shared hill-climber validation helpers.
+"""Shared traffic assignment validation helpers.
 
-These helpers intentionally reuse the same network prep, metadata, and plotting
-primitives as the matrix validation path so the two validation surfaces do not
-drift apart.
+These helpers provide network prep, metadata, and plotting primitives for
+MSA-based validation reports.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ _DEFAULT_ASSUMED_SPEED_KMH = 30.0
 
 @dataclass
 class HillClimberValidationCase:
-    """Materialized hill-climber validation run."""
+    """Materialized assignment validation run."""
 
     base_path: str
     meta: dict
@@ -187,7 +186,7 @@ def run_hillclimber_case(
     gap_threshold: float = 0.01,
     assumed_speed_kmh: float | None = None,
 ):
-    """Run one shared hill-climber validation case from scenario metadata."""
+    """Run one shared assignment validation case from scenario metadata."""
     logger = logging.getLogger(__name__)
     if sample_rate <= 0.0:
         raise ValueError("sample_rate must be positive")
@@ -336,7 +335,7 @@ def _add_batch_sections(
     *,
     detail_scale: float,
 ) -> None:
-    """Add hill-climber load-step evolution plots."""
+    """Add load-step evolution plots."""
     result = case.result
     greedy_labels = [_load_step_label(b.batch_index) for b in result.batch_results]
     greedy_tstt = [b.network_tstt for b in result.batch_results]
@@ -569,7 +568,7 @@ def generate_hillclimber_validation_report(
     gap_threshold: float = 0.01,
     assumed_speed_kmh: float | None = None,
 ) -> Path:
-    """Generate a shared hill-climber validation report for one scenario."""
+    """Generate a shared assignment validation report for one scenario."""
     tmp_path = Path(tmp_path)
     tmp_path.mkdir(parents=True, exist_ok=True)
 
@@ -592,7 +591,7 @@ def generate_hillclimber_validation_report(
 
     state = case.result.network_state
     if state is None:
-        raise RuntimeError(f"{network_name} hill-climber produced no network state")
+        raise RuntimeError(f"{network_name} assignment produced no network state")
 
     node_coords = meta["nodes"]
     link_attrs = meta["link_attrs"]
@@ -653,7 +652,7 @@ def generate_hillclimber_validation_report(
     )
 
     intro = (
-        f"<p>Validation of the <b>matrix-free hill-climber MVP</b> on "
+        f"<p>Validation of the <b>greedy + MSA assignment</b> on "
         f"<b>{network_name}</b>. Final loaded demand: {case.total_demand:,.0f} vph "
         f"({detail_scale:.0%} of the scenario demand basis), {load_distribution}"
         f"Lanes: {min(lane_counts)}&ndash;{max(lane_counts)}. "
@@ -664,7 +663,7 @@ def generate_hillclimber_validation_report(
         intro += intro_html
 
     _write_combined_report(
-        title=f"{network_name} Hill-Climber Validation",
+        title=f"{network_name} Validation",
         intro=intro,
         figures=figs,
         descriptions=descriptions,
@@ -679,10 +678,10 @@ def build_hillclimber_report_sections(
     case: HillClimberValidationCase,
     detail_scale: float,
 ) -> tuple[list[go.Figure | None], list[str]]:
-    """Build the shared report sections used by hill-climber validations."""
+    """Build the shared report sections used by assignment validations."""
     state = case.result.network_state
     if state is None:
-        raise RuntimeError(f"{network_name} hill-climber produced no network state")
+        raise RuntimeError(f"{network_name} assignment produced no network state")
 
     meta = case.meta
     node_coords = meta["nodes"]

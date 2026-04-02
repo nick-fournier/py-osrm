@@ -8,7 +8,7 @@ __pycache__
 /tests/data/monaco.osrm*
 
 # generated plots
-docs/plots/*.html
+plots/*.html
 
 # compiled extensions
 *.so

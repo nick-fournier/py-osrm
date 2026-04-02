@@ -183,38 +183,34 @@ def _run_regional_assignment(
 
 def generate_regional_report(
     tmp_path: str | Path,
-    output_path: str = "docs/plots/chicago_regional_matrix_validation.html",
+    output_path: str = "plots/chicago_regional_validation.html",
     max_iter: int = 50,
+    method: str = "msa",
 ) -> Path:
-    """Generate Chicago Regional matrix validation report.
+    """Generate Chicago Regional validation report.
 
-    Call directly::
-
-        from tests.assignment.test_chicago_regional import generate_regional_report
-        generate_regional_report("/tmp/work")
+    Parameters
+    ----------
+    method : str
+        ``"msa"`` (default) uses greedy loading + MSA convergence.
+        ``"fw"`` uses Frank-Wolfe via AssignmentLoop.
     """
-    from osrm.assignment.plots import generate_validation_report
+    if method == "fw":
+        from osrm.assignment.plots import generate_validation_report
 
-    return generate_validation_report(
-        network_name="Chicago Regional",
-        prepare_fn=_prepare_regional_network,
-        run_fn=_run_regional_assignment,
-        copy_fn=_copy_clean_osrm,
-        tmp_path=Path(tmp_path),
-        output_path=output_path,
-        max_iter=max_iter,
-        detail_scale=1.00,
-        sweep_scales=[1.00],
-        vc_scales=[],
-        methods=["fw"],
-    )
-
-
-def generate_regional_hillclimber_report(
-    tmp_path: str | Path,
-    output_path: str = "docs/plots/chicago_regional_hillclimber_validation.html",
-) -> Path:
-    """Generate Chicago Regional hill-climber validation report."""
+        return generate_validation_report(
+            network_name="Chicago Regional",
+            prepare_fn=_prepare_regional_network,
+            run_fn=_run_regional_assignment,
+            copy_fn=_copy_clean_osrm,
+            tmp_path=Path(tmp_path),
+            output_path=output_path,
+            max_iter=max_iter,
+            detail_scale=1.00,
+            sweep_scales=[1.00],
+            vc_scales=[],
+            methods=["fw"],
+        )
     return generate_hillclimber_validation_report(
         network_name="Chicago Regional",
         prepare_fn=_prepare_regional_network,
@@ -228,12 +224,21 @@ def generate_regional_hillclimber_report(
         sample_rate=0.10,
         max_rounds=10,
         intro_html=(
-            "<p>Chicago Regional hill-climber validation at "
+            "<p>Chicago Regional MSA validation at "
             "<b>100% demand</b> (1,360,428 vph across 1,790 zones, "
             "39,018 links). Primary scaling benchmark — 13× larger than "
             "Chicago Sketch.</p>"
         ),
     )
+
+
+# Backward-compat alias
+def generate_regional_hillclimber_report(
+    tmp_path: str | Path,
+    output_path: str = "plots/chicago_regional_validation.html",
+) -> Path:
+    """Backward-compatible wrapper — delegates to unified report."""
+    return generate_regional_report(tmp_path, output_path=output_path, method="msa")
 
 
 # ── pytest entry points ──────────────────────────────────────────────
