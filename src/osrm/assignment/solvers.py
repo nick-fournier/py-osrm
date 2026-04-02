@@ -43,9 +43,8 @@ _REFINEMENT_TARGET_REL_EXCESS = 0.25
 _REFINEMENT_STABLE_ROUNDS = 2
 _REFINEMENT_MIN_ROUTE_FRACTION = 1e-9
 _REFINEMENT_DISCOVERY_REL_TOL = 0.05
-_REFINEMENT_ACCEPT_TOL = 1e-6
-_REFINEMENT_BACKTRACK_SHRINK = 0.5
-_REFINEMENT_MAX_BACKTRACK_STEPS = 6
+_DEFAULT_MAX_REFINEMENT_SAMPLE = 20_000
+_DEFAULT_MAX_REFINEMENT_UPDATES = 2_000
 
 @dataclass
 class RouteAssignment:
@@ -217,13 +216,14 @@ class HillClimberBatchResult:
 
 @dataclass
 class RefinementRoundResult:
-    """Metrics for one sampled path-set refinement round."""
+    """Metrics for one sampled path-set refinement round (legacy v3)."""
 
     round_index: int
     sampled_pairs: int
     accepted_updates: int
     sampled_gap: Optional[float]
-    network_tstt: float
+    sampled_excess: float
+    network_tstt: Optional[float]
     worst_score: float
     route_time_s: float
     customize_time_s: float
@@ -231,6 +231,25 @@ class RefinementRoundResult:
     round_time_s: float
     max_k_over_kj: float
     mean_speed_kmh: float
+
+
+@dataclass
+class MSAIterationResult:
+    """Metrics for one MSA convergence iteration."""
+
+    iteration: int
+    alpha: float
+    aon_tstt: float
+    link_tstt: float
+    relative_gap: Optional[float]
+    state_change_norm: float
+    max_k_over_kj: float
+    mean_speed_kmh: float
+    route_time_s: float
+    customize_time_s: float
+    engine_time_s: float
+    iteration_time_s: float
+    n_routes: int
 
 
 @dataclass
@@ -243,6 +262,7 @@ class HillClimberResult:
     n_trips: int
     od_ledger: Optional[ODLedger] = None
     refinement_results: List[RefinementRoundResult] = field(default_factory=list)
+    msa_results: List[MSAIterationResult] = field(default_factory=list)
 
     @property
     def n_batches(self) -> int:
@@ -345,11 +365,15 @@ class MatrixFreeHillClimber:
         od_ledger: ODLedger,
         sample_rate: float,
         focus_indices: Sequence[int],
+        *,
+        max_sample_size: Optional[int] = None,
     ) -> List[int]:
         n_total = len(od_ledger)
         if n_total == 0:
             return []
         sample_size = min(n_total, max(1, int(np.ceil(sample_rate * n_total))))
+        if max_sample_size is not None:
+            sample_size = min(sample_size, max_sample_size)
         selected: set[int] = set()
 
         focus_pool = [idx for idx in focus_indices if 0 <= idx < n_total]
@@ -359,10 +383,9 @@ class MatrixFreeHillClimber:
                 selected.update(random.sample(focus_pool, n_focus))
 
         if len(selected) < sample_size:
-            remaining = [idx for idx in range(n_total) if idx not in selected]
-            need = min(sample_size - len(selected), len(remaining))
-            if need > 0:
-                selected.update(random.sample(remaining, need))
+            need = sample_size - len(selected)
+            while len(selected) < sample_size:
+                selected.add(random.randrange(n_total))
         return sorted(selected)
 
     def _sampled_table_costs(
@@ -489,18 +512,27 @@ class MatrixFreeHillClimber:
         entries: Sequence[ODLedgerEntry],
         shortest_costs: Sequence[Optional[float]],
         state: NetworkState,
-    ) -> Tuple[Optional[float], float, float, List[Tuple[float, float, int]]]:
+    ) -> Tuple[
+        Optional[float],
+        float,
+        float,
+        List[Tuple[float, float, int]],
+        List[List[float]],
+    ]:
         numerator = 0.0
         denominator = 0.0
         scored_entries: List[Tuple[float, float, int]] = []
+        route_costs_by_local: List[List[float]] = []
 
         for local_idx, (entry, shortest_cost) in enumerate(
             zip(entries, shortest_costs),
         ):
+            route_costs = self._entry_route_costs(entry, state)
+            route_costs_by_local.append(route_costs)
             if shortest_cost is None or shortest_cost <= 0.0:
                 entry.current_gap = None
                 continue
-            used_cost = self._current_entry_cost(entry, state)
+            used_cost = self._entry_weighted_cost_from_costs(entry, route_costs)
             excess = max(0.0, used_cost - shortest_cost)
             relative_excess = excess / shortest_cost
             entry.current_gap = relative_excess
@@ -512,7 +544,7 @@ class MatrixFreeHillClimber:
                 )
 
         sampled_gap = (numerator / denominator) if denominator > 0.0 else None
-        return sampled_gap, numerator, denominator, scored_entries
+        return sampled_gap, numerator, denominator, scored_entries, route_costs_by_local
 
     def _apply_entry_to_state(
         self,
@@ -648,6 +680,8 @@ class MatrixFreeHillClimber:
         state: NetworkState,
         shortest_cost: float,
         discovered_path: Optional[RoutedTripPath],
+        *,
+        route_costs: Optional[Sequence[float]] = None,
     ) -> Tuple[ODLedgerEntry, bool]:
         """Propose a bounded share swap for one OD using known paths first.
 
@@ -659,7 +693,8 @@ class MatrixFreeHillClimber:
             Whether a newly routed path was actually introduced.
         """
         proposal = deepcopy(entry)
-        route_costs = self._entry_route_costs(proposal, state)
+        if route_costs is None:
+            route_costs = self._entry_route_costs(proposal, state)
         if not route_costs:
             return proposal, False
 
@@ -746,6 +781,148 @@ class MatrixFreeHillClimber:
                 ]
         return proposal, target_is_new
 
+    def _run_msa_refinement(
+        self,
+        *,
+        engine,
+        loop: AssignmentLoop,
+        state: NetworkState,
+        trips: list,
+        state_patch,
+        progress_callback,
+        sample_rate: float,
+        max_rounds: int,
+        gap_threshold: float,
+    ) -> Tuple[object, List[MSAIterationResult]]:
+        """Run MSA iterations on link-level density state.
+
+        After greedy warm start, iteratively:
+          1. Freeze current density
+          2. Route demand on frozen network (all-or-nothing)
+          3. Blend: k = (1-α)k + αk̂  with α = 1/(m+1)
+          4. Clip, update VDF, customize, reload
+        """
+        msa_results: List[MSAIterationResult] = []
+        full_pass = sample_rate >= 1.0 or len(trips) <= 1
+
+        for m in range(1, max_rounds + 1):
+            iter_start = time.monotonic()
+
+            # 1. Freeze current state
+            prev_density = state.density_vpkm.copy()
+
+            # 2. Build auxiliary loading (AON on frozen network)
+            if full_pass:
+                route_trips = trips
+            else:
+                n_sample = max(1, int(len(trips) * sample_rate))
+                route_trips = random.sample(trips, n_sample)
+
+            t_route = time.monotonic()
+            aon_density, _aon_volume, aon_tstt, _routed_paths = (
+                loop._route_and_accumulate_with_paths(engine, route_trips, state)
+            )
+            route_time = time.monotonic() - t_route
+
+            # Pad AON arrays to match state size (new edges may have appeared)
+            if len(aon_density) < state.n_edges:
+                pad = state.n_edges - len(aon_density)
+                aon_density = np.append(aon_density, np.zeros(pad))
+            if len(prev_density) < state.n_edges:
+                pad = state.n_edges - len(prev_density)
+                prev_density = np.append(prev_density, np.zeros(pad))
+
+            # Scale up sampled density to full-demand estimate
+            if not full_pass:
+                aon_density = aon_density / sample_rate
+                aon_tstt = aon_tstt / sample_rate
+
+            # 3. MSA blend: α = 1/(m+1), so m=1 → α=0.5
+            alpha = 1.0 / (m + 1)
+            state.density_vpkm = np.clip(
+                (1.0 - alpha) * prev_density + alpha * aon_density,
+                0.0,
+                state.jam_density,
+            )
+
+            # 4. Update derived quantities
+            if state_patch:
+                state_patch(state)
+            loop.smoother.build_adjacency(state.edge_ids, state.length_m)
+            loop._update_state(state)
+
+            # Customize and reload
+            engine, customize_time, engine_time = self._customize_and_reload(
+                loop, state, engine,
+            )
+
+            # --- Metrics ---
+            state_change_norm = float(
+                np.linalg.norm(state.density_vpkm - prev_density)
+                / max(np.linalg.norm(prev_density), 1e-9)
+            )
+
+            # Link-level TSTT: Σ flow_vph × (length_m / speed_m/s)
+            speed_ms = np.maximum(state.speed_kmh / 3.6, 0.001)
+            link_tt_s = state.length_m / speed_ms
+            link_tstt = float(np.sum(state.flow_vph * link_tt_s))
+
+            # Relative gap: (link_tstt - aon_tstt) / link_tstt
+            relative_gap: Optional[float] = None
+            if link_tstt > 0:
+                relative_gap = (link_tstt - aon_tstt) / link_tstt
+
+            max_k_over_kj = float(
+                np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
+            )
+            mean_speed = float(np.median(state.speed_kmh))
+            iter_time = time.monotonic() - iter_start
+
+            iter_result = MSAIterationResult(
+                iteration=m,
+                alpha=alpha,
+                aon_tstt=float(aon_tstt),
+                link_tstt=link_tstt,
+                relative_gap=relative_gap,
+                state_change_norm=state_change_norm,
+                max_k_over_kj=max_k_over_kj,
+                mean_speed_kmh=mean_speed,
+                route_time_s=route_time,
+                customize_time_s=customize_time,
+                engine_time_s=engine_time,
+                iteration_time_s=iter_time,
+                n_routes=len(route_trips),
+            )
+            msa_results.append(iter_result)
+
+            if progress_callback:
+                progress_callback(iter_result)
+
+            logger.info(
+                "MSA iter %d: \u03b1=%.3f \u0394k=%.4f gap=%s TSTT=%.0f "
+                u"v\u0305=%.1f km/h k/kj=%.2f (%.1fs)",
+                m, alpha, state_change_norm,
+                f"{relative_gap:.4f}" if relative_gap is not None else "n/a",
+                link_tstt, mean_speed, max_k_over_kj, iter_time,
+            )
+
+            # Convergence checks
+            if relative_gap is not None and 0 <= relative_gap < gap_threshold:
+                logger.info(
+                    "MSA converged at iteration %d: gap=%.6f < %.6f",
+                    m, relative_gap, gap_threshold,
+                )
+                break
+
+            if state_change_norm < 1e-6:
+                logger.info(
+                    "MSA converged at iteration %d: state change norm=%.2e",
+                    m, state_change_norm,
+                )
+                break
+
+        return engine, msa_results
+
     def _run_sampled_refinement(
         self,
         *,
@@ -758,6 +935,8 @@ class MatrixFreeHillClimber:
         sample_rate: float,
         max_rounds: int,
         gap_threshold: float,
+        max_sample_size: int = _DEFAULT_MAX_REFINEMENT_SAMPLE,
+        max_updates_per_round: int = _DEFAULT_MAX_REFINEMENT_UPDATES,
     ) -> Tuple[object, List[RefinementRoundResult]]:
         """Run sampled path-set refinement rounds on top of the greedy pass."""
         refinement_results: List[RefinementRoundResult] = []
@@ -768,11 +947,14 @@ class MatrixFreeHillClimber:
             round_start = time.monotonic()
             round_base_density = state.density_vpkm.copy()
             sample_indices = self._sample_od_indices(
-                od_ledger, sample_rate, focus_indices,
+                od_ledger,
+                sample_rate,
+                focus_indices,
+                max_sample_size=max_sample_size,
             )
             sampled_entries = [od_ledger[idx] for idx in sample_indices]
             shortest_costs = self._sampled_table_costs(engine, sampled_entries)
-            sampled_gap, sampled_excess, _, scored_entries = self._evaluate_sample(
+            sampled_gap, sampled_excess, _, scored_entries, route_costs_by_local = self._evaluate_sample(
                 sampled_entries, shortest_costs, state,
             )
             if not scored_entries:
@@ -784,12 +966,13 @@ class MatrixFreeHillClimber:
 
             scored_entries.sort(reverse=True)
             refinement_count = max(1, int(np.ceil(len(scored_entries) * _REFINEMENT_TOP_SHARE)))
+            refinement_count = min(refinement_count, max_updates_per_round)
             selected_meta = scored_entries[:refinement_count]
             selected_globals = [
                 sample_indices[local_idx] for _, _, local_idx in selected_meta
             ]
             proposals: dict[int, ODLedgerEntry] = {}
-            discovery_batch: List[Tuple[int, ODLedgerEntry, float]] = []
+            discovery_batch: List[Tuple[int, ODLedgerEntry, float, int]] = []
             route_time = 0.0
             customize_time = 0.0
             engine_time = 0.0
@@ -800,23 +983,23 @@ class MatrixFreeHillClimber:
                 shortest_cost = shortest_costs[local_idx]
                 if shortest_cost is None or shortest_cost <= 0.0:
                     continue
-                route_costs = self._entry_route_costs(entry, state)
+                route_costs = route_costs_by_local[local_idx]
                 if not route_costs:
                     continue
                 best_known_cost = min(route_costs)
                 if self._discovery_needed(best_known_cost, shortest_cost):
-                    discovery_batch.append((global_idx, entry, shortest_cost))
+                    discovery_batch.append((global_idx, entry, shortest_cost, local_idx))
                     continue
 
                 proposal, _ = self._propose_path_swap(
-                    entry, state, shortest_cost, None,
+                    entry, state, shortest_cost, None, route_costs=route_costs,
                 )
                 if self._entry_changed(entry, proposal):
                     proposal.refinement_visits = entry.refinement_visits + 1
                     proposals[global_idx] = proposal
 
             if discovery_batch:
-                for _, entry, _ in discovery_batch:
+                for _, entry, _, _ in discovery_batch:
                     self._apply_entry_to_state(state, entry, -1.0)
                 self._refresh_state(loop, state, state_patch)
                 engine, dt_cust, dt_engine = self._customize_and_reload(
@@ -832,7 +1015,7 @@ class MatrixFreeHillClimber:
                         volume=entry.total_volume,
                         departure_time_s=entry.departure_time_s,
                     )
-                    for _, entry, _ in discovery_batch
+                    for _, entry, _, _ in discovery_batch
                 ]
                 t_route = time.monotonic()
                 _, _, _, routed_paths = loop._route_and_accumulate_with_paths(
@@ -841,7 +1024,7 @@ class MatrixFreeHillClimber:
                 route_time += time.monotonic() - t_route
                 path_by_trip = {path.trip_index: path for path in routed_paths}
 
-                for discovery_idx, (global_idx, entry, shortest_cost) in enumerate(
+                for discovery_idx, (global_idx, entry, shortest_cost, local_idx) in enumerate(
                     discovery_batch,
                 ):
                     proposal, _ = self._propose_path_swap(
@@ -849,6 +1032,7 @@ class MatrixFreeHillClimber:
                         state,
                         shortest_cost,
                         path_by_trip.get(discovery_idx),
+                        route_costs=route_costs_by_local[local_idx],
                     )
                     if self._entry_changed(entry, proposal):
                         proposal.refinement_visits = entry.refinement_visits + 1
@@ -873,13 +1057,13 @@ class MatrixFreeHillClimber:
                     np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
                 )
                 mean_speed = float(np.median(state.speed_kmh))
-                network_tstt = self._network_tstt_from_od_ledger(od_ledger, state)
                 round_result = RefinementRoundResult(
                     round_index=round_idx + 1,
                     sampled_pairs=len(sample_indices),
                     accepted_updates=0,
                     sampled_gap=sampled_gap,
-                    network_tstt=network_tstt,
+                    sampled_excess=float(sampled_excess),
+                    network_tstt=None,
                     worst_score=float(selected_meta[0][0]) if selected_meta else 0.0,
                     route_time_s=route_time,
                     customize_time_s=customize_time,
@@ -897,70 +1081,41 @@ class MatrixFreeHillClimber:
                 )
                 break
 
-            improved = False
-            accepted_updates = 0
-            accepted_proposals: dict[int, ODLedgerEntry] = {}
-            step_scale = 1.0
-
-            for _ in range(_REFINEMENT_MAX_BACKTRACK_STEPS):
-                candidate_proposals = {
-                    global_idx: self._scaled_entry_proposal(
-                        od_ledger[global_idx], proposal, step_scale,
-                    )
-                    for global_idx, proposal in proposals.items()
-                }
-
-                if len(round_base_density) < state.n_edges:
-                    round_base_density = np.append(
-                        round_base_density,
-                        np.zeros(state.n_edges - len(round_base_density)),
-                    )
-                state.density_vpkm = round_base_density.copy()
-                self._refresh_state(loop, state, state_patch)
-
-                for global_idx in selected_globals:
-                    candidate = candidate_proposals.get(global_idx)
-                    if candidate is None:
-                        continue
-                    self._apply_entry_to_state(state, od_ledger[global_idx], -1.0)
-                    self._apply_entry_to_state(state, candidate, 1.0)
-
-                self._refresh_state(loop, state, state_patch)
-                engine, dt_cust, dt_engine = self._customize_and_reload(
-                    loop, state, engine,
-                )
-                customize_time += dt_cust
-                engine_time += dt_engine
-
-                evaluation_entries = [
-                    candidate_proposals.get(global_idx, od_ledger[global_idx])
-                    for global_idx in sample_indices
-                ]
-                post_shortest_costs = self._sampled_table_costs(engine, evaluation_entries)
-                post_gap, post_excess, _, _ = self._evaluate_sample(
-                    evaluation_entries, post_shortest_costs, state,
-                )
-
-                improved = post_excess < sampled_excess * (1.0 - _REFINEMENT_ACCEPT_TOL)
-                if improved:
-                    accepted_updates = len(candidate_proposals)
-                    accepted_proposals = candidate_proposals
-                    sampled_gap = post_gap
-                    break
-
-                step_scale *= _REFINEMENT_BACKTRACK_SHRINK
-
             focus_limit = max(len(proposals) * 2, int(len(sample_indices) * _REFINEMENT_FOCUS_SHARE))
             focus_indices = [
                 sample_indices[local_idx]
                 for _, _, local_idx in scored_entries[:focus_limit]
             ]
 
-            if improved:
-                for global_idx, proposal in accepted_proposals.items():
-                    self._copy_entry_from(od_ledger[global_idx], proposal)
-            else:
-                accepted_updates = 0
+            if len(round_base_density) < state.n_edges:
+                round_base_density = np.append(
+                    round_base_density,
+                    np.zeros(state.n_edges - len(round_base_density)),
+                )
+            state.density_vpkm = round_base_density.copy()
+            self._refresh_state(loop, state, state_patch)
+
+            for global_idx in selected_globals:
+                candidate = proposals.get(global_idx)
+                if candidate is None:
+                    continue
+                self._apply_entry_to_state(state, od_ledger[global_idx], -1.0)
+                self._apply_entry_to_state(state, candidate, 1.0)
+
+            self._refresh_state(loop, state, state_patch)
+            engine, dt_cust, dt_engine = self._customize_and_reload(
+                loop, state, engine,
+            )
+            customize_time += dt_cust
+            engine_time += dt_engine
+
+            if (
+                not np.all(np.isfinite(state.density_vpkm))
+                or not np.all(np.isfinite(state.speed_kmh))
+                or not np.all(np.isfinite(state.flow_vph))
+                or np.any(state.density_vpkm < -1e-9)
+                or np.any(state.flow_vph < -1e-9)
+            ):
                 if len(round_base_density) < state.n_edges:
                     round_base_density = np.append(
                         round_base_density,
@@ -973,8 +1128,11 @@ class MatrixFreeHillClimber:
                 )
                 customize_time += dt_cust
                 engine_time += dt_engine
-
-            network_tstt = self._network_tstt_from_od_ledger(od_ledger, state)
+                accepted_updates = 0
+            else:
+                accepted_updates = len(proposals)
+                for global_idx, proposal in proposals.items():
+                    self._copy_entry_from(od_ledger[global_idx], proposal)
 
             if sampled_gap is not None and sampled_gap < gap_threshold:
                 stable_rounds += 1
@@ -991,7 +1149,8 @@ class MatrixFreeHillClimber:
                 sampled_pairs=len(sample_indices),
                 accepted_updates=accepted_updates,
                 sampled_gap=sampled_gap,
-                network_tstt=network_tstt,
+                sampled_excess=float(sampled_excess),
+                network_tstt=None,
                 worst_score=worst_score,
                 route_time_s=route_time,
                 customize_time_s=customize_time,
@@ -1005,37 +1164,21 @@ class MatrixFreeHillClimber:
             gap_str = (
                 f"{sampled_gap:.6f}" if sampled_gap is not None else "n/a"
             )
-            if improved:
-                logger.info(
-                    u"R%d: sample=%d updated=%d gap=%s TSTT=%.0f v\u0305=%.1f km/h k/kj=%.2f (max %.2f) %.1fs",
-                    round_result.round_index,
-                    round_result.sampled_pairs,
-                    round_result.accepted_updates,
-                    gap_str,
-                    round_result.network_tstt,
-                    round_result.mean_speed_kmh,
-                    float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9))),
-                    round_result.max_k_over_kj,
-                    round_result.round_time_s,
-                )
-            else:
-                logger.info(
-                    u"R%d rejected: sample=%d gap=%s TSTT=%.0f v\u0305=%.1f km/h k/kj=%.2f (max %.2f) %.1fs",
-                    round_result.round_index,
-                    round_result.sampled_pairs,
-                    gap_str,
-                    round_result.network_tstt,
-                    round_result.mean_speed_kmh,
-                    float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9))),
-                    round_result.max_k_over_kj,
-                    round_result.round_time_s,
-                )
+            logger.info(
+                u"R%d: sample=%d updated=%d gap=%s excess=%.0f v\u0305=%.1f km/h k/kj=%.2f (max %.2f) %.1fs",
+                round_result.round_index,
+                round_result.sampled_pairs,
+                round_result.accepted_updates,
+                gap_str,
+                round_result.sampled_excess,
+                round_result.mean_speed_kmh,
+                float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9))),
+                round_result.max_k_over_kj,
+                round_result.round_time_s,
+            )
 
             if progress_callback:
                 progress_callback(round_result)
-
-            if not improved:
-                break
 
             if sampled_gap is not None and stable_rounds >= _REFINEMENT_STABLE_ROUNDS:
                 break
@@ -1091,6 +1234,8 @@ class MatrixFreeHillClimber:
         sample_rate: float = 0.0,
         max_rounds: int = 0,
         gap_threshold: float = 0.01,
+        max_refinement_sample: int = _DEFAULT_MAX_REFINEMENT_SAMPLE,
+        max_refinement_updates: int = _DEFAULT_MAX_REFINEMENT_UPDATES,
     ) -> HillClimberResult:
         """Run a stateful wrapper-side hill-climber over ordered trip batches.
 
@@ -1103,16 +1248,15 @@ class MatrixFreeHillClimber:
         3. Recomputes VDF speeds
         4. Re-customizes OSRM and reloads the engine
 
-        After the greedy load, sampled path-set refinement optionally runs when
-        ``sample_rate > 0`` and ``max_rounds > 0``. Each refinement round:
+        After the greedy load, MSA convergence iterations optionally run when
+        ``sample_rate > 0`` and ``max_rounds > 0``. Each MSA iteration:
 
-        1. Samples a subset of the OD ledger
-        2. Uses Table to diagnose current shortest-path costs
-        3. Rebalances among known paths and discovers new paths only when needed
-        4. Re-customizes and reloads once per accepted round
+        1. Freezes the current link-density state
+        2. Routes all demand (or a weighted subsample) on the frozen network
+        3. Blends auxiliary density with current state: k = (1-α)k + αk̂
+        4. Re-customizes and reloads the engine
 
-        This is the intended MVP for matrix-free loading before the OSRM
-        multi-period patch is available.
+        The MSA step α = 1/(m+1) guarantees convergence toward user equilibrium.
         """
         started = time.monotonic()
         adapter = stream if isinstance(stream, TripStreamAdapter) else TripStreamAdapter(stream)
@@ -1255,12 +1399,13 @@ class MatrixFreeHillClimber:
                 progress_callback(batch_result)
 
         refinement_results: List[RefinementRoundResult] = []
+        msa_results: List[MSAIterationResult] = []
         if sampled_mode:
-            engine, refinement_results = self._run_sampled_refinement(
+            engine, msa_results = self._run_msa_refinement(
                 engine=engine,
                 loop=loop,
                 state=state,
-                od_ledger=od_ledger,
+                trips=snapped_trips,
                 state_patch=state_patch,
                 progress_callback=progress_callback,
                 sample_rate=sample_rate,
@@ -1269,10 +1414,10 @@ class MatrixFreeHillClimber:
             )
 
         total_time = time.monotonic() - started
-        if refinement_results:
+        if msa_results:
             logger.info(
-                "HC complete: %d load steps, %d refinement rounds, %.1fs",
-                len(batch_results), len(refinement_results), total_time,
+                "HC complete: %d load steps, %d MSA iterations, %.1fs",
+                len(batch_results), len(msa_results), total_time,
             )
         else:
             logger.info(
@@ -1287,6 +1432,7 @@ class MatrixFreeHillClimber:
             n_trips=len(snapped_trips),
             od_ledger=od_ledger,
             refinement_results=refinement_results,
+            msa_results=msa_results,
         )
 
     def _network_tstt_from_od_ledger(

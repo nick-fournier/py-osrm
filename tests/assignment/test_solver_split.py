@@ -192,7 +192,7 @@ def test_matrix_free_solver_runs_statefully_across_slices(monkeypatch):
     assert np.isclose(result.od_ledger[0].assigned_cost_s, 100.0)
 
 
-def test_matrix_free_solver_runs_sampled_heal(monkeypatch):
+def test_matrix_free_solver_runs_msa(monkeypatch):
     solver = MatrixFreeHillClimber("network.osrm", AssignmentConfig(bin_width_s=3600))
     stream = TripStreamAdapter([
         _trip(0.0, volume=1.0),
@@ -215,13 +215,10 @@ def test_matrix_free_solver_runs_sampled_heal(monkeypatch):
     )
 
     route_calls = []
-    table_calls = []
     customize_calls = []
 
     class FakeEngine:
-        def Table(self, **kwargs):
-            table_calls.append(kwargs)
-            return {"durations": [[1.0, 80.0], [80.0, 40.0]]}
+        pass
 
     class FakeLoop:
         def __init__(self):
@@ -241,44 +238,20 @@ def test_matrix_free_solver_runs_sampled_heal(monkeypatch):
             if state_obj.n_edges == 0:
                 state_obj.register_edge(1, 2, 100.0, 60.0, 150.0, 1)
                 state_obj.register_edge(2, 3, 100.0, 60.0, 150.0, 1)
-            if len(route_calls) == 1:
-                return (
-                    np.array([2.0, 1.0]),
-                    np.array([20.0, 10.0]),
-                    180.0,
-                    [
-                        types.SimpleNamespace(
-                            trip_index=0,
-                            edge_indices=[0],
-                            density_contribution=[1.0],
-                            duration_s=50.0,
-                        ),
-                        types.SimpleNamespace(
-                            trip_index=1,
-                            edge_indices=[0],
-                            density_contribution=[1.0],
-                            duration_s=50.0,
-                        ),
-                        types.SimpleNamespace(
-                            trip_index=2,
-                            edge_indices=[1],
-                            density_contribution=[1.0],
-                            duration_s=70.0,
-                        ),
-                    ],
+            paths = [
+                types.SimpleNamespace(
+                    trip_index=i,
+                    edge_indices=[0],
+                    density_contribution=[1.0],
+                    duration_s=50.0,
                 )
+                for i in range(len(trips))
+            ]
             return (
-                np.array([0.0, 1.0]),
-                np.array([0.0, 10.0]),
-                40.0,
-                [
-                    types.SimpleNamespace(
-                        trip_index=0,
-                        edge_indices=[1],
-                        density_contribution=[1.0],
-                        duration_s=35.0,
-                    ),
-                ],
+                np.array([2.0, 1.0]),
+                np.array([20.0, 10.0]),
+                180.0,
+                paths,
             )
 
         def _update_state(self, state_obj):
@@ -298,14 +271,17 @@ def test_matrix_free_solver_runs_sampled_heal(monkeypatch):
         gap_threshold=0.0001,
     )
 
-    assert len(result.refinement_results) >= 1
-    assert route_calls[:2] == [3, 1]
-    assert len(table_calls) >= 1
+    # Greedy routes 3 trips, then MSA routes all 3 trips each iteration
+    assert route_calls[0] == 3
+    assert all(n == 3 for n in route_calls[1:])
+    # 1 greedy customize + at least 1 MSA customize
     assert len(customize_calls) >= 2
-    assert result.refinement_results[0].accepted_updates == 0
+    # MSA results should be populated
+    assert len(result.msa_results) >= 1
+    assert result.msa_results[0].alpha == 0.5  # first MSA step: 1/(1+1)
+    assert result.msa_results[0].state_change_norm >= 0.0
     assert result.od_ledger is not None
     assert len(result.od_ledger) == 2
-    assert len(result.od_ledger[0].routes) <= 2
 
 
 def test_propose_path_swap_rebalances_known_paths_without_discovery():

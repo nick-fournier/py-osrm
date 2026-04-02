@@ -17,6 +17,7 @@ from osrm.assignment.assignment_loop import (
 from osrm.assignment.solvers import (
     HillClimberBatchResult,
     HillClimberResult,
+    MSAIterationResult,
     MatrixAssignmentSolver,
     MatrixFreeHillClimber,
     ODLedger,
@@ -42,6 +43,7 @@ __all__ = [
     "StopReason",
     "HillClimberBatchResult",
     "HillClimberResult",
+    "MSAIterationResult",
     "MatrixAssignmentSolver",
     "MatrixFreeHillClimber",
     "ODLedger",

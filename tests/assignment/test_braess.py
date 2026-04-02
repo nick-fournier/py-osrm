@@ -367,21 +367,22 @@ class TestBraessParadox:
         gap_w = hillclimber_final_gap(result_w)
         gap_wo = hillclimber_final_gap(result_wo)
         assert gap_w is not None and gap_w < 0.01, (
-            f"Sampled-refinement shortcut gap too large: {gap_w}"
+            f"MSA shortcut gap too large: {gap_w}"
         )
         assert gap_wo is not None and gap_wo < 0.01, (
-            f"Sampled-refinement no-shortcut gap too large: {gap_wo}"
+            f"MSA no-shortcut gap too large: {gap_wo}"
         )
 
-        if result_w.refinement_results:
+        if result_w.msa_results:
             gaps_w = [
-                round_result.sampled_gap
-                for round_result in result_w.refinement_results
-                if round_result.sampled_gap is not None
+                r.relative_gap
+                for r in result_w.msa_results
+                if r.relative_gap is not None
             ]
-            assert gaps_w == sorted(gaps_w, reverse=True), (
-                f"Expected sampled-refinement gap to decrease monotonically, got {gaps_w}"
-            )
+            if len(gaps_w) >= 2:
+                assert min(gaps_w) < gaps_w[0], (
+                    f"Expected MSA to find at least one lower-gap state, got {gaps_w}"
+                )
 
 
 
@@ -634,7 +635,7 @@ def generate_braess_report(
     fw_tstt_wo = result_fw_without.iteration_log[-1].tstt
     fw_pct = (fw_tstt_w / fw_tstt_wo - 1) * 100 if fw_tstt_wo else 0.0
 
-    n_rounds_w = len(case_with.result.refinement_results)
+    n_rounds_w = len(case_with.result.msa_results)
     rr_gap_w = hillclimber_final_gap(case_with.result)
     rr_gap_wo = hillclimber_final_gap(case_without.result)
     rr_gap_w_str = f"{rr_gap_w:.6f}" if rr_gap_w is not None else "n/a"
@@ -1040,10 +1041,10 @@ def generate_braess_report(
         if rr_pct > 0 else
         f"The Braess paradox does not emerge ({rr_pct:+.1f}%)."
     )
-    rounds_w = case_with.result.refinement_results
-    rounds_wo = case_without.result.refinement_results
+    rounds_w = case_with.result.msa_results
+    rounds_wo = case_without.result.msa_results
     hc_descriptions[3] += (
-        f"<p><b>Sampled refinement:</b> {n_rounds_w} round(s) with shortcut, "
+        f"<p><b>MSA convergence:</b> {n_rounds_w} iteration(s) with shortcut, "
         f"{len(rounds_wo)} without. "
         f"Final gap: with&nbsp;=&nbsp;{rr_gap_w_str}, without&nbsp;=&nbsp;{rr_gap_wo_str}. "
         f"{rr_paradox_text}</p>"
