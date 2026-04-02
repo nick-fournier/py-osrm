@@ -217,6 +217,69 @@ def vdf_speed_flow(
     return _save_or_show(fig, path)
 
 
+def vdf_flow_traveltime(
+    v_f: float = 60.0,
+    k_j: float = 150.0,
+    link_length_km: float = 1.0,
+    vdf: BiParabolicVDF | None = None,
+    path: Optional[str] = None,
+) -> go.Figure:
+    """Plot the flow–travel-time relationship (backward-bending).
+
+    Travel time t = L / v(k) for a link of length *link_length_km*.
+    This is the cost function that assignment directly optimizes:
+    on the uncongested branch, travel time increases with flow;
+    at breakdown, both flow drops and travel time spikes.
+    """
+    vdf = vdf or BiParabolicVDF()
+    k_c = vdf.kc_ratio * k_j
+    q_c = v_f * k_c / 2.0
+
+    k = np.linspace(0.001, k_j, 500)
+    v_f_arr = np.full_like(k, v_f)
+    k_j_arr = np.full_like(k, k_j)
+    v = vdf.density_to_speed(k, v_f_arr, k_j_arr)
+    q = vdf.density_to_flow(k, v_f_arr, k_j_arr)
+    tt = link_length_km / (v / 60.0)  # minutes
+
+    t_ff = link_length_km / (v_f / 60.0)
+    t_c = link_length_km / (v_f / 2.0 / 60.0)
+
+    mask_unc = k <= k_c
+    mask_con = k > k_c
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=q[mask_unc], y=tt[mask_unc],
+        mode="lines", name="Uncongested",
+        line=dict(color="#2196F3", width=3),
+    ))
+    fig.add_trace(go.Scatter(
+        x=q[mask_con], y=tt[mask_con],
+        mode="lines", name="Congested",
+        line=dict(color="#F44336", width=3),
+    ))
+    fig.add_trace(go.Scatter(
+        x=[q_c], y=[t_c],
+        mode="markers+text", name=f"Capacity (q_c={q_c:.0f})",
+        marker=dict(size=12, color="#FF9800", symbol="diamond"),
+        text=[f"t_c={t_c:.2f} min"],
+        textposition="top left",
+    ))
+    fig.add_hline(y=t_ff, line_dash="dot", line_color="gray",
+                  annotation_text=f"t_ff={t_ff:.2f} min",
+                  annotation_position="bottom right")
+
+    fig.update_layout(
+        title=f"Flow–Travel Time (L={link_length_km} km, v_f={v_f}, k_j={k_j})",
+        xaxis_title="Flow q (veh/hr)",
+        yaxis_title="Travel time (min)",
+        template="plotly_white",
+        legend=dict(x=0.05, y=0.95),
+    )
+    return _save_or_show(fig, path)
+
+
 def _vdf_near_jam_detail(
     v_f: float = 60.0,
     k_j: float = 150.0,
@@ -470,6 +533,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         vdf_speed_density(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_flow_density(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_speed_flow(v_f=v_f, k_j=k_j, vdf=vdf),
+        vdf_flow_traveltime(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_inverse_mfd(v_f=v_f, k_j=k_j, vdf=vdf),
         _vdf_near_jam_detail(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_inverse_accuracy(v_f=v_f, k_j=k_j, vdf=vdf),
@@ -505,7 +569,20 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         This is the relationship most directly observed by highway sensors and
         loop detectors.</p>""",
 
-        f"""<h2>4. Inverse MFD: Flow → Density</h2>
+        f"""<h2>4. Flow–Travel Time (Cost Function)</h2>
+        <p>Travel time $t = L / v$ for a 1 km link, plotted against flow. This is
+        the link cost function that assignment directly optimizes. On the
+        <b>uncongested branch</b> (blue), travel time rises monotonically from
+        the freeflow time as flow increases toward capacity — the classical
+        "congestion penalty." At capacity breakdown, the curve bends backward:
+        on the <b>congested branch</b> (red), flow drops while travel time continues
+        to spike. Near jam density, travel time diverges.
+        This backward bend is why BPR-style $t(V)$ cost functions are monotonic
+        approximations — they avoid the multi-valued regime. Our density-based
+        VDF handles both branches natively via $t = L / v(k)$, where $k$ is
+        always single-valued.</p>""",
+
+        f"""<h2>5. Inverse MFD: Flow → Density</h2>
         <p>The closed-form inversion of the MFD. Given flow $q$, density on each branch is:</p>
         <p><b>Free-flow:</b> &emsp; $k(q) = k_c \\left(1 - \\sqrt{{1 - \\dfrac{{2q}}{{v_f k_c}}}}\\right)$</p>
         <p><b>Congested:</b> &emsp; $k(q) = k_c + (k_j - k_c)\\sqrt{{1 - \\dfrac{{2q}}{{v_f k_c}}}}$</p>
@@ -516,7 +593,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         and the inversion has no real solution, which is why convergence blending
         operates in volume space with a constant-factor density derivation.</p>""",
 
-        f"""<h2>5. Near-Jam Behaviour (k → k<sub>j</sub>)</h2>
+        f"""<h2>6. Near-Jam Behaviour (k → k<sub>j</sub>)</h2>
         <p>This panel zooms into the congested branch near jam density to show the steep
         speed gradient that impacts convergence. At k/k<sub>j</sub> = 0.90, speed is just
         {vdf.density_to_speed(np.array([0.9*k_j]), np.array([v_f]), np.array([k_j]))[0]:.1f} km/h.
@@ -530,7 +607,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         represent virtual queue / spillback — physically impossible density but
         mathematically stable.</p>""",
 
-        """<h2>6. Inverse Round-Trip Accuracy</h2>
+        """<h2>7. Inverse Round-Trip Accuracy</h2>
         <p>A key advantage of this VDF over BPR: the flow-to-density inversion has a
         <b>closed-form solution</b> via the quadratic formula — no Newton solver needed.
         Left panel: q<sub>in</sub> vs q<sub>out</sub> after q → k(q) → q(k) round-trip
@@ -538,7 +615,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         be near machine epsilon (~10<sup>-10</sup>). This confirms the vectorized NumPy
         implementation is numerically exact.</p>""",
 
-        """<h2>7. Speed–Density by Road Class</h2>
+        """<h2>8. Speed–Density by Road Class</h2>
         <p>The bi-parabolic model is "parameter-light" — only v<sub>f</sub> (free-flow speed)
         and k<sub>j</sub> (jam density) are needed per link. k<sub>c</sub> = k<sub>j</sub>/3 is derived,
         not calibrated. This overlay shows how different road classes produce different
