@@ -1185,7 +1185,9 @@ class MatrixFreeHillClimber:
                 state_patch(state)
             loop.smoother.build_adjacency(state.edge_ids, state.length_m)
 
+            t_ledger = time.monotonic()
             self._append_od_entries(od_ledger, batch.trips, routed_paths)
+            ledger_time = time.monotonic() - t_ledger
             running_network_tstt += float(batch_tstt)
 
             state.density_vpkm = np.clip(
@@ -1211,6 +1213,7 @@ class MatrixFreeHillClimber:
             engine_time = time.monotonic() - t_engine
 
             max_k_over_kj = float(np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9)))
+            median_k_over_kj = float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9)))
             mean_speed = float(np.mean(state.speed_kmh))
             batch_result = HillClimberBatchResult(
                 batch_index=batch.batch_index,
@@ -1231,7 +1234,8 @@ class MatrixFreeHillClimber:
                 if route_time > 1e-9 else float("inf")
             )
             logger.info(
-                "Load %d/%d: %s routes in %.1fs (%s routes/s) speed=%.1f km/h k/kj=%.2f",
+                "Load %d/%d: %s routes in %.1fs (%s routes/s) "
+                "speed=%.1f km/h k/kj=%.2f (med %.2f) ledger=%.1fs",
                 batch.batch_index + 1,
                 planned_load_steps,
                 f"{len(batch.trips):,}",
@@ -1239,6 +1243,8 @@ class MatrixFreeHillClimber:
                 f"{route_rate:,.0f}",
                 mean_speed,
                 max_k_over_kj,
+                median_k_over_kj,
+                ledger_time,
             )
 
             if progress_callback:
