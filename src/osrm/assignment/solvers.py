@@ -1,14 +1,9 @@
-"""High-level assignment solver front doors.
+"""Unified traffic assignment solver.
 
-These classes separate the two long-term assignment modes:
-
-- ``MatrixAssignmentSolver``: OD-matrix / zone-based assignment.
-- ``MatrixFreeHillClimber``: matrix-free trip-stream loading with
-  wrapper-side batching and network updates.
-
-Both intentionally reuse the shared assignment core (`AssignmentLoop`,
-`NetworkState`, `BiParabolicVDF`, CSV customization, reporting helpers)
-instead of duplicating logic.
+``TrafficAssignmentSolver`` handles both OD-matrix and matrix-free
+trip-stream assignment.  It reuses the shared assignment core
+(``AssignmentLoop``, ``NetworkState``, ``BiParabolicVDF``, CSV
+customization, reporting helpers).
 """
 
 from __future__ import annotations
@@ -16,7 +11,6 @@ from __future__ import annotations
 import logging
 import random
 import time
-from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -34,17 +28,6 @@ from osrm.assignment.od_matrix import DemandTrip, ODMatrixAdapter
 from osrm.assignment.trip_stream import TripBatch, TripStreamAdapter
 
 logger = logging.getLogger(__name__)
-
-_REFINEMENT_FOCUS_SHARE = 0.30
-_REFINEMENT_TOP_SHARE = 0.25
-_REFINEMENT_ALPHA_MIN = 0.10
-_REFINEMENT_ALPHA_MAX = 0.80
-_REFINEMENT_TARGET_REL_EXCESS = 0.25
-_REFINEMENT_STABLE_ROUNDS = 2
-_REFINEMENT_MIN_ROUTE_FRACTION = 1e-9
-_REFINEMENT_DISCOVERY_REL_TOL = 0.05
-_DEFAULT_MAX_REFINEMENT_SAMPLE = 20_000
-_DEFAULT_MAX_REFINEMENT_UPDATES = 2_000
 
 @dataclass
 class RouteAssignment:
@@ -132,6 +115,7 @@ class ODLedger:
         if new_total <= 0.0:
             return
 
+        existing.total_volume = new_total
         scale = old_total / new_total if old_total > 0 else 0.0
         for route in existing.routes:
             route.volume_fraction *= scale
@@ -140,10 +124,6 @@ class ODLedger:
         for route in entry.routes:
             route.volume_fraction *= added_scale
             existing.routes.append(route)
-
-        existing.total_volume = new_total
-        existing.departure_time_s = min(existing.departure_time_s, entry.departure_time_s)
-        existing.compress_routes()
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -154,83 +134,6 @@ class ODLedger:
     def __getitem__(self, idx):
         return self.entries[idx]
 
-    @property
-    def total_volume(self) -> float:
-        return float(sum(entry.total_volume for entry in self.entries))
-
-
-class MatrixAssignmentSolver:
-    """Matrix-based assignment front door.
-
-    This is the canonical wrapper for OD-matrix workflows today. It is a thin
-    façade over :class:`AssignmentLoop`, but gives the architecture an explicit
-    home for future shortest-path-tree / bush / Table-accelerated logic without
-    polluting the matrix-free API.
-    """
-
-    def __init__(self, base_path: str, config: Optional[AssignmentConfig] = None) -> None:
-        self.base_path = base_path
-        self.config = config or AssignmentConfig()
-
-    def _make_loop(self) -> AssignmentLoop:
-        return AssignmentLoop(self.base_path, self.config)
-
-    def solve(
-        self,
-        demand: ODMatrixAdapter | Sequence[DemandTrip],
-        *,
-        state_patch=None,
-        progress_callback=None,
-    ) -> AssignmentResult:
-        """Solve a matrix-style assignment problem.
-
-        Parameters
-        ----------
-        demand : ODMatrixAdapter or sequence of DemandTrip
-            Either an adapter that can materialize trips from an OD matrix, or
-            a pre-built trip list.
-        """
-        trips = demand.trips() if hasattr(demand, "trips") else list(demand)
-        return self._make_loop().run(
-            trips,
-            state_patch=state_patch,
-            progress_callback=progress_callback,
-        )
-
-
-@dataclass
-class HillClimberBatchResult:
-    """Metrics for one matrix-free loading batch."""
-
-    batch_index: int
-    departure_bin: Optional[int]
-    n_trips: int
-    batch_tstt: float
-    network_tstt: float
-    route_time_s: float
-    customize_time_s: float
-    engine_time_s: float
-    max_k_over_kj: float
-    mean_speed_kmh: float
-
-
-@dataclass
-class RefinementRoundResult:
-    """Metrics for one sampled path-set refinement round (legacy v3)."""
-
-    round_index: int
-    sampled_pairs: int
-    accepted_updates: int
-    sampled_gap: Optional[float]
-    sampled_excess: float
-    network_tstt: Optional[float]
-    worst_score: float
-    route_time_s: float
-    customize_time_s: float
-    engine_time_s: float
-    round_time_s: float
-    max_k_over_kj: float
-    mean_speed_kmh: float
 
 
 @dataclass
@@ -253,15 +156,30 @@ class MSAIterationResult:
 
 
 @dataclass
+class HillClimberBatchResult:
+    """Metrics for one loading batch."""
+
+    batch_index: int
+    departure_bin: Optional[int]
+    n_trips: int
+    batch_tstt: float
+    network_tstt: float
+    route_time_s: float
+    customize_time_s: float
+    engine_time_s: float
+    max_k_over_kj: float
+    mean_speed_kmh: float
+
+
+@dataclass
 class HillClimberResult:
-    """Final result of the wrapper-side hill-climber MVP."""
+    """Final result of the assignment solver."""
 
     network_state: Optional[NetworkState]
     batch_results: List[HillClimberBatchResult]
     total_time_s: float
     n_trips: int
     od_ledger: Optional[ODLedger] = None
-    refinement_results: List[RefinementRoundResult] = field(default_factory=list)
     msa_results: List[MSAIterationResult] = field(default_factory=list)
 
     @property
@@ -283,18 +201,16 @@ class HillClimberResult:
         }
 
 
-class MatrixFreeHillClimber:
-    """Matrix-free loading MVP over the shared assignment core.
+class TrafficAssignmentSolver:
+    """Unified traffic assignment solver.
 
-    The MVP is fully wrapper-side: it batches trips in Python, updates one
-    mutable network state, writes fresh segment-speed CSVs after each batch,
-    and recreates the OSRM engine between batches. No OSRM core patch is
-    required.
+    Supports both OD-matrix and matrix-free trip-stream workflows:
 
-    Once the OSRM multi-period patch lands, this solver can be upgraded to:
-    - route by ``departure_time`` / ``departure_period`` directly,
-    - keep multiple period-specific metric sets in one engine,
-    - avoid Python-side slice orchestration and repeated engine reloads.
+    - ``solve()``: OD-matrix / zone-based assignment via AssignmentLoop
+    - ``run_stream()``: matrix-free batched loading with MSA convergence
+
+    The MSA convergence loop operates on link-level density state:
+    freeze -> route all demand (AON) -> blend with alpha=1/(m+1) -> update VDF.
     """
 
     def __init__(
@@ -339,308 +255,27 @@ class MatrixFreeHillClimber:
                 )],
             ))
 
-    @staticmethod
-    def _route_signature(route: RouteAssignment) -> Tuple[int, ...]:
-        return tuple(route.edge_indices)
-
-    def _current_route_cost(self, route: RouteAssignment, state: NetworkState) -> float:
-        cost_s = 0.0
-        for edge_idx in route.edge_indices:
-            if edge_idx < 0 or edge_idx >= state.n_edges:
-                continue
-            speed_kmh = max(state.speed_kmh[edge_idx], self.config.vdf_min_speed_kmh)
-            cost_s += state.length_m[edge_idx] / (speed_kmh / 3.6)
-        return cost_s
-
-    def _current_entry_cost(self, entry: ODLedgerEntry, state: NetworkState) -> float:
-        if not entry.routes:
-            return 0.0
-        return float(sum(
-            route.volume_fraction * self._current_route_cost(route, state)
-            for route in entry.routes
-        ))
-
-    def _sample_od_indices(
+    def solve(
         self,
-        od_ledger: ODLedger,
-        sample_rate: float,
-        focus_indices: Sequence[int],
+        demand: ODMatrixAdapter | Sequence[DemandTrip],
         *,
-        max_sample_size: Optional[int] = None,
-    ) -> List[int]:
-        n_total = len(od_ledger)
-        if n_total == 0:
-            return []
-        sample_size = min(n_total, max(1, int(np.ceil(sample_rate * n_total))))
-        if max_sample_size is not None:
-            sample_size = min(sample_size, max_sample_size)
-        selected: set[int] = set()
+        state_patch=None,
+        progress_callback=None,
+    ) -> AssignmentResult:
+        """Solve an OD-matrix assignment problem via AssignmentLoop.
 
-        focus_pool = [idx for idx in focus_indices if 0 <= idx < n_total]
-        if focus_pool:
-            n_focus = min(len(focus_pool), int(round(sample_size * _REFINEMENT_FOCUS_SHARE)))
-            if n_focus > 0:
-                selected.update(random.sample(focus_pool, n_focus))
-
-        if len(selected) < sample_size:
-            need = sample_size - len(selected)
-            while len(selected) < sample_size:
-                selected.add(random.randrange(n_total))
-        return sorted(selected)
-
-    def _sampled_table_costs(
-        self,
-        engine,
-        entries: Sequence[ODLedgerEntry],
-        *,
-        max_pairs_per_call: int = 100_000,
-    ) -> List[Optional[float]]:
-        """Compute shortest-path durations for sampled ledger entries via Table.
-
-        Chunk the sampled set so each Table call stays modest. This keeps the
-        diagnostic sublinear without relying on one enormous all-sample matrix.
+        Parameters
+        ----------
+        demand : ODMatrixAdapter or sequence of DemandTrip
+            Either an adapter that can materialize trips from an OD matrix, or
+            a pre-built trip list.
         """
-        if not entries:
-            return []
-
-        result: List[Optional[float]] = []
-        for start in range(0, len(entries), max_pairs_per_call):
-            chunk = entries[start:start + max_pairs_per_call]
-            coordinates: List[Tuple[float, float]] = []
-            coord_to_index: dict[Tuple[float, float], int] = {}
-
-            def coord_index(coord: Tuple[float, float]) -> int:
-                idx = coord_to_index.get(coord)
-                if idx is None:
-                    idx = len(coordinates)
-                    coord_to_index[coord] = idx
-                    coordinates.append(coord)
-                return idx
-
-            source_indices = [coord_index(entry.origin) for entry in chunk]
-            destination_indices = [coord_index(entry.destination) for entry in chunk]
-            unique_sources = list(dict.fromkeys(source_indices))
-            unique_destinations = list(dict.fromkeys(destination_indices))
-            dest_position = {
-                coord_idx: pos for pos, coord_idx in enumerate(unique_destinations)
-            }
-
-            table = engine.Table(
-                coordinates=coordinates,
-                sources=unique_sources,
-                destinations=unique_destinations,
-                annotations=["duration"],
-                skip_waypoints=True,
-            )
-            durations = table.get("durations", [])
-            rows_by_source = {
-                source_coord_idx: durations[local_idx]
-                for local_idx, source_coord_idx in enumerate(unique_sources)
-                if local_idx < len(durations)
-            }
-
-            for src_idx, dst_idx in zip(source_indices, destination_indices):
-                row = rows_by_source.get(src_idx)
-                if row is None:
-                    result.append(None)
-                    continue
-                dst_pos = dest_position[dst_idx]
-                duration = row[dst_pos] if dst_pos < len(row) else None
-                result.append(None if duration is None else float(duration))
-        return result
-
-    def _apply_density_scale(
-        self,
-        state: NetworkState,
-        route: RouteAssignment,
-        scale: float,
-    ) -> None:
-        for edge_idx, density_delta in zip(
-            route.edge_indices, route.density_contribution,
-        ):
-            state.density_vpkm[edge_idx] += scale * density_delta
-
-    def _route_base_density(self, route: RouteAssignment) -> List[float]:
-        if route.volume_fraction <= _REFINEMENT_MIN_ROUTE_FRACTION:
-            return list(route.density_contribution)
-        inv = 1.0 / route.volume_fraction
-        return [value * inv for value in route.density_contribution]
-
-    def _entry_route_costs(
-        self,
-        entry: ODLedgerEntry,
-        state: NetworkState,
-    ) -> List[float]:
-        return [self._current_route_cost(route, state) for route in entry.routes]
-
-    def _entry_weighted_cost_from_costs(
-        self,
-        entry: ODLedgerEntry,
-        route_costs: Sequence[float],
-    ) -> float:
-        if not route_costs:
-            return 0.0
-        return float(sum(
-            route.volume_fraction * route_costs[idx]
-            for idx, route in enumerate(entry.routes)
-        ))
-
-    def _entry_changed(
-        self,
-        before: ODLedgerEntry,
-        after: ODLedgerEntry,
-        *,
-        fraction_tol: float = 1e-9,
-    ) -> bool:
-        before_map = {
-            self._route_signature(route): route.volume_fraction
-            for route in before.routes
-        }
-        after_map = {
-            self._route_signature(route): route.volume_fraction
-            for route in after.routes
-        }
-        if before_map.keys() != after_map.keys():
-            return True
-        return any(
-            abs(before_map[signature] - after_map[signature]) > fraction_tol
-            for signature in before_map
+        trips = demand.trips() if hasattr(demand, "trips") else list(demand)
+        return self._make_loop().run(
+            trips,
+            state_patch=state_patch,
+            progress_callback=progress_callback,
         )
-
-    def _evaluate_sample(
-        self,
-        entries: Sequence[ODLedgerEntry],
-        shortest_costs: Sequence[Optional[float]],
-        state: NetworkState,
-    ) -> Tuple[
-        Optional[float],
-        float,
-        float,
-        List[Tuple[float, float, int]],
-        List[List[float]],
-    ]:
-        numerator = 0.0
-        denominator = 0.0
-        scored_entries: List[Tuple[float, float, int]] = []
-        route_costs_by_local: List[List[float]] = []
-
-        for local_idx, (entry, shortest_cost) in enumerate(
-            zip(entries, shortest_costs),
-        ):
-            route_costs = self._entry_route_costs(entry, state)
-            route_costs_by_local.append(route_costs)
-            if shortest_cost is None or shortest_cost <= 0.0:
-                entry.current_gap = None
-                continue
-            used_cost = self._entry_weighted_cost_from_costs(entry, route_costs)
-            excess = max(0.0, used_cost - shortest_cost)
-            relative_excess = excess / shortest_cost
-            entry.current_gap = relative_excess
-            numerator += entry.total_volume * excess
-            denominator += entry.total_volume * shortest_cost
-            if excess > 0.0:
-                scored_entries.append(
-                    (entry.total_volume * excess, relative_excess, local_idx)
-                )
-
-        sampled_gap = (numerator / denominator) if denominator > 0.0 else None
-        return sampled_gap, numerator, denominator, scored_entries, route_costs_by_local
-
-    def _apply_entry_to_state(
-        self,
-        state: NetworkState,
-        entry: ODLedgerEntry,
-        scale: float,
-    ) -> None:
-        for route in entry.routes:
-            self._apply_density_scale(state, route, scale)
-
-    def _copy_entry_from(
-        self,
-        dest: ODLedgerEntry,
-        src: ODLedgerEntry,
-    ) -> None:
-        dest.total_volume = src.total_volume
-        dest.departure_time_s = src.departure_time_s
-        dest.current_gap = src.current_gap
-        dest.refinement_visits = src.refinement_visits
-        dest.routes = deepcopy(src.routes)
-
-    def _scaled_entry_proposal(
-        self,
-        entry: ODLedgerEntry,
-        proposal: ODLedgerEntry,
-        step_scale: float,
-    ) -> ODLedgerEntry:
-        """Interpolate between the current entry and a full proposal."""
-        if step_scale <= 0.0:
-            return deepcopy(entry)
-        if step_scale >= 1.0:
-            return deepcopy(proposal)
-
-        candidate = deepcopy(entry)
-        before = {
-            self._route_signature(route): route for route in entry.routes
-        }
-        after = {
-            self._route_signature(route): route for route in proposal.routes
-        }
-        signatures = list(dict.fromkeys(list(before.keys()) + list(after.keys())))
-
-        candidate.routes = []
-        for signature in signatures:
-            before_route = before.get(signature)
-            after_route = after.get(signature)
-            before_fraction = 0.0 if before_route is None else before_route.volume_fraction
-            after_fraction = 0.0 if after_route is None else after_route.volume_fraction
-            new_fraction = before_fraction + step_scale * (after_fraction - before_fraction)
-            if new_fraction <= _REFINEMENT_MIN_ROUTE_FRACTION:
-                continue
-
-            source_route = after_route if after_route is not None else before_route
-            if source_route is None:
-                continue
-            base_density = self._route_base_density(source_route)
-            assigned_cost_s = (
-                after_route.assigned_cost_s
-                if after_route is not None else
-                before_route.assigned_cost_s
-            )
-            candidate.routes.append(RouteAssignment(
-                edge_indices=list(source_route.edge_indices),
-                density_contribution=[value * new_fraction for value in base_density],
-                volume_fraction=new_fraction,
-                assigned_cost_s=assigned_cost_s,
-            ))
-
-        candidate.compress_routes()
-        total_fraction = sum(route.volume_fraction for route in candidate.routes)
-        if total_fraction > 0.0:
-            for route in candidate.routes:
-                scale = 1.0 / total_fraction
-                route.volume_fraction *= scale
-                route.density_contribution = [
-                    value * scale for value in route.density_contribution
-                ]
-        candidate.current_gap = proposal.current_gap
-        candidate.refinement_visits = proposal.refinement_visits
-        return candidate
-
-    def _refresh_state(
-        self,
-        loop: AssignmentLoop,
-        state: NetworkState,
-        state_patch,
-    ) -> None:
-        state.density_vpkm = np.clip(
-            state.density_vpkm,
-            0.0,
-            state.jam_density,
-        )
-        if state_patch:
-            state_patch(state)
-        loop.smoother.build_adjacency(state.edge_ids, state.length_m)
-        loop._update_state(state)
 
     def _customize_and_reload(
         self,
@@ -664,122 +299,6 @@ class MatrixFreeHillClimber:
         engine = loop._create_engine()
         engine_time = time.monotonic() - t_engine
         return engine, customize_time, engine_time
-
-    def _discovery_needed(
-        self,
-        best_known_cost: float,
-        shortest_cost: float,
-    ) -> bool:
-        if shortest_cost <= 0.0:
-            return False
-        return best_known_cost > shortest_cost * (1.0 + _REFINEMENT_DISCOVERY_REL_TOL)
-
-    def _propose_path_swap(
-        self,
-        entry: ODLedgerEntry,
-        state: NetworkState,
-        shortest_cost: float,
-        discovered_path: Optional[RoutedTripPath],
-        *,
-        route_costs: Optional[Sequence[float]] = None,
-    ) -> Tuple[ODLedgerEntry, bool]:
-        """Propose a bounded share swap for one OD using known paths first.
-
-        Returns
-        -------
-        proposal : ODLedgerEntry
-            Proposed updated path set and shares.
-        used_discovery : bool
-            Whether a newly routed path was actually introduced.
-        """
-        proposal = deepcopy(entry)
-        if route_costs is None:
-            route_costs = self._entry_route_costs(proposal, state)
-        if not route_costs:
-            return proposal, False
-
-        best_known_idx = int(np.argmin(route_costs))
-        best_known_cost = route_costs[best_known_idx]
-        target_is_new = False
-        target_edge_indices = list(proposal.routes[best_known_idx].edge_indices)
-        target_base_density = self._route_base_density(proposal.routes[best_known_idx])
-        target_cost = best_known_cost
-
-        if discovered_path is not None:
-            discovered_signature = tuple(discovered_path.edge_indices)
-            known_signatures = {
-                self._route_signature(route) for route in proposal.routes
-            }
-            if (
-                discovered_signature not in known_signatures
-                and float(discovered_path.duration_s) + 1e-9 < best_known_cost
-            ):
-                target_is_new = True
-                target_edge_indices = list(discovered_path.edge_indices)
-                target_base_density = list(discovered_path.density_contribution)
-                target_cost = float(discovered_path.duration_s)
-
-        used_cost = self._entry_weighted_cost_from_costs(proposal, route_costs)
-        improvement = used_cost - target_cost
-        if improvement <= 0.0:
-            return proposal, False
-
-        visit_scale = 1.0 / max(1, proposal.refinement_visits + 1)
-        rel_improvement = improvement / max(shortest_cost, 1e-9)
-        alpha = min(
-            _REFINEMENT_ALPHA_MAX,
-            max(
-                _REFINEMENT_ALPHA_MIN,
-                (rel_improvement / _REFINEMENT_TARGET_REL_EXCESS) * visit_scale,
-            ),
-        )
-
-        updated_routes: List[RouteAssignment] = []
-        target_signature = tuple(target_edge_indices)
-        target_added = False
-        for route in proposal.routes:
-            signature = self._route_signature(route)
-            if signature == target_signature:
-                new_fraction = route.volume_fraction + alpha * (1.0 - route.volume_fraction)
-            else:
-                new_fraction = route.volume_fraction * (1.0 - alpha)
-            if new_fraction <= _REFINEMENT_MIN_ROUTE_FRACTION:
-                continue
-
-            base_density = (
-                target_base_density
-                if signature == target_signature else
-                self._route_base_density(route)
-            )
-            updated_routes.append(RouteAssignment(
-                edge_indices=list(route.edge_indices),
-                density_contribution=[value * new_fraction for value in base_density],
-                volume_fraction=new_fraction,
-                assigned_cost_s=target_cost if signature == target_signature else route.assigned_cost_s,
-            ))
-            if signature == target_signature:
-                target_added = True
-
-        if not target_added:
-            updated_routes.append(RouteAssignment(
-                edge_indices=list(target_edge_indices),
-                density_contribution=[value * alpha for value in target_base_density],
-                volume_fraction=alpha,
-                assigned_cost_s=target_cost,
-            ))
-            target_is_new = True
-
-        proposal.routes = updated_routes
-        proposal.compress_routes()
-        total_fraction = sum(route.volume_fraction for route in proposal.routes)
-        if total_fraction > 0.0:
-            for route in proposal.routes:
-                scale = 1.0 / total_fraction
-                route.volume_fraction *= scale
-                route.density_contribution = [
-                    value * scale for value in route.density_contribution
-                ]
-        return proposal, target_is_new
 
     def _run_msa_refinement(
         self,
@@ -936,268 +455,6 @@ class MatrixFreeHillClimber:
 
         return engine, msa_results
 
-    def _run_sampled_refinement(
-        self,
-        *,
-        engine,
-        loop: AssignmentLoop,
-        state: NetworkState,
-        od_ledger: ODLedger,
-        state_patch,
-        progress_callback,
-        sample_rate: float,
-        max_rounds: int,
-        gap_threshold: float,
-        max_sample_size: int = _DEFAULT_MAX_REFINEMENT_SAMPLE,
-        max_updates_per_round: int = _DEFAULT_MAX_REFINEMENT_UPDATES,
-    ) -> Tuple[object, List[RefinementRoundResult]]:
-        """Run sampled path-set refinement rounds on top of the greedy pass."""
-        refinement_results: List[RefinementRoundResult] = []
-        focus_indices: List[int] = []
-        stable_rounds = 0
-
-        for round_idx in range(max_rounds):
-            round_start = time.monotonic()
-            round_base_density = state.density_vpkm.copy()
-            sample_indices = self._sample_od_indices(
-                od_ledger,
-                sample_rate,
-                focus_indices,
-                max_sample_size=max_sample_size,
-            )
-            sampled_entries = [od_ledger[idx] for idx in sample_indices]
-            shortest_costs = self._sampled_table_costs(engine, sampled_entries)
-            sampled_gap, sampled_excess, _, scored_entries, route_costs_by_local = self._evaluate_sample(
-                sampled_entries, shortest_costs, state,
-            )
-            if not scored_entries:
-                logger.info(
-                    "Refinement complete: no sampled offenders after %d round(s)",
-                    round_idx,
-                )
-                break
-
-            scored_entries.sort(reverse=True)
-            refinement_count = max(1, int(np.ceil(len(scored_entries) * _REFINEMENT_TOP_SHARE)))
-            refinement_count = min(refinement_count, max_updates_per_round)
-            selected_meta = scored_entries[:refinement_count]
-            selected_globals = [
-                sample_indices[local_idx] for _, _, local_idx in selected_meta
-            ]
-            proposals: dict[int, ODLedgerEntry] = {}
-            discovery_batch: List[Tuple[int, ODLedgerEntry, float, int]] = []
-            route_time = 0.0
-            customize_time = 0.0
-            engine_time = 0.0
-
-            for _, _, local_idx in selected_meta:
-                global_idx = sample_indices[local_idx]
-                entry = sampled_entries[local_idx]
-                shortest_cost = shortest_costs[local_idx]
-                if shortest_cost is None or shortest_cost <= 0.0:
-                    continue
-                route_costs = route_costs_by_local[local_idx]
-                if not route_costs:
-                    continue
-                best_known_cost = min(route_costs)
-                if self._discovery_needed(best_known_cost, shortest_cost):
-                    discovery_batch.append((global_idx, entry, shortest_cost, local_idx))
-                    continue
-
-                proposal, _ = self._propose_path_swap(
-                    entry, state, shortest_cost, None, route_costs=route_costs,
-                )
-                if self._entry_changed(entry, proposal):
-                    proposal.refinement_visits = entry.refinement_visits + 1
-                    proposals[global_idx] = proposal
-
-            if discovery_batch:
-                for _, entry, _, _ in discovery_batch:
-                    self._apply_entry_to_state(state, entry, -1.0)
-                self._refresh_state(loop, state, state_patch)
-                engine, dt_cust, dt_engine = self._customize_and_reload(
-                    loop, state, engine,
-                )
-                customize_time += dt_cust
-                engine_time += dt_engine
-
-                discovery_trips = [
-                    DemandTrip(
-                        origin=entry.origin,
-                        destination=entry.destination,
-                        volume=entry.total_volume,
-                        departure_time_s=entry.departure_time_s,
-                    )
-                    for _, entry, _, _ in discovery_batch
-                ]
-                t_route = time.monotonic()
-                _, _, _, routed_paths = loop._route_and_accumulate_with_paths(
-                    engine, discovery_trips, state,
-                )
-                route_time += time.monotonic() - t_route
-                path_by_trip = {path.trip_index: path for path in routed_paths}
-
-                for discovery_idx, (global_idx, entry, shortest_cost, local_idx) in enumerate(
-                    discovery_batch,
-                ):
-                    proposal, _ = self._propose_path_swap(
-                        entry,
-                        state,
-                        shortest_cost,
-                        path_by_trip.get(discovery_idx),
-                        route_costs=route_costs_by_local[local_idx],
-                    )
-                    if self._entry_changed(entry, proposal):
-                        proposal.refinement_visits = entry.refinement_visits + 1
-                        proposals[global_idx] = proposal
-
-            if len(round_base_density) < state.n_edges:
-                round_base_density = np.append(
-                    round_base_density,
-                    np.zeros(state.n_edges - len(round_base_density)),
-                )
-            state.density_vpkm = round_base_density.copy()
-            self._refresh_state(loop, state, state_patch)
-
-            if not proposals:
-                if discovery_batch:
-                    engine, dt_cust, dt_engine = self._customize_and_reload(
-                        loop, state, engine,
-                    )
-                    customize_time += dt_cust
-                    engine_time += dt_engine
-                max_k_over_kj = float(
-                    np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
-                )
-                mean_speed = float(np.median(state.speed_kmh))
-                round_result = RefinementRoundResult(
-                    round_index=round_idx + 1,
-                    sampled_pairs=len(sample_indices),
-                    accepted_updates=0,
-                    sampled_gap=sampled_gap,
-                    sampled_excess=float(sampled_excess),
-                    network_tstt=None,
-                    worst_score=float(selected_meta[0][0]) if selected_meta else 0.0,
-                    route_time_s=route_time,
-                    customize_time_s=customize_time,
-                    engine_time_s=engine_time,
-                    round_time_s=time.monotonic() - round_start,
-                    max_k_over_kj=max_k_over_kj,
-                    mean_speed_kmh=mean_speed,
-                )
-                refinement_results.append(round_result)
-                if progress_callback:
-                    progress_callback(round_result)
-                logger.info(
-                    "Refinement halted at round %d: no improving path-set updates found",
-                    round_idx + 1,
-                )
-                break
-
-            focus_limit = max(len(proposals) * 2, int(len(sample_indices) * _REFINEMENT_FOCUS_SHARE))
-            focus_indices = [
-                sample_indices[local_idx]
-                for _, _, local_idx in scored_entries[:focus_limit]
-            ]
-
-            if len(round_base_density) < state.n_edges:
-                round_base_density = np.append(
-                    round_base_density,
-                    np.zeros(state.n_edges - len(round_base_density)),
-                )
-            state.density_vpkm = round_base_density.copy()
-            self._refresh_state(loop, state, state_patch)
-
-            for global_idx in selected_globals:
-                candidate = proposals.get(global_idx)
-                if candidate is None:
-                    continue
-                self._apply_entry_to_state(state, od_ledger[global_idx], -1.0)
-                self._apply_entry_to_state(state, candidate, 1.0)
-
-            self._refresh_state(loop, state, state_patch)
-            engine, dt_cust, dt_engine = self._customize_and_reload(
-                loop, state, engine,
-            )
-            customize_time += dt_cust
-            engine_time += dt_engine
-
-            if (
-                not np.all(np.isfinite(state.density_vpkm))
-                or not np.all(np.isfinite(state.speed_kmh))
-                or not np.all(np.isfinite(state.flow_vph))
-                or np.any(state.density_vpkm < -1e-9)
-                or np.any(state.flow_vph < -1e-9)
-            ):
-                if len(round_base_density) < state.n_edges:
-                    round_base_density = np.append(
-                        round_base_density,
-                        np.zeros(state.n_edges - len(round_base_density)),
-                    )
-                state.density_vpkm = round_base_density.copy()
-                self._refresh_state(loop, state, state_patch)
-                engine, dt_cust, dt_engine = self._customize_and_reload(
-                    loop, state, engine,
-                )
-                customize_time += dt_cust
-                engine_time += dt_engine
-                accepted_updates = 0
-            else:
-                accepted_updates = len(proposals)
-                for global_idx, proposal in proposals.items():
-                    self._copy_entry_from(od_ledger[global_idx], proposal)
-
-            if sampled_gap is not None and sampled_gap < gap_threshold:
-                stable_rounds += 1
-            else:
-                stable_rounds = 0
-
-            max_k_over_kj = float(
-                np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
-            )
-            mean_speed = float(np.median(state.speed_kmh))
-            worst_score = float(selected_meta[0][0]) if selected_meta else 0.0
-            round_result = RefinementRoundResult(
-                round_index=round_idx + 1,
-                sampled_pairs=len(sample_indices),
-                accepted_updates=accepted_updates,
-                sampled_gap=sampled_gap,
-                sampled_excess=float(sampled_excess),
-                network_tstt=None,
-                worst_score=worst_score,
-                route_time_s=route_time,
-                customize_time_s=customize_time,
-                engine_time_s=engine_time,
-                round_time_s=time.monotonic() - round_start,
-                max_k_over_kj=max_k_over_kj,
-                mean_speed_kmh=mean_speed,
-            )
-            refinement_results.append(round_result)
-
-            gap_str = (
-                f"{sampled_gap:.6f}" if sampled_gap is not None else "n/a"
-            )
-            logger.info(
-                u"R%d: sample=%d updated=%d gap=%s excess=%.0f v\u0305=%.1f km/h k/kj=%.2f (max %.2f) %.1fs",
-                round_result.round_index,
-                round_result.sampled_pairs,
-                round_result.accepted_updates,
-                gap_str,
-                round_result.sampled_excess,
-                round_result.mean_speed_kmh,
-                float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9))),
-                round_result.max_k_over_kj,
-                round_result.round_time_s,
-            )
-
-            if progress_callback:
-                progress_callback(round_result)
-
-            if sampled_gap is not None and stable_rounds >= _REFINEMENT_STABLE_ROUNDS:
-                break
-
-        return engine, refinement_results
-
     def run_batch(
         self,
         trips: Sequence[DemandTrip],
@@ -1247,8 +504,6 @@ class MatrixFreeHillClimber:
         sample_rate: float = 0.0,
         max_rounds: int = 0,
         gap_threshold: float = 0.01,
-        max_refinement_sample: int = _DEFAULT_MAX_REFINEMENT_SAMPLE,
-        max_refinement_updates: int = _DEFAULT_MAX_REFINEMENT_UPDATES,
     ) -> HillClimberResult:
         """Run a stateful wrapper-side hill-climber over ordered trip batches.
 
@@ -1418,7 +673,6 @@ class MatrixFreeHillClimber:
             if progress_callback:
                 progress_callback(batch_result)
 
-        refinement_results: List[RefinementRoundResult] = []
         msa_results: List[MSAIterationResult] = []
         if sampled_mode:
             engine, msa_results = self._run_msa_refinement(
@@ -1452,19 +706,8 @@ class MatrixFreeHillClimber:
             total_time_s=total_time,
             n_trips=len(snapped_trips),
             od_ledger=od_ledger,
-            refinement_results=refinement_results,
             msa_results=msa_results,
         )
-
-    def _network_tstt_from_od_ledger(
-        self,
-        od_ledger: ODLedger,
-        state: NetworkState,
-    ) -> float:
-        total_tstt = 0.0
-        for entry in od_ledger:
-            total_tstt += float(entry.total_volume) * self._current_entry_cost(entry, state)
-        return float(total_tstt)
 
     def iter_time_slices(
         self,
@@ -1480,3 +723,9 @@ class MatrixFreeHillClimber:
                 max_batch_size=max_batch_size,
             )
         )
+
+
+
+# Backward compatibility aliases
+MatrixAssignmentSolver = TrafficAssignmentSolver
+MatrixFreeHillClimber = TrafficAssignmentSolver

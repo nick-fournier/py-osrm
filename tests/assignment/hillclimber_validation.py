@@ -21,7 +21,7 @@ from osrm.assignment import (
     AssignmentConfig,
     DemandTrip,
     DensitySmoothingConfig,
-    MatrixFreeHillClimber,
+    TrafficAssignmentSolver,
 )
 from osrm.assignment.plots import (
     _add_congestion_map_section,
@@ -186,8 +186,6 @@ def run_hillclimber_case(
     max_rounds: int = 0,
     gap_threshold: float = 0.01,
     assumed_speed_kmh: float | None = None,
-    max_refinement_sample: int = 20_000,
-    max_refinement_updates: int = 2_000,
 ):
     """Run one shared hill-climber validation case from scenario metadata."""
     logger = logging.getLogger(__name__)
@@ -242,7 +240,7 @@ def run_hillclimber_case(
         smoothing=DensitySmoothingConfig(method="none"),
         speed_csv_dir=str(Path(run_base).parent),
     )
-    solver = MatrixFreeHillClimber(
+    solver = TrafficAssignmentSolver(
         run_base,
         config,
         default_batch_size=max_batch_size or len(sliced_trips),
@@ -255,8 +253,6 @@ def run_hillclimber_case(
         sample_rate=sample_rate,
         max_rounds=max_rounds,
         gap_threshold=gap_threshold,
-        max_refinement_sample=max_refinement_sample,
-        max_refinement_updates=max_refinement_updates,
     )
     return HillClimberValidationCase(
         base_path=run_base,
@@ -271,28 +267,9 @@ def run_hillclimber_case(
 
 def hillclimber_final_gap(result: object) -> float | None:
     """Return the final convergence gap, if available."""
-    # Prefer MSA results (v4)
     msa_results = getattr(result, "msa_results", []) or []
     if msa_results:
         return msa_results[-1].relative_gap
-
-    # Fall back to legacy refinement results (v3)
-    refinement_results = getattr(result, "refinement_results", []) or []
-    if refinement_results:
-        return refinement_results[-1].sampled_gap
-
-    od_ledger = getattr(result, "od_ledger", None)
-    if od_ledger is not None and len(od_ledger) > 0:
-        numerator = 0.0
-        denominator = 0.0
-        for entry in od_ledger:
-            if entry.current_gap is None:
-                continue
-            numerator += float(entry.total_volume) * float(entry.current_gap)
-            denominator += float(entry.total_volume)
-        if denominator > 0.0:
-            return numerator / denominator
-
     return None
 
 
@@ -301,34 +278,11 @@ def hillclimber_final_tstt(
     *,
     min_speed_kmh: float = 1.08,
 ) -> float:
-    """Estimate final TSTT from MSA link state or legacy OD ledger."""
-    # Prefer MSA link-level TSTT (v4)
+    """Return final TSTT from MSA or greedy loading."""
     msa_results = getattr(result, "msa_results", []) or []
     if msa_results:
         return float(msa_results[-1].link_tstt)
 
-    # Fall back to legacy path-based TSTT from od_ledger (v3)
-    refinement_results = getattr(result, "refinement_results", []) or []
-    od_ledger = getattr(result, "od_ledger", None)
-    state = getattr(result, "network_state", None)
-    if refinement_results and od_ledger is not None and len(od_ledger) > 0 and state is not None:
-        total_tstt = 0.0
-        for entry in od_ledger:
-            for route in entry.routes:
-                route_cost_s = 0.0
-                for edge_idx in route.edge_indices:
-                    if edge_idx < 0 or edge_idx >= state.n_edges:
-                        continue
-                    speed_kmh = max(float(state.speed_kmh[edge_idx]), min_speed_kmh)
-                    route_cost_s += float(state.length_m[edge_idx]) / (speed_kmh / 3.6)
-                total_tstt += (
-                    float(entry.total_volume)
-                    * float(route.volume_fraction)
-                    * route_cost_s
-                )
-        return float(total_tstt)
-
-    # Last resort: final batch TSTT from greedy loading
     batch_results = getattr(result, "batch_results", []) or []
     if batch_results:
         return float(batch_results[-1].network_tstt)
@@ -344,8 +298,7 @@ def _msa_step_label(iteration: int) -> str:
 
 
 def _convergence_series(result: object) -> dict:
-    """Return plotting arrays for MSA or legacy refinement, if present."""
-    # Prefer MSA results (v4)
+    """Return plotting arrays for MSA convergence, if present."""
     msa_results = getattr(result, "msa_results", []) or []
     if msa_results:
         return {
@@ -354,7 +307,7 @@ def _convergence_series(result: object) -> dict:
                 _msa_step_label(r.iteration) for r in msa_results
             ],
             "network_tstt": [r.link_tstt for r in msa_results],
-            "sampled_excess": [r.state_change_norm for r in msa_results],
+            "state_change_norm": [r.state_change_norm for r in msa_results],
             "speeds": [r.mean_speed_kmh for r in msa_results],
             "k": [r.max_k_over_kj for r in msa_results],
             "route_times": [r.route_time_s for r in msa_results],
@@ -362,30 +315,11 @@ def _convergence_series(result: object) -> dict:
             "engine_times": [r.engine_time_s for r in msa_results],
             "gaps": [r.relative_gap for r in msa_results],
         }
-
-    # Fall back to legacy refinement results (v3)
-    refinement_results = getattr(result, "refinement_results", []) or []
-    if refinement_results:
-        return {
-            "kind": "refinement",
-            "labels": [
-                _refinement_step_label(round_result.round_index)
-                for round_result in refinement_results
-            ],
-            "network_tstt": [round_result.network_tstt for round_result in refinement_results],
-            "sampled_excess": [round_result.sampled_excess for round_result in refinement_results],
-            "speeds": [round_result.mean_speed_kmh for round_result in refinement_results],
-            "k": [round_result.max_k_over_kj for round_result in refinement_results],
-            "route_times": [round_result.route_time_s for round_result in refinement_results],
-            "customize_times": [round_result.customize_time_s for round_result in refinement_results],
-            "engine_times": [round_result.engine_time_s for round_result in refinement_results],
-            "gaps": [round_result.sampled_gap for round_result in refinement_results],
-        }
     return {
         "kind": None,
         "labels": [],
         "network_tstt": [],
-        "sampled_excess": [],
+        "state_change_norm": [],
         "speeds": [],
         "k": [],
         "route_times": [],
@@ -424,14 +358,11 @@ def _add_batch_sections(
         line=dict(color="#D32F2F", width=2.5),
         marker=dict(size=7),
     ))
-    if refinement["sampled_excess"]:
-        excess_label = (
-            "\u0394k norm" if refinement["kind"] == "msa" else "Sampled excess"
-        )
+    if refinement["state_change_norm"]:
         fig.add_trace(go.Scatter(
             x=refinement["labels"],
-            y=refinement["sampled_excess"],
-            name=excess_label,
+            y=refinement["state_change_norm"],
+            name="\u0394k norm",
             mode="lines+markers",
             line=dict(color="#8E24AA", width=2.5, dash="dot"),
             marker=dict(size=7),
@@ -465,7 +396,7 @@ def _add_batch_sections(
             type="log" if any(gap is not None for gap in gap_values) else "linear",
         ),
         yaxis3=dict(
-            title="\u0394k norm" if refinement["kind"] == "msa" else "Sampled excess (veh-seconds)",
+            title="\u0394k norm",
             anchor="free",
             overlaying="y",
             side="right",
@@ -551,19 +482,8 @@ def _add_batch_sections(
             f"converged link densities toward user equilibrium."
             f"{gap_str}"
         )
-    elif refinement["kind"] == "refinement":
-        refinement_results = getattr(result, "refinement_results", []) or []
-        accepted_updates = sum(round_result.accepted_updates for round_result in refinement_results)
-        final_gap = hillclimber_final_gap(result)
-        gap_str = (
-            f" Final sampled gap={final_gap:.6f}."
-            if final_gap is not None else ""
-        )
-        refinement_note = (
-            f" After greedy loading, {len(refinement_results)} sampled refinement round(s) "
-            f"rebalanced OD path sets with {accepted_updates} accepted OD updates."
-            f"{gap_str}"
-        )
+    elif refinement["kind"] is None:
+        pass
     descriptions.append(
         f"<h2>State Evolution</h2>"
         f"<p>Final loaded demand is {case.total_demand:,.0f} "
@@ -621,8 +541,8 @@ def _add_batch_sections(
     figs.append(fig)
     runtime_note = (
         "Per-step routing, customize, and engine reload timings across greedy loading "
-        "and sampled path-set refinement rounds."
-        if refinement["kind"] == "refinement" else
+        "and MSA convergence iterations."
+        if refinement["kind"] == "msa" else
         "Per-step routing, customize, and engine reload timings across greedy loading."
     )
     descriptions.append(
@@ -648,8 +568,6 @@ def generate_hillclimber_validation_report(
     max_rounds: int = 0,
     gap_threshold: float = 0.01,
     assumed_speed_kmh: float | None = None,
-    max_refinement_sample: int = 20_000,
-    max_refinement_updates: int = 2_000,
 ) -> Path:
     """Generate a shared hill-climber validation report for one scenario."""
     tmp_path = Path(tmp_path)
@@ -670,8 +588,6 @@ def generate_hillclimber_validation_report(
         max_rounds=max_rounds,
         gap_threshold=gap_threshold,
         assumed_speed_kmh=assumed_speed_kmh,
-        max_refinement_sample=max_refinement_sample,
-        max_refinement_updates=max_refinement_updates,
     )
 
     state = case.result.network_state
