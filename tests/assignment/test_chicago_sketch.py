@@ -18,11 +18,6 @@ import shutil
 from pathlib import Path
 
 import osrm
-from osrm.assignment import (
-    AssignmentConfig,
-    AssignmentLoop,
-    DensitySmoothingConfig,
-)
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import LinkClass, tntp_to_osm, patch_lanes
 from osrm.assignment.tntp import parse_net, parse_trips, load_node_coords, parse_flow
@@ -109,39 +104,6 @@ def _build_hillclimber_trips(meta: dict, demand_scale: float) -> list[DemandTrip
     return _build_trips(meta_scaled)
 
 
-def _run_chicago_assignment(
-    base_path: str,
-    meta: dict,
-    max_iter: int = 30,
-    method: str = "fw",
-    demand_scale: float = 1.00,
-):
-    """Run assignment on Chicago Sketch network.
-
-    Parameters
-    ----------
-    demand_scale : float
-        Fraction of TNTP demand to use.  Default 1.00 (1,260,907 vph).
-    """
-    meta_scaled = dict(meta)
-    meta_scaled["od_matrix"] = meta["od_matrix"] * demand_scale
-    trips = _build_trips(meta_scaled)
-
-    config = AssignmentConfig(
-        method=method,
-        max_iterations=max_iter,
-        convergence_gap=0.0,
-        smoothing=DensitySmoothingConfig(method="none"),
-        speed_csv_dir=str(Path(base_path).parent),
-    )
-
-    loop = AssignmentLoop(base_path, config)
-
-    def lane_patch(state):
-        patch_lanes(state, meta)
-
-    return loop.run(trips, state_patch=lane_patch)
-
 
 
 
@@ -179,11 +141,3 @@ def generate_chicago_report(
         ),
     )
 
-
-# Backward-compat alias
-def generate_chicago_hillclimber_report(
-    tmp_path: str | Path,
-    output_path: str = "plots/chicago_sketch_validation.html",
-) -> Path:
-    """Backward-compatible wrapper — delegates to unified report."""
-    return generate_chicago_report(tmp_path, output_path=output_path, method="msa")

@@ -168,6 +168,8 @@ def anaheim_result(anaheim_net, tmp_path_factory):
 class TestAnaheim:
     """Anaheim structural validation."""
 
+    # ── OLD pipeline (AssignmentLoop) tests ──
+
     def test_smoke_fw(self, anaheim_result):
         """Quick smoke: FW runs without error on Anaheim."""
         assert anaheim_result.iterations >= 1
@@ -270,6 +272,8 @@ class TestAnaheim:
             f"than direct ({p95_direct:.3f})"
         )
 
+    # ── NEW pipeline (TrafficAssignmentSolver) tests ──
+
     def test_hillclimber_smoke(self, anaheim_net, tmp_path_factory):
         """Hill-climber loads Anaheim across greedy load steps."""
         base, meta = anaheim_net
@@ -326,11 +330,3 @@ def generate_anaheim_report(
         ),
     )
 
-
-# Backward-compat alias
-def generate_anaheim_hillclimber_report(
-    tmp_path: str | Path,
-    output_path: str = "plots/anaheim_validation.html",
-) -> Path:
-    """Backward-compatible wrapper — delegates to unified report."""
-    return generate_anaheim_report(tmp_path, output_path=output_path, method="msa")

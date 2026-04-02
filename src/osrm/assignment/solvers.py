@@ -541,7 +541,7 @@ class TrafficAssignmentSolver:
         progress_callback=None,
         max_od: int = 100_000,
         max_rounds: int = 0,
-        gap_threshold: float = 0.01,
+        gap_threshold: float = 0.001,
         method: str = "msa",
     ) -> HillClimberResult:
         """Run assignment over ordered trip batches with convergence.

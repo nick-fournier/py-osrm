@@ -183,7 +183,7 @@ def run_hillclimber_case(
     load_rate: float = 0.10,
     max_od: int = 100_000,
     max_rounds: int = 0,
-    gap_threshold: float = 0.01,
+    gap_threshold: float = 0.001,
     assumed_speed_kmh: float | None = None,
     method: str = "msa",
 ):
@@ -577,7 +577,7 @@ def generate_hillclimber_validation_report(
     load_rate: float = 0.10,
     max_od: int = 100_000,
     max_rounds: int = 0,
-    gap_threshold: float = 0.01,
+    gap_threshold: float = 0.001,
     assumed_speed_kmh: float | None = None,
     method: str = "msa",
 ) -> Path:

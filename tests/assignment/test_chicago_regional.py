@@ -217,16 +217,9 @@ def generate_regional_report(
     )
 
 
-# Backward-compat alias
-def generate_regional_hillclimber_report(
-    tmp_path: str | Path,
-    output_path: str = "plots/chicago_regional_validation.html",
-) -> Path:
-    """Backward-compatible wrapper — delegates to unified report."""
-    return generate_regional_report(tmp_path, output_path=output_path, method="msa")
-
-
 # ── pytest entry points ──────────────────────────────────────────────
+
+# ── OLD pipeline (AssignmentLoop) tests ──
 
 @pytest.mark.slow
 def test_chicago_regional_matrix(tmp_path):
@@ -236,6 +229,8 @@ def test_chicago_regional_matrix(tmp_path):
     assert result.n_iterations >= 1
     assert result.total_system_travel_time > 0
 
+
+# ── NEW pipeline (TrafficAssignmentSolver) tests ──
 
 @pytest.mark.slow
 def test_chicago_regional_hillclimber(tmp_path):

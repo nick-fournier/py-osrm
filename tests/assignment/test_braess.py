@@ -1027,11 +1027,3 @@ def generate_braess_report(
     )
     return Path(output_path)
 
-
-def generate_braess_hillclimber_report(
-    tmp_path: str | Path,
-    output_path: str = "plots/braess_validation.html",
-    demand: float = 2500.0,
-) -> Path:
-    """Backward-compatible wrapper — delegates to unified report."""
-    return generate_braess_report(tmp_path, output_path=output_path, demand=demand)

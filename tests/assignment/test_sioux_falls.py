@@ -157,6 +157,8 @@ def _link_flow_correlation(result, meta: dict):
 class TestSiouxFalls:
     """Sioux Falls structural validation."""
 
+    # ── OLD pipeline (AssignmentLoop) tests ──
+
     def test_smoke_fw(self, tmp_path):
         """Quick smoke: FW runs without error on Sioux Falls, 5 iterations."""
         base, meta = _prepare_sf_network(tmp_path)
@@ -209,6 +211,8 @@ class TestSiouxFalls:
                 f"Freeflow mismatch on {key}: 20%={ff1[key]:.1f}, "
                 f"5%={ff2[key]:.1f}"
             )
+
+    # ── NEW pipeline (TrafficAssignmentSolver) tests ──
 
     def test_hillclimber_smoke(self, tmp_path):
         """Hill-climber loads Sioux Falls with sampled refinement enabled."""
@@ -266,11 +270,3 @@ def generate_sioux_falls_report(
         ),
     )
 
-
-# Backward-compat alias
-def generate_sioux_falls_hillclimber_report(
-    tmp_path: str | Path,
-    output_path: str = "plots/sioux_falls_validation.html",
-) -> Path:
-    """Backward-compatible wrapper — delegates to unified report."""
-    return generate_sioux_falls_report(tmp_path, output_path=output_path, method="msa")
