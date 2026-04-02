@@ -288,3 +288,19 @@ def test_matrix_free_solver_runs_msa(monkeypatch):
     assert result.msa_results[0].state_change_norm >= 0.0
     assert result.od_ledger is not None
     assert len(result.od_ledger) == 2
+
+
+def test_fw_rejects_large_sampled_networks():
+    """FW raises NotImplementedError when trip count exceeds 100k."""
+    import pytest
+
+    trips = [_trip(float(i % 100), volume=1.0) for i in range(100_001)]
+    solver = MatrixFreeHillClimber("network.osrm", AssignmentConfig(bin_width_s=3600))
+
+    with pytest.raises(NotImplementedError, match="Frank-Wolfe requires full-pass"):
+        solver.run_stream(
+            trips,
+            sample_rate=0.10,
+            max_rounds=1,
+            method="fw",
+        )

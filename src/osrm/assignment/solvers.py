@@ -330,10 +330,16 @@ class TrafficAssignmentSolver:
         """
         msa_results: List[MSAIterationResult] = []
         use_fw = method == "fw"
-        # FW line search requires accurate gradients — always route full demand.
-        # MSA can use sampled routing (stochastic MSA); gap is noisier but
-        # the 1/(m+1) step schedule still guarantees convergence.
-        full_pass = sample_rate >= 1.0 or len(trips) <= 1 or use_fw
+        # FW line search requires accurate (full-demand) gradients.
+        # Sampled AON volumes are too noisy for reliable bisection.
+        # FW always uses full-pass; the trip-count guard is in run_stream().
+        natural_full_pass = sample_rate >= 1.0 or len(trips) <= 1
+        if use_fw and not natural_full_pass:
+            logger.info(
+                "FW: forcing full-pass routing (%d trips per iteration)",
+                len(trips),
+            )
+        full_pass = natural_full_pass or use_fw
         prev_volume = initial_volume.copy()
 
         for m in range(1, max_rounds + 1):
@@ -569,6 +575,17 @@ class TrafficAssignmentSolver:
         sampled_mode = sample_rate > 0.0 and max_rounds > 0
         n_records = len(all_trips)
         total_demand = sum(t.volume for t in all_trips)
+
+        # FW requires full-pass routing in convergence — fail fast if
+        # the network is too large for that.
+        _FW_TRIP_LIMIT = 100_000
+        if method == "fw" and sampled_mode and n_records > _FW_TRIP_LIMIT:
+            raise NotImplementedError(
+                f"Frank-Wolfe requires full-pass routing but network has "
+                f"{n_records:,} trip-records (limit {_FW_TRIP_LIMIT:,}). "
+                f"Use method='msa' for large-scale sampled assignment."
+            )
+
         # Unique ODs: count from first time-slice to avoid iterating all records
         load_steps = max(1, round(1.0 / sample_rate)) if sample_rate > 0 else 1
         unique_ods = n_records // load_steps if load_steps > 1 else n_records
