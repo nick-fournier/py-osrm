@@ -1231,10 +1231,12 @@ class MatrixFreeHillClimber:
                 if route_time > 1e-9 else float("inf")
             )
             logger.info(
-                "Load %d/%d: %.0f routes/s speed=%.1f km/h k/kj=%.2f",
+                "Load %d/%d: %s routes in %.1fs (%s routes/s) speed=%.1f km/h k/kj=%.2f",
                 batch.batch_index + 1,
                 planned_load_steps,
-                route_rate,
+                f"{len(batch.trips):,}",
+                route_time,
+                f"{route_rate:,.0f}",
                 mean_speed,
                 max_k_over_kj,
             )
