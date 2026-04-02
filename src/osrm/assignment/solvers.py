@@ -788,6 +788,7 @@ class MatrixFreeHillClimber:
         loop: AssignmentLoop,
         state: NetworkState,
         trips: list,
+        initial_volume: np.ndarray,
         state_patch,
         progress_callback,
         sample_rate: float,
@@ -804,6 +805,7 @@ class MatrixFreeHillClimber:
         """
         msa_results: List[MSAIterationResult] = []
         full_pass = sample_rate >= 1.0 or len(trips) <= 1
+        prev_volume = initial_volume.copy()
 
         for m in range(1, max_rounds + 1):
             iter_start = time.monotonic()
@@ -819,7 +821,7 @@ class MatrixFreeHillClimber:
                 route_trips = random.sample(trips, n_sample)
 
             t_route = time.monotonic()
-            aon_density, _aon_volume, aon_tstt, _routed_paths = (
+            aon_density, aon_volume, aon_tstt, _routed_paths = (
                 loop._route_and_accumulate_with_paths(engine, route_trips, state)
             )
             route_time = time.monotonic() - t_route
@@ -828,14 +830,29 @@ class MatrixFreeHillClimber:
             if len(aon_density) < state.n_edges:
                 pad = state.n_edges - len(aon_density)
                 aon_density = np.append(aon_density, np.zeros(pad))
+                aon_volume = np.append(aon_volume, np.zeros(pad))
             if len(prev_density) < state.n_edges:
                 pad = state.n_edges - len(prev_density)
                 prev_density = np.append(prev_density, np.zeros(pad))
 
-            # Scale up sampled density to full-demand estimate
+            # Scale up sampled density/volume to full-demand estimate
             if not full_pass:
                 aon_density = aon_density / sample_rate
+                aon_volume = aon_volume / sample_rate
                 aon_tstt = aon_tstt / sample_rate
+
+            # Compute Wardrop gap on FROZEN state before blending.
+            # Both numerator and denominator use the same VDF link costs,
+            # eliminating OSRM quantization bias.  Uses demand-based volumes
+            # (not MFD throughput) so gap is always ≥ 0.
+            if len(prev_volume) < state.n_edges:
+                prev_volume = np.append(
+                    prev_volume,
+                    np.zeros(state.n_edges - len(prev_volume)),
+                )
+            relative_gap = loop._compute_relative_gap(
+                state, prev_volume, aon_volume,
+            )
 
             # 3. MSA blend: α = 1/(m+1), so m=1 → α=0.5
             alpha = 1.0 / (m + 1)
@@ -844,6 +861,7 @@ class MatrixFreeHillClimber:
                 0.0,
                 state.jam_density,
             )
+            prev_volume = (1.0 - alpha) * prev_volume + alpha * aon_volume
 
             # 4. Update derived quantities
             if state_patch:
@@ -862,15 +880,10 @@ class MatrixFreeHillClimber:
                 / max(np.linalg.norm(prev_density), 1e-9)
             )
 
-            # Link-level TSTT: Σ flow_vph × (length_m / speed_m/s)
-            speed_ms = np.maximum(state.speed_kmh / 3.6, 0.001)
-            link_tt_s = state.length_m / speed_ms
-            link_tstt = float(np.sum(state.flow_vph * link_tt_s))
-
-            # Relative gap: (link_tstt - aon_tstt) / link_tstt
-            relative_gap: Optional[float] = None
-            if link_tstt > 0:
-                relative_gap = (link_tstt - aon_tstt) / link_tstt
+            # Post-blend link-level TSTT for tracking
+            post_speed_ms = np.maximum(state.speed_kmh / 3.6, 0.001)
+            post_link_tt_s = state.length_m / post_speed_ms
+            link_tstt = float(np.sum(state.flow_vph * post_link_tt_s))
 
             max_k_over_kj = float(
                 np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
@@ -1303,6 +1316,7 @@ class MatrixFreeHillClimber:
         batch_results: List[HillClimberBatchResult] = []
         od_ledger = ODLedger()
         running_network_tstt = 0.0
+        accumulated_volume = np.zeros(0, dtype=np.float64)
         for batch in snapped_stream.iter_time_slices(
             bin_width_s=self.config.bin_width_s,
             max_batch_size=max_batch_size,
@@ -1343,6 +1357,12 @@ class MatrixFreeHillClimber:
                 0.0,
                 state.jam_density,
             )
+            if len(accumulated_volume) < state.n_edges:
+                accumulated_volume = np.append(
+                    accumulated_volume,
+                    np.zeros(state.n_edges - len(accumulated_volume)),
+                )
+            accumulated_volume += batch_volume
             loop._update_state(state)
 
             t_cust = time.monotonic()
@@ -1406,6 +1426,7 @@ class MatrixFreeHillClimber:
                 loop=loop,
                 state=state,
                 trips=snapped_trips,
+                initial_volume=accumulated_volume,
                 state_patch=state_patch,
                 progress_callback=progress_callback,
                 sample_rate=sample_rate,

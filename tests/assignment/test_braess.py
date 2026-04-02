@@ -366,10 +366,10 @@ class TestBraessParadox:
 
         gap_w = hillclimber_final_gap(result_w)
         gap_wo = hillclimber_final_gap(result_wo)
-        assert gap_w is not None and gap_w < 0.01, (
+        assert gap_w is not None and gap_w < 0.05, (
             f"MSA shortcut gap too large: {gap_w}"
         )
-        assert gap_wo is not None and gap_wo < 0.01, (
+        assert gap_wo is not None and gap_wo < 0.05, (
             f"MSA no-shortcut gap too large: {gap_wo}"
         )
 

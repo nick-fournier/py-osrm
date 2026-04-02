@@ -258,6 +258,12 @@ def test_matrix_free_solver_runs_msa(monkeypatch):
             state_obj.speed_kmh = np.maximum(state_obj.freeflow_kmh - state_obj.density_vpkm, 1.0)
             state_obj.flow_vph = state_obj.density_vpkm * state_obj.speed_kmh
 
+        def _compute_relative_gap(self, state_obj, blended_vol, aon_vol):
+            link_cost = state_obj.length_m * 3.6 / np.maximum(state_obj.speed_kmh, 1.0)
+            num = float(np.sum(blended_vol * link_cost))
+            den = float(np.sum(aon_vol * link_cost))
+            return num / den - 1.0 if den > 0 else 0.0
+
     solver._make_loop = lambda: FakeLoop()  # type: ignore[method-assign]
     monkeypatch.setattr(
         "osrm.assignment.solvers.osrm_module.customize",
