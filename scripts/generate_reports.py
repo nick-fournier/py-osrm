@@ -11,7 +11,7 @@ Usage::
     uv run python scripts/generate_reports.py --max-iter 30            # more iterations
 
 Scenes:
-    vdf, braess, sioux, anaheim, chi-sketch, chi-region
+    vdf, braess, method-comparison, sioux, anaheim, chi-sketch, chi-region
 
 Methods:
     msa      MSA convergence (default)
@@ -46,6 +46,10 @@ def _scene_vdf(**_kw):
 def _scene_braess(**_kw):
     from tests.assignment.test_braess import generate_braess_report
     return generate_braess_report(tempfile.mkdtemp())
+
+def _scene_method_comparison(*, max_iter=20, **_kw):
+    from tests.assignment.test_method_comparison import generate_method_comparison_report
+    return generate_method_comparison_report(tempfile.mkdtemp(), max_rounds=max_iter)
 
 def _scene_sioux_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_sioux_falls import generate_sioux_falls_report
@@ -88,6 +92,9 @@ SCENES = {
     },
     "braess": {
         "msa": ("Braess Paradox Validation", _scene_braess),
+    },
+    "method-comparison": {
+        "msa": ("MSA vs FW Method Comparison", _scene_method_comparison),
     },
     "sioux": {
         "msa": ("Sioux Falls MSA", _scene_sioux_msa),

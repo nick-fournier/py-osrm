@@ -537,10 +537,12 @@ def generate_braess_report(
     demand: float = 2500.0,
     max_iter: int = 100,
 ) -> Path:
-    """Run unified Braess validation and generate an interactive HTML report.
+    """Run Braess paradox validation and generate an interactive HTML report.
 
-    Combines matrix-based equilibrium (MSA & Frank-Wolfe) and matrix-free
-    hill-climber (greedy + sampled path-set refinement) on a 4-node diamond network.
+    Demonstrates the Braess paradox on a 4-node diamond network using MSA
+    equilibrium (matrix-based) and matrix-free hill-climber (greedy + MSA
+    refinement).  The paradox is confirmed when TSTT *increases* after adding
+    a shortcut link.
 
     Parameters
     ----------
@@ -551,7 +553,7 @@ def generate_braess_report(
     demand : float
         Demand volume (vehicles per period).
     max_iter : int
-        Assignment iterations for matrix methods.
+        Assignment iterations for MSA.
 
     Returns
     -------
@@ -574,12 +576,6 @@ def generate_braess_report(
     base_without, meta_without = _prepare_network(tmp_path / "msa", with_shortcut=False)
     result_with = _run_assignment(base_with, meta_with, demand, max_iter)
     result_without = _run_assignment(base_without, meta_without, demand, max_iter)
-
-    # Matrix Frank-Wolfe
-    base_fw_w, meta_fw_w = _prepare_network(tmp_path / "fw", with_shortcut=True)
-    base_fw_wo, meta_fw_wo = _prepare_network(tmp_path / "fw", with_shortcut=False)
-    result_fw_with = _run_assignment(base_fw_w, meta_fw_w, demand, max_iter, method="fw")
-    result_fw_without = _run_assignment(base_fw_wo, meta_fw_wo, demand, max_iter, method="fw")
 
     # HC sampled path-set refinement
     base_hc_w, meta_hc_w = _prepare_network(tmp_path / "hc", with_shortcut=True)
@@ -630,10 +626,6 @@ def generate_braess_report(
     rr_tstt_w = hillclimber_final_tstt(case_with.result)
     rr_tstt_wo = hillclimber_final_tstt(case_without.result)
     rr_pct = (rr_tstt_w / rr_tstt_wo - 1) * 100 if rr_tstt_wo else 0.0
-
-    fw_tstt_w = result_fw_with.iteration_log[-1].tstt
-    fw_tstt_wo = result_fw_without.iteration_log[-1].tstt
-    fw_pct = (fw_tstt_w / fw_tstt_wo - 1) * 100 if fw_tstt_wo else 0.0
 
     n_rounds_w = len(case_with.result.msa_results)
     rr_gap_w = hillclimber_final_gap(case_with.result)
@@ -757,20 +749,19 @@ def generate_braess_report(
     All main links ~10 km.</p>""")
 
     # ===================================================================
-    # 2. Link State Comparison (4-column)
+    # 2. Link State Comparison
     # ===================================================================
     state_scenarios = [
         (result_without.network_state, "Without (MSA)"),
         (result_with.network_state, "With (MSA)"),
-        (result_fw_with.network_state, "With (FW)"),
-        (case_with.result.network_state, "With (HC Sampled)"),
+        (case_with.result.network_state, "With (HC + MSA)"),
     ]
 
     figs.append(None)
     descriptions.append(
         """<h2>Link State Comparison</h2>
-        <p>Four scenarios compared: MSA without and with shortcut,
-        FW with shortcut, and HC Sampled with shortcut.
+        <p>Three scenarios: MSA without shortcut, MSA with shortcut,
+        and hill-climber with MSA refinement (with shortcut).
         Density (k, veh/km), speed (v, km/h), flow (q = k&times;v, veh/hr), and travel
         time (t = L/v) at the converged state.
         <span style="color:#F44336;font-weight:600;">Red density</span>
@@ -783,33 +774,27 @@ def generate_braess_report(
     )
 
     # ===================================================================
-    # 3. Route Travel Times (4-column)
+    # 3. Route Travel Times
     # ===================================================================
     figs.append(None)
     descriptions.append(
         """<h2>Route Travel Times</h2>
         <p>Total travel time for each OD route, summed from link-level t = L/v.
         At user equilibrium (Wardrop), all <i>used</i> routes between an OD pair
-        should have equal travel time.  Comparing MSA, FW, and HC Sampled
+        should have equal travel time.  Comparing MSA and HC + MSA
         convergence toward this condition.</p>"""
         + _braess_route_tt_table(state_scenarios)
     )
 
     # ===================================================================
-    # 4. TSTT Comparison (all methods)
+    # 4. TSTT Comparison
     # ===================================================================
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
-        name="MSA",
+        name="MSA (matrix)",
         x=["Without Shortcut", "With Shortcut"],
         y=[tstt_without_vals[-1], tstt_with_vals[-1]],
         marker_color="#64B5F6",
-    ))
-    fig_bar.add_trace(go.Bar(
-        name="FW",
-        x=["Without Shortcut", "With Shortcut"],
-        y=[fw_tstt_wo, fw_tstt_w],
-        marker_color="#1565C0",
     ))
     fig_bar.add_trace(go.Bar(
         name="HC Greedy",
@@ -818,7 +803,7 @@ def generate_braess_report(
         marker_color="#FFB74D",
     ))
     fig_bar.add_trace(go.Bar(
-        name="HC Sampled",
+        name="HC + MSA",
         x=["Without Shortcut", "With Shortcut"],
         y=[rr_tstt_wo, rr_tstt_w],
         marker_color="#E65100",
@@ -833,11 +818,11 @@ def generate_braess_report(
     figs.append(fig_bar)
     descriptions.append(
         "<h2>TSTT Comparison</h2>"
-        "<p>Total system travel time across all methods. At equilibrium (MSA, FW), "
+        "<p>Total system travel time across methods. At equilibrium (MSA), "
         "the Braess paradox is confirmed: adding the shortcut <i>increases</i> TSTT "
-        f"by <b>+{pct:.1f}%</b> (MSA) / <b>+{fw_pct:.1f}%</b> (FW). Under HC Greedy loading, the "
-        f"shortcut <i>reduces</i> TSTT by <b>{abs(hc_pct):.1f}%</b>. After sampled path-set refinement, "
-        f"HC Sampled converges toward equilibrium and the paradox re-emerges at <b>{rr_pct:+.1f}%</b>.</p>"
+        f"by <b>+{pct:.1f}%</b>. Under HC Greedy loading, the "
+        f"shortcut <i>reduces</i> TSTT by <b>{abs(hc_pct):.1f}%</b>. After MSA refinement, "
+        f"HC + MSA converges toward equilibrium and the paradox re-emerges at <b>{rr_pct:+.1f}%</b>.</p>"
     )
 
     # ===================================================================
@@ -846,13 +831,14 @@ def generate_braess_report(
     _add_mfd_section(figs, descriptions, case_with.result.network_state, 1.0)
 
     # ===================================================================
-    # 6. Matrix Convergence
+    # 6. MSA Convergence
     # ===================================================================
     figs.append(None)
     descriptions.append(
-        "<h2>Matrix Convergence</h2>"
-        "<p>Convergence diagnostics for matrix-based equilibrium methods (MSA and Frank-Wolfe). "
-        "Both use all-or-nothing (AON) routing each iteration with density blending toward equilibrium.</p>"
+        "<h2>MSA Convergence</h2>"
+        "<p>Convergence diagnostics for matrix-based MSA equilibrium. "
+        "Each iteration routes all demand on frozen costs, then blends "
+        "auxiliary loading with current state (&alpha; = 1/n).</p>"
     )
 
     # -------------------------------------------------------------------
@@ -899,126 +885,15 @@ def generate_braess_report(
         f"{paradox_msg}</p>"
     )
 
-    # -------------------------------------------------------------------
-    # 6b. Wardrop Gap: MSA vs Frank-Wolfe
-    # -------------------------------------------------------------------
-    gap_with = [r.relative_gap for r in result_with.iteration_log]
-    gap_without = [r.relative_gap for r in result_without.iteration_log]
-    gap_fw_w = [r.relative_gap for r in result_fw_with.iteration_log]
-    gap_fw_wo = [r.relative_gap for r in result_fw_without.iteration_log]
-    iters_fw_w = [r.iteration for r in result_fw_with.iteration_log]
-    iters_fw_wo = [r.iteration for r in result_fw_without.iteration_log]
-
-    def _moving_max(gaps, window=5):
-        """Rolling max of gap values (envelope of worst-case per window)."""
-        arr = np.array(gaps)
-        out = np.empty_like(arr)
-        for i in range(len(arr)):
-            start = max(0, i - window + 1)
-            out[i] = arr[start:i+1].max()
-        return out.tolist()
-
-    fig_gap = go.Figure()
-    fig_gap.add_trace(go.Scatter(
-        x=iters_w, y=[abs(g) if g != 0 else None for g in gap_with],
-        mode="markers", name="MSA with shortcut (raw)",
-        marker=dict(color="#F44336", size=4, opacity=0.3),
-    ))
-    fig_gap.add_trace(go.Scatter(
-        x=iters_wo, y=[abs(g) if g != 0 else None for g in gap_without],
-        mode="markers", name="MSA without shortcut (raw)",
-        marker=dict(color="#2196F3", size=4, opacity=0.3),
-    ))
-    fig_gap.add_trace(go.Scatter(
-        x=iters_w, y=_moving_max([abs(g) for g in gap_with], window=5),
-        mode="lines", name="MSA with shortcut (envelope)",
-        line=dict(color="#F44336", width=1.5, dash="dash"),
-    ))
-    fig_gap.add_trace(go.Scatter(
-        x=iters_wo, y=_moving_max([abs(g) for g in gap_without], window=5),
-        mode="lines", name="MSA without shortcut (envelope)",
-        line=dict(color="#2196F3", width=1.5, dash="dash"),
-    ))
-    fig_gap.add_trace(go.Scatter(
-        x=iters_fw_w, y=[abs(g) if g != 0 else None for g in gap_fw_w],
-        mode="lines+markers", name="FW with shortcut",
-        line=dict(color="#D32F2F", width=2.5),
-        marker=dict(size=5),
-    ))
-    fig_gap.add_trace(go.Scatter(
-        x=iters_fw_wo, y=[abs(g) if g != 0 else None for g in gap_fw_wo],
-        mode="lines+markers", name="FW without shortcut",
-        line=dict(color="#1565C0", width=2.5),
-        marker=dict(size=5),
-    ))
-    fig_gap.update_layout(
-        title="Wardrop Relative Gap: MSA vs Frank-Wolfe",
-        xaxis_title="Iteration", yaxis_title="|Relative Gap|",
-        yaxis_type="log",
-        template="plotly_white",
-        xaxis=dict(fixedrange=True),
-        yaxis=dict(fixedrange=True, dtick=1, tickformat=".0e"),
-    )
-    figs.append(fig_gap)
-
-    fw_final_gap_w = result_fw_with.iteration_log[-1].relative_gap
-    fw_final_gap_wo = result_fw_without.iteration_log[-1].relative_gap
-    fw_gap_w_fmt = f"{fw_final_gap_w:.6f}"
-    fw_gap_wo_fmt = f"{fw_final_gap_wo:.6f}"
-    descriptions.append(
-        "<h3>Wardrop Gap: MSA vs Frank-Wolfe</h3>"
-        "<p>MSA (dashed envelopes, faint dots) vs Frank-Wolfe (solid lines). "
-        "FW uses Beckmann line search to find the optimal step size each iteration, "
-        "eliminating the bang-bang oscillation inherent to MSA on small networks. "
-        f"FW final gap: with shortcut = {fw_gap_w_fmt}, without = {fw_gap_wo_fmt}.</p>"
-    )
-
-    # -------------------------------------------------------------------
-    # 6c. Frank-Wolfe Step Size
-    # -------------------------------------------------------------------
-    step_sizes_w = [r.step_size for r in result_fw_with.iteration_log]
-    step_sizes_wo = [r.step_size for r in result_fw_without.iteration_log]
-
-    fig_step = go.Figure()
-    fig_step.add_trace(go.Scatter(
-        x=iters_fw_w, y=step_sizes_w, mode="lines+markers",
-        name="With shortcut", line=dict(color="#F44336", width=2),
-        marker=dict(size=5),
-    ))
-    fig_step.add_trace(go.Scatter(
-        x=iters_fw_wo, y=step_sizes_wo, mode="lines+markers",
-        name="Without shortcut", line=dict(color="#2196F3", width=2),
-        marker=dict(size=5),
-    ))
-    msa_steps = [1.0 / n for n in range(1, max_iter + 1)]
-    fig_step.add_trace(go.Scatter(
-        x=list(range(1, max_iter + 1)), y=msa_steps, mode="lines",
-        name="MSA (1/n)", line=dict(color="#999", width=1, dash="dot"),
-    ))
-    fig_step.update_layout(
-        title="Frank-Wolfe Step Size per Iteration",
-        xaxis_title="Iteration", yaxis_title="Step Size (&alpha;)",
-        template="plotly_white",
-        xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True, range=[0, 1.05]),
-    )
-    figs.append(fig_step)
-    descriptions.append(
-        "<h3>Frank-Wolfe Step Size</h3>"
-        "<p>Optimal step size &alpha;* from the Beckmann line search each iteration. "
-        "Dotted grey = MSA fixed schedule (1/n). Early iterations take large steps; "
-        "as equilibrium is approached, FW takes progressively smaller steps &mdash; "
-        "unlike MSA which follows a rigid 1/n schedule regardless of the objective landscape.</p>"
-    )
-
     # ===================================================================
     # 7. Hill-Climber Convergence
     # ===================================================================
     figs.append(None)
     descriptions.append(
         "<h2>Hill-Climber Convergence</h2>"
-        "<p>Convergence diagnostics for the matrix-free hill-climber. Greedy loading uses "
-        "load steps derived from sample rate, then refinement uses sampled path-set rounds "
-        "that rebalance known OD paths and only discover new paths when needed.</p>"
+        "<p>Convergence diagnostics for the matrix-free hill-climber. Greedy loading "
+        "builds an initial congested state, then MSA refinement iterates toward "
+        "equilibrium using all-or-nothing auxiliary loading.</p>"
     )
 
     # -------------------------------------------------------------------
@@ -1137,16 +1012,14 @@ def generate_braess_report(
     _write_combined_report(
         title="Braess Paradox Validation",
         intro=(
-            "<p>Unified Braess paradox validation on a 4-node diamond network, comparing "
-            "matrix-based equilibrium (MSA, Frank-Wolfe) and matrix-free hill-climber "
-            "(HC Greedy, HC Sampled).</p>"
+            "<p>Braess paradox validation on a 4-node diamond network using "
+            "MSA equilibrium and matrix-free hill-climber (greedy + MSA refinement).</p>"
             f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.  "
-            f"FW: Beckmann line search, {max_iter} iterations.  "
             f"HC: {case_with.load_steps} greedy load step(s) (sample rate 10%), "
-            "up to 10 sampled path-set rounds, gap &lt; 0.001.</p>"
-            f"<p><b>Key finding:</b> MSA and FW confirm the Braess paradox (+{pct:.1f}%). "
-            f"HC Greedy does <i>not</i> reproduce it ({hc_pct:+.1f}%). After sampled path-set refinement, "
-            f"HC Sampled converges to approximate equilibrium ({rr_pct:+.1f}%).</p>"
+            "up to 10 MSA refinement rounds, gap &lt; 0.001.</p>"
+            f"<p><b>Key finding:</b> MSA confirms the Braess paradox (+{pct:.1f}%). "
+            f"HC Greedy does <i>not</i> reproduce it ({hc_pct:+.1f}%). After MSA refinement, "
+            f"HC + MSA converges to approximate equilibrium ({rr_pct:+.1f}%).</p>"
         ),
         figures=figs,
         descriptions=descriptions,
