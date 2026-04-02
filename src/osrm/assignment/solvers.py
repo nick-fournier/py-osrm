@@ -872,7 +872,7 @@ class MatrixFreeHillClimber:
                 max_k_over_kj = float(
                     np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
                 )
-                mean_speed = float(np.mean(state.speed_kmh))
+                mean_speed = float(np.median(state.speed_kmh))
                 network_tstt = self._network_tstt_from_od_ledger(od_ledger, state)
                 round_result = RefinementRoundResult(
                     round_index=round_idx + 1,
@@ -984,7 +984,7 @@ class MatrixFreeHillClimber:
             max_k_over_kj = float(
                 np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
             )
-            mean_speed = float(np.mean(state.speed_kmh))
+            mean_speed = float(np.median(state.speed_kmh))
             worst_score = float(selected_meta[0][0]) if selected_meta else 0.0
             round_result = RefinementRoundResult(
                 round_index=round_idx + 1,
@@ -1007,23 +1007,27 @@ class MatrixFreeHillClimber:
             )
             if improved:
                 logger.info(
-                    "R%d: sample=%d updated=%d gap=%s TSTT=%.0f speed=%.1f km/h %.1fs",
+                    u"R%d: sample=%d updated=%d gap=%s TSTT=%.0f v\u0305=%.1f km/h k/kj=%.2f (max %.2f) %.1fs",
                     round_result.round_index,
                     round_result.sampled_pairs,
                     round_result.accepted_updates,
                     gap_str,
                     round_result.network_tstt,
                     round_result.mean_speed_kmh,
+                    float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9))),
+                    round_result.max_k_over_kj,
                     round_result.round_time_s,
                 )
             else:
                 logger.info(
-                    "R%d rejected: sample=%d gap=%s TSTT=%.0f speed=%.1f km/h %.1fs",
+                    u"R%d rejected: sample=%d gap=%s TSTT=%.0f v\u0305=%.1f km/h k/kj=%.2f (max %.2f) %.1fs",
                     round_result.round_index,
                     round_result.sampled_pairs,
                     gap_str,
                     round_result.network_tstt,
                     round_result.mean_speed_kmh,
+                    float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9))),
+                    round_result.max_k_over_kj,
                     round_result.round_time_s,
                 )
 
@@ -1214,7 +1218,7 @@ class MatrixFreeHillClimber:
 
             max_k_over_kj = float(np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9)))
             median_k_over_kj = float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9)))
-            mean_speed = float(np.mean(state.speed_kmh))
+            median_speed = float(np.median(state.speed_kmh))
             batch_result = HillClimberBatchResult(
                 batch_index=batch.batch_index,
                 departure_bin=batch.departure_bin,
@@ -1225,7 +1229,7 @@ class MatrixFreeHillClimber:
                 customize_time_s=customize_time,
                 engine_time_s=engine_time,
                 max_k_over_kj=max_k_over_kj,
-                mean_speed_kmh=mean_speed,
+                mean_speed_kmh=median_speed,
             )
             batch_results.append(batch_result)
 
@@ -1235,15 +1239,15 @@ class MatrixFreeHillClimber:
             )
             logger.info(
                 "Load %d/%d: %s routes in %.1fs (%s routes/s) "
-                "speed=%.1f km/h k/kj=%.2f (med %.2f) ledger=%.1fs",
+                u"v\u0305=%.1f km/h k/kj=%.2f (max %.2f) ledger=%.1fs",
                 batch.batch_index + 1,
                 planned_load_steps,
                 f"{len(batch.trips):,}",
                 route_time,
                 f"{route_rate:,.0f}",
-                mean_speed,
-                max_k_over_kj,
+                median_speed,
                 median_k_over_kj,
+                max_k_over_kj,
                 ledger_time,
             )
 
