@@ -159,6 +159,64 @@ def vdf_flow_density(
     return _save_or_show(fig, path)
 
 
+    return _save_or_show(fig, path)
+
+
+def vdf_speed_flow(
+    v_f: float = 60.0,
+    k_j: float = 150.0,
+    vdf: BiParabolicVDF | None = None,
+    path: Optional[str] = None,
+) -> go.Figure:
+    """Plot the speed–flow relationship (backward-bending curve).
+
+    This is the parametric curve {q(k), v(k)} as k sweeps from 0 to k_j.
+    The characteristic backward bend shows that in the congested regime,
+    both speed and flow decrease — the hallmark of traffic breakdown.
+    """
+    vdf = vdf or BiParabolicVDF()
+    k_c = vdf.kc_ratio * k_j
+    q_c = v_f * k_c / 2.0
+    v_c = v_f / 2.0
+
+    k = np.linspace(0, k_j, 500)
+    v_f_arr = np.full_like(k, v_f)
+    k_j_arr = np.full_like(k, k_j)
+    v = vdf.density_to_speed(k, v_f_arr, k_j_arr)
+    q = vdf.density_to_flow(k, v_f_arr, k_j_arr)
+
+    mask_unc = k <= k_c
+    mask_con = k > k_c
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=q[mask_unc], y=v[mask_unc],
+        mode="lines", name="Uncongested",
+        line=dict(color="#2196F3", width=3),
+    ))
+    fig.add_trace(go.Scatter(
+        x=q[mask_con], y=v[mask_con],
+        mode="lines", name="Congested",
+        line=dict(color="#F44336", width=3),
+    ))
+    fig.add_trace(go.Scatter(
+        x=[q_c], y=[v_c],
+        mode="markers+text", name=f"Capacity (q_c={q_c:.0f}, v_c={v_c:.0f})",
+        marker=dict(size=12, color="#FF9800", symbol="diamond"),
+        text=[f"q_c={q_c:.0f}"],
+        textposition="top left",
+    ))
+
+    fig.update_layout(
+        title=f"Bi-Parabolic Speed–Flow (v_f={v_f}, k_j={k_j})",
+        xaxis_title="Flow q (veh/hr)",
+        yaxis_title="Speed v (km/h)",
+        template="plotly_white",
+        legend=dict(x=0.6, y=0.95),
+    )
+    return _save_or_show(fig, path)
+
+
 def _vdf_near_jam_detail(
     v_f: float = 60.0,
     k_j: float = 150.0,
@@ -411,6 +469,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
     figs = [
         vdf_speed_density(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_flow_density(v_f=v_f, k_j=k_j, vdf=vdf),
+        vdf_speed_flow(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_inverse_mfd(v_f=v_f, k_j=k_j, vdf=vdf),
         _vdf_near_jam_detail(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_inverse_accuracy(v_f=v_f, k_j=k_j, vdf=vdf),
@@ -435,7 +494,18 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         equilibrium assignment — the congested branch represents breakdown conditions
         where adding vehicles reduces throughput.</p>""",
 
-        f"""<h2>3. Inverse MFD: Flow → Density</h2>
+        f"""<h2>3. Speed–Flow Relationship</h2>
+        <p>The characteristic backward-bending speed–flow curve, derived parametrically
+        from {{q(k), v(k)}} as density sweeps from 0 to k<sub>j</sub>. On the
+        <b>uncongested branch</b> (blue), increasing flow reduces speed — the familiar
+        "more cars, slower travel" intuition. At capacity
+        q<sub>c</sub> = {q_c:.0f} veh/hr, speed is v<sub>c</sub> = v<sub>f</sub>/2 = {v_f/2:.0f} km/h.
+        Beyond this point the curve bends backward: on the <b>congested branch</b> (red),
+        <em>both</em> speed and flow decrease — the hallmark of traffic breakdown.
+        This is the relationship most directly observed by highway sensors and
+        loop detectors.</p>""",
+
+        f"""<h2>4. Inverse MFD: Flow → Density</h2>
         <p>The closed-form inversion of the MFD. Given flow $q$, density on each branch is:</p>
         <p><b>Free-flow:</b> &emsp; $k(q) = k_c \\left(1 - \\sqrt{{1 - \\dfrac{{2q}}{{v_f k_c}}}}\\right)$</p>
         <p><b>Congested:</b> &emsp; $k(q) = k_c + (k_j - k_c)\\sqrt{{1 - \\dfrac{{2q}}{{v_f k_c}}}}$</p>
@@ -446,7 +516,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         and the inversion has no real solution, which is why convergence blending
         operates in volume space with a constant-factor density derivation.</p>""",
 
-        f"""<h2>4. Near-Jam Behaviour (k → k<sub>j</sub>)</h2>
+        f"""<h2>5. Near-Jam Behaviour (k → k<sub>j</sub>)</h2>
         <p>This panel zooms into the congested branch near jam density to show the steep
         speed gradient that impacts convergence. At k/k<sub>j</sub> = 0.90, speed is just
         {vdf.density_to_speed(np.array([0.9*k_j]), np.array([v_f]), np.array([k_j]))[0]:.1f} km/h.
@@ -460,7 +530,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         represent virtual queue / spillback — physically impossible density but
         mathematically stable.</p>""",
 
-        """<h2>5. Inverse Round-Trip Accuracy</h2>
+        """<h2>6. Inverse Round-Trip Accuracy</h2>
         <p>A key advantage of this VDF over BPR: the flow-to-density inversion has a
         <b>closed-form solution</b> via the quadratic formula — no Newton solver needed.
         Left panel: q<sub>in</sub> vs q<sub>out</sub> after q → k(q) → q(k) round-trip
@@ -468,7 +538,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         be near machine epsilon (~10<sup>-10</sup>). This confirms the vectorized NumPy
         implementation is numerically exact.</p>""",
 
-        """<h2>6. Speed–Density by Road Class</h2>
+        """<h2>7. Speed–Density by Road Class</h2>
         <p>The bi-parabolic model is "parameter-light" — only v<sub>f</sub> (free-flow speed)
         and k<sub>j</sub> (jam density) are needed per link. k<sub>c</sub> = k<sub>j</sub>/3 is derived,
         not calibrated. This overlay shows how different road classes produce different
