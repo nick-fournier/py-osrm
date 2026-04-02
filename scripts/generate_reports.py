@@ -6,9 +6,9 @@ Usage::
     uv run python scripts/generate_reports.py                          # all default scenes (msa)
     uv run python scripts/generate_reports.py chi-sketch               # MSA (default method)
     uv run python scripts/generate_reports.py chi-sketch --method fw
-    uv run python scripts/generate_reports.py chi-region --method fw
     uv run python scripts/generate_reports.py vdf braess               # multiple scenes
     uv run python scripts/generate_reports.py --method all             # all methods for defaults
+    uv run python scripts/generate_reports.py --max-iter 30            # more iterations
 
 Scenes:
     vdf, braess, sioux, anaheim, chi-sketch, chi-region
@@ -36,50 +36,51 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 
-# ── scene registry ────────────────────────────────────────────────────
-# Each scene maps to {method: (label, callable)}.
-# Scenes that only support one method (vdf, braess) ignore --method.
+# ── scene callables ──────────────────────────────────────────────────
+# Each callable accepts **kw with max_iter passed from CLI.
 
-def _scene_vdf():
+def _scene_vdf(**_kw):
     from osrm.assignment.plots import vdf_theory
     return vdf_theory()
 
-def _scene_braess():
+def _scene_braess(**_kw):
     from tests.assignment.test_braess import generate_braess_report
     return generate_braess_report(tempfile.mkdtemp())
 
-def _scene_sioux_msa():
+def _scene_sioux_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_sioux_falls import generate_sioux_falls_report
-    return generate_sioux_falls_report(tempfile.mkdtemp(), method="msa")
+    return generate_sioux_falls_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
 
-def _scene_sioux_fw():
+def _scene_sioux_fw(*, max_iter=50, **_kw):
     from tests.assignment.test_sioux_falls import generate_sioux_falls_report
-    return generate_sioux_falls_report(tempfile.mkdtemp(), method="fw")
+    return generate_sioux_falls_report(tempfile.mkdtemp(), method="fw", max_iter=max_iter)
 
-def _scene_anaheim_msa():
+def _scene_anaheim_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_anaheim import generate_anaheim_report
-    return generate_anaheim_report(tempfile.mkdtemp(), method="msa")
+    return generate_anaheim_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
 
-def _scene_anaheim_fw():
+def _scene_anaheim_fw(*, max_iter=50, **_kw):
     from tests.assignment.test_anaheim import generate_anaheim_report
-    return generate_anaheim_report(tempfile.mkdtemp(), method="fw")
+    return generate_anaheim_report(tempfile.mkdtemp(), method="fw", max_iter=max_iter)
 
-def _scene_chi_sketch_msa():
+def _scene_chi_sketch_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_sketch import generate_chicago_report
-    return generate_chicago_report(tempfile.mkdtemp(), method="msa")
+    return generate_chicago_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
 
-def _scene_chi_sketch_fw():
+def _scene_chi_sketch_fw(*, max_iter=50, **_kw):
     from tests.assignment.test_chicago_sketch import generate_chicago_report
-    return generate_chicago_report(tempfile.mkdtemp(), method="fw")
+    return generate_chicago_report(tempfile.mkdtemp(), method="fw", max_iter=max_iter)
 
-def _scene_chi_region_msa():
+def _scene_chi_region_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_regional import generate_regional_report
-    return generate_regional_report(tempfile.mkdtemp(), method="msa")
+    return generate_regional_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
 
-def _scene_chi_region_fw():
+def _scene_chi_region_fw(*, max_iter=50, **_kw):
     from tests.assignment.test_chicago_regional import generate_regional_report
-    return generate_regional_report(tempfile.mkdtemp(), method="fw")
+    return generate_regional_report(tempfile.mkdtemp(), method="fw", max_iter=max_iter)
 
+
+# ── scene registry ────────────────────────────────────────────────────
 
 SCENES = {
     "vdf": {
@@ -122,6 +123,10 @@ def main() -> None:
         "--method", default="msa", choices=["msa", "fw", "all"],
         help="Assignment method (default: msa)",
     )
+    parser.add_argument(
+        "--max-iter", type=int, default=20,
+        help="Maximum convergence iterations for MSA or FW (default: 20)",
+    )
     args = parser.parse_args()
 
     for scene in args.scenes:
@@ -147,9 +152,9 @@ def main() -> None:
                     logger.warning("%s has no '%s' method, skipping", scene, method)
                 continue
             label, fn = SCENES[scene][method]
-            logger.info("Generating %s...", label)
+            logger.info("Generating %s (%d iters)...", label, args.max_iter)
             t0 = time.perf_counter()
-            path = fn()
+            path = fn(max_iter=args.max_iter)
             elapsed = time.perf_counter() - t0
             logger.info(
                 "  → %s (%d KB, %.1fs)",

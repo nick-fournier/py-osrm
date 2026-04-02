@@ -236,6 +236,7 @@ def generate_sioux_falls_report(
     tmp_path: str | Path,
     output_path: str = "plots/sioux_falls_validation.html",
     max_iter: int = 50,
+    max_rounds: int = 20,
     method: str = "msa",
 ) -> Path:
     """Generate Sioux Falls validation report.
@@ -245,6 +246,10 @@ def generate_sioux_falls_report(
     method : str
         ``"msa"`` (default) uses greedy loading + MSA convergence.
         ``"fw"`` uses Frank-Wolfe via AssignmentLoop.
+    max_iter : int
+        Max iterations for FW convergence.
+    max_rounds : int
+        Max iterations for MSA convergence.
     """
     if method == "fw":
         from osrm.assignment.plots import generate_validation_report
@@ -277,7 +282,7 @@ def generate_sioux_falls_report(
         bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_sioux_falls_lanes(state, meta),
         sample_rate=0.10,
-        max_rounds=10,
+        max_rounds=max_rounds,
         intro_html=(
             "<p>MSA validation runs at <b>30% Sioux Falls demand</b> "
             "with 10 greedy load steps and MSA convergence.</p>"

@@ -147,6 +147,7 @@ class MSAIterationResult:
     relative_gap: Optional[float]
     state_change_norm: float
     max_k_over_kj: float
+    median_k_over_kj: float
     mean_speed_kmh: float
     route_time_s: float
     customize_time_s: float
@@ -168,6 +169,7 @@ class HillClimberBatchResult:
     customize_time_s: float
     engine_time_s: float
     max_k_over_kj: float
+    median_k_over_kj: float
     mean_speed_kmh: float
 
 
@@ -197,6 +199,7 @@ class HillClimberResult:
             "customize_time_s": [r.customize_time_s for r in self.batch_results],
             "engine_time_s": [r.engine_time_s for r in self.batch_results],
             "max_k_over_kj": [r.max_k_over_kj for r in self.batch_results],
+            "median_k_over_kj": [r.median_k_over_kj for r in self.batch_results],
             "mean_speed_kmh": [r.mean_speed_kmh for r in self.batch_results],
         }
 
@@ -407,6 +410,8 @@ class TrafficAssignmentSolver:
             max_k_over_kj = float(
                 np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9))
             )
+            k_over_kj = state.density_vpkm / np.maximum(state.jam_density, 1e-9)
+            median_k_over_kj = float(np.median(k_over_kj[k_over_kj > 0])) if np.any(k_over_kj > 0) else 0.0
             mean_speed = float(np.median(state.speed_kmh))
             iter_time = time.monotonic() - iter_start
 
@@ -418,6 +423,7 @@ class TrafficAssignmentSolver:
                 relative_gap=relative_gap,
                 state_change_norm=state_change_norm,
                 max_k_over_kj=max_k_over_kj,
+                median_k_over_kj=median_k_over_kj,
                 mean_speed_kmh=mean_speed,
                 route_time_s=route_time,
                 customize_time_s=customize_time,
@@ -648,6 +654,7 @@ class TrafficAssignmentSolver:
                 customize_time_s=customize_time,
                 engine_time_s=engine_time,
                 max_k_over_kj=max_k_over_kj,
+                median_k_over_kj=median_k_over_kj,
                 mean_speed_kmh=median_speed,
             )
             batch_results.append(batch_result)

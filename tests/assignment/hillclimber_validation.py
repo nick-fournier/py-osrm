@@ -308,7 +308,8 @@ def _convergence_series(result: object) -> dict:
             "network_tstt": [r.link_tstt for r in msa_results],
             "state_change_norm": [r.state_change_norm for r in msa_results],
             "speeds": [r.mean_speed_kmh for r in msa_results],
-            "k": [r.max_k_over_kj for r in msa_results],
+            "max_k": [r.max_k_over_kj for r in msa_results],
+            "median_k": [r.median_k_over_kj for r in msa_results],
             "route_times": [r.route_time_s for r in msa_results],
             "customize_times": [r.customize_time_s for r in msa_results],
             "engine_times": [r.engine_time_s for r in msa_results],
@@ -320,7 +321,8 @@ def _convergence_series(result: object) -> dict:
         "network_tstt": [],
         "state_change_norm": [],
         "speeds": [],
-        "k": [],
+        "max_k": [],
+        "median_k": [],
         "route_times": [],
         "customize_times": [],
         "engine_times": [],
@@ -349,9 +351,10 @@ def _add_batch_sections(
     gap_values = [None] * len(greedy_labels) + refinement["gaps"]
 
     fig = go.Figure()
+    # TSTT across both greedy and MSA phases
     fig.add_trace(go.Scatter(
-        x=greedy_labels,
-        y=greedy_tstt,
+        x=convergence_labels,
+        y=convergence_tstt,
         name="TSTT",
         mode="lines+markers",
         line=dict(color="#D32F2F", width=2.5),
@@ -409,18 +412,11 @@ def _add_batch_sections(
     final_tstt = hillclimber_final_tstt(result)
     descriptions.append(
         "<h2>Convergence</h2>"
-        "<p>Network TSTT is shown across greedy loading. "
-        + (
-            "Post-greedy MSA iterations blend all-or-nothing auxiliary loadings "
-            "with diminishing step sizes (α = 1/(m+1)) to converge toward "
-            "user equilibrium. "
-            if refinement["kind"] == "msa"
-            else
-            "Post-greedy refinement "
-            "tracks sampled excess and sampled gap instead of recomputing full-network "
-            "TSTT every round, so regional refinement stays sublinear in ledger size. "
-        )
-        + f"Final TSTT = {final_tstt:,.0f} veh-seconds; final gap = {gap_str}.</p>"
+        "<p>Network TSTT is shown across greedy loading and MSA convergence. "
+        "Post-greedy MSA iterations blend all-or-nothing auxiliary loadings "
+        "with diminishing step sizes (\u03b1 = 1/(m+1)) to converge toward "
+        "user equilibrium. "
+        f"Final TSTT = {final_tstt:,.0f} veh-seconds; final gap = {gap_str}.</p>"
     )
 
     # --- State Evolution: unified load / refinement timeline ---
@@ -428,10 +424,12 @@ def _add_batch_sections(
 
     # Build unified x-axis labels and y-values
     greedy_speeds = [b.mean_speed_kmh for b in result.batch_results]
-    greedy_k = [b.max_k_over_kj for b in result.batch_results]
+    greedy_max_k = [b.max_k_over_kj for b in result.batch_results]
+    greedy_median_k = [b.median_k_over_kj for b in result.batch_results]
     all_labels = greedy_labels + refinement["labels"]
     all_speeds = greedy_speeds + refinement["speeds"]
-    all_k = greedy_k + refinement["k"]
+    all_max_k = greedy_max_k + refinement["max_k"]
+    all_median_k = greedy_median_k + refinement["median_k"]
 
     # Mean speed trace (continuous)
     fig.add_trace(go.Scatter(
@@ -442,14 +440,24 @@ def _add_batch_sections(
         marker=dict(size=7),
         name="Mean speed",
     ))
-    # Max k/kj trace (continuous)
+    # Max k/kj trace
     fig.add_trace(go.Scatter(
         x=all_labels,
-        y=all_k,
+        y=all_max_k,
         mode="lines+markers",
         line=dict(color="#FF9800", width=2.0),
         marker=dict(size=6),
         name="Max k/kj",
+        yaxis="y2",
+    ))
+    # Median k/kj trace (loaded links only)
+    fig.add_trace(go.Scatter(
+        x=all_labels,
+        y=all_median_k,
+        mode="lines+markers",
+        line=dict(color="#FF9800", width=1.5, dash="dash"),
+        marker=dict(size=5),
+        name="Median k/kj (loaded)",
         yaxis="y2",
     ))
 
@@ -464,7 +472,7 @@ def _add_batch_sections(
         title="State Evolution",
         xaxis_title="Step",
         yaxis=dict(title="Mean speed (km/h)"),
-        yaxis2=dict(title="Max k/kj", overlaying="y", side="right"),
+        yaxis2=dict(title="k / k_jam", overlaying="y", side="right"),
         template="plotly_white",
     )
     figs.append(fig)
