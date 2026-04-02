@@ -51,33 +51,33 @@ def _scene_sioux_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_sioux_falls import generate_sioux_falls_report
     return generate_sioux_falls_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
 
-def _scene_sioux_fw(*, max_iter=50, **_kw):
+def _scene_sioux_fw(*, max_iter=20, **_kw):
     from tests.assignment.test_sioux_falls import generate_sioux_falls_report
-    return generate_sioux_falls_report(tempfile.mkdtemp(), method="fw", max_iter=max_iter)
+    return generate_sioux_falls_report(tempfile.mkdtemp(), method="fw", max_rounds=max_iter)
 
 def _scene_anaheim_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_anaheim import generate_anaheim_report
     return generate_anaheim_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
 
-def _scene_anaheim_fw(*, max_iter=50, **_kw):
+def _scene_anaheim_fw(*, max_iter=20, **_kw):
     from tests.assignment.test_anaheim import generate_anaheim_report
-    return generate_anaheim_report(tempfile.mkdtemp(), method="fw", max_iter=max_iter)
+    return generate_anaheim_report(tempfile.mkdtemp(), method="fw", max_rounds=max_iter)
 
 def _scene_chi_sketch_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_sketch import generate_chicago_report
     return generate_chicago_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
 
-def _scene_chi_sketch_fw(*, max_iter=50, **_kw):
+def _scene_chi_sketch_fw(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_sketch import generate_chicago_report
-    return generate_chicago_report(tempfile.mkdtemp(), method="fw", max_iter=max_iter)
+    return generate_chicago_report(tempfile.mkdtemp(), method="fw", max_rounds=max_iter)
 
 def _scene_chi_region_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_regional import generate_regional_report
     return generate_regional_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
 
-def _scene_chi_region_fw(*, max_iter=50, **_kw):
+def _scene_chi_region_fw(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_regional import generate_regional_report
-    return generate_regional_report(tempfile.mkdtemp(), method="fw", max_iter=max_iter)
+    return generate_regional_report(tempfile.mkdtemp(), method="fw", max_rounds=max_iter)
 
 
 # ── scene registry ────────────────────────────────────────────────────

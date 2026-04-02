@@ -185,6 +185,7 @@ def run_hillclimber_case(
     max_rounds: int = 0,
     gap_threshold: float = 0.01,
     assumed_speed_kmh: float | None = None,
+    method: str = "msa",
 ):
     """Run one shared assignment validation case from scenario metadata."""
     logger = logging.getLogger(__name__)
@@ -252,6 +253,7 @@ def run_hillclimber_case(
         sample_rate=sample_rate,
         max_rounds=max_rounds,
         gap_threshold=gap_threshold,
+        method=method,
     )
     return HillClimberValidationCase(
         base_path=run_base,
@@ -474,6 +476,7 @@ def _add_batch_sections(
         yaxis=dict(title="Mean speed (km/h)"),
         yaxis2=dict(title="k / k_jam", overlaying="y", side="right"),
         template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     figs.append(fig)
     refinement_note = ""
@@ -575,6 +578,7 @@ def generate_hillclimber_validation_report(
     max_rounds: int = 0,
     gap_threshold: float = 0.01,
     assumed_speed_kmh: float | None = None,
+    method: str = "msa",
 ) -> Path:
     """Generate a shared assignment validation report for one scenario."""
     tmp_path = Path(tmp_path)
@@ -595,6 +599,7 @@ def generate_hillclimber_validation_report(
         max_rounds=max_rounds,
         gap_threshold=gap_threshold,
         assumed_speed_kmh=assumed_speed_kmh,
+        method=method,
     )
 
     state = case.result.network_state

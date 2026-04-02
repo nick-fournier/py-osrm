@@ -303,7 +303,7 @@ class TrafficAssignmentSolver:
         engine_time = time.monotonic() - t_engine
         return engine, customize_time, engine_time
 
-    def _run_msa_refinement(
+    def _run_convergence(
         self,
         *,
         engine,
@@ -316,13 +316,16 @@ class TrafficAssignmentSolver:
         sample_rate: float,
         max_rounds: int,
         gap_threshold: float,
+        method: str = "msa",
     ) -> Tuple[object, List[MSAIterationResult]]:
-        """Run MSA iterations on link-level density state.
+        """Run convergence iterations on link-level density state.
 
         After greedy warm start, iteratively:
           1. Freeze current density
           2. Route demand on frozen network (all-or-nothing)
-          3. Blend: k = (1-α)k + αk̂  with α = 1/(m+1)
+          3. Blend: k = (1-α)k + αk̂
+             - MSA: α = 1/(m+1)
+             - FW:  α from Beckmann line search
           4. Clip, update VDF, customize, reload
         """
         msa_results: List[MSAIterationResult] = []
@@ -376,8 +379,16 @@ class TrafficAssignmentSolver:
                 state, prev_volume, aon_volume,
             )
 
-            # 3. MSA blend: α = 1/(m+1), so m=1 → α=0.5
-            alpha = 1.0 / (m + 1)
+            # 3. Blend: step size depends on method
+            use_fw = method == "fw"
+            if use_fw:
+                alpha = loop._fw_line_search(
+                    prev_density, aon_density,
+                    prev_volume, aon_volume,
+                    state,
+                )
+            else:
+                alpha = 1.0 / (m + 1)
             state.density_vpkm = np.clip(
                 (1.0 - alpha) * prev_density + alpha * aon_density,
                 0.0,
@@ -436,10 +447,11 @@ class TrafficAssignmentSolver:
             if progress_callback:
                 progress_callback(iter_result)
 
+            method_label = "FW" if use_fw else "MSA"
             logger.info(
-                "MSA iter %d: \u03b1=%.3f \u0394k=%.4f gap=%s TSTT=%.0f "
+                "%s iter %d: \u03b1=%.3f \u0394k=%.4f gap=%s TSTT=%.0f "
                 u"v\u0305=%.1f km/h k/kj=%.2f (%.1fs)",
-                m, alpha, state_change_norm,
+                method_label, m, alpha, state_change_norm,
                 f"{relative_gap:.4f}" if relative_gap is not None else "n/a",
                 link_tstt, mean_speed, max_k_over_kj, iter_time,
             )
@@ -447,15 +459,21 @@ class TrafficAssignmentSolver:
             # Convergence checks
             if relative_gap is not None and 0 <= relative_gap < gap_threshold:
                 logger.info(
-                    "MSA converged at iteration %d: gap=%.6f < %.6f",
-                    m, relative_gap, gap_threshold,
+                    "%s converged at iteration %d: gap=%.6f < %.6f",
+                    method_label, m, relative_gap, gap_threshold,
+                )
+                break
+
+            if use_fw and alpha == 0.0:
+                logger.info(
+                    "FW no improvement at iteration %d (alpha=0), stopping", m,
                 )
                 break
 
             if state_change_norm < 1e-6:
                 logger.info(
-                    "MSA converged at iteration %d: state change norm=%.2e",
-                    m, state_change_norm,
+                    "%s converged at iteration %d: state change norm=%.2e",
+                    method_label, m, state_change_norm,
                 )
                 break
 
@@ -510,8 +528,9 @@ class TrafficAssignmentSolver:
         sample_rate: float = 0.0,
         max_rounds: int = 0,
         gap_threshold: float = 0.01,
+        method: str = "msa",
     ) -> HillClimberResult:
-        """Run a stateful wrapper-side hill-climber over ordered trip batches.
+        """Run assignment over ordered trip batches with convergence.
 
         Trips are grouped by departure-time bin using ``config.bin_width_s``.
         If ``max_batch_size`` is provided, each bin is further micro-batched and
@@ -522,15 +541,15 @@ class TrafficAssignmentSolver:
         3. Recomputes VDF speeds
         4. Re-customizes OSRM and reloads the engine
 
-        After the greedy load, MSA convergence iterations optionally run when
-        ``sample_rate > 0`` and ``max_rounds > 0``. Each MSA iteration:
+        After the greedy load, convergence iterations optionally run when
+        ``sample_rate > 0`` and ``max_rounds > 0``. Each iteration:
 
         1. Freezes the current link-density state
         2. Routes all demand (or a weighted subsample) on the frozen network
         3. Blends auxiliary density with current state: k = (1-α)k + αk̂
+           - MSA: α = 1/(m+1) (diminishing step, guaranteed convergence)
+           - FW:  α from Beckmann line search (optimal step)
         4. Re-customizes and reloads the engine
-
-        The MSA step α = 1/(m+1) guarantees convergence toward user equilibrium.
         """
         started = time.monotonic()
         adapter = stream if isinstance(stream, TripStreamAdapter) else TripStreamAdapter(stream)
@@ -552,14 +571,14 @@ class TrafficAssignmentSolver:
         unique_ods = n_records // load_steps if load_steps > 1 else n_records
         if sampled_mode:
             logger.info(
-                "HC started: %d trip-records (~%d unique ODs, %.0f total demand), "
-                "sample_rate=%.2f, rounds=%d, n_threads=%d",
+                "Started: %d trip-records (~%d unique ODs, %.0f total demand), "
+                "method=%s, sample_rate=%.2f, rounds=%d, n_threads=%d",
                 n_records, unique_ods, total_demand,
-                sample_rate, max_rounds, loop.config.n_threads,
+                method, sample_rate, max_rounds, loop.config.n_threads,
             )
         else:
             logger.info(
-                "HC started: %d trip-records (~%d unique ODs, %.0f total demand), "
+                "Started: %d trip-records (~%d unique ODs, %.0f total demand), "
                 "greedy-only, n_threads=%d",
                 n_records, unique_ods, total_demand, loop.config.n_threads,
             )
@@ -682,7 +701,7 @@ class TrafficAssignmentSolver:
 
         msa_results: List[MSAIterationResult] = []
         if sampled_mode:
-            engine, msa_results = self._run_msa_refinement(
+            engine, msa_results = self._run_convergence(
                 engine=engine,
                 loop=loop,
                 state=state,
@@ -693,17 +712,19 @@ class TrafficAssignmentSolver:
                 sample_rate=sample_rate,
                 max_rounds=max_rounds,
                 gap_threshold=gap_threshold,
+                method=method,
             )
 
         total_time = time.monotonic() - started
+        method_label = method.upper()
         if msa_results:
             logger.info(
-                "HC complete: %d load steps, %d MSA iterations, %.1fs",
-                len(batch_results), len(msa_results), total_time,
+                "Complete: %d load steps, %d %s iterations, %.1fs",
+                len(batch_results), len(msa_results), method_label, total_time,
             )
         else:
             logger.info(
-                "HC complete: %d load steps, greedy only, %.1fs",
+                "Complete: %d load steps, greedy only, %.1fs",
                 len(batch_results), total_time,
             )
 

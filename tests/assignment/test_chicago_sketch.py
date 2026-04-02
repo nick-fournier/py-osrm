@@ -148,7 +148,6 @@ def _run_chicago_assignment(
 def generate_chicago_report(
     tmp_path: str | Path,
     output_path: str = "plots/chicago_sketch_validation.html",
-    max_iter: int = 50,
     max_rounds: int = 20,
     method: str = "msa",
 ) -> Path:
@@ -157,29 +156,10 @@ def generate_chicago_report(
     Parameters
     ----------
     method : str
-        ``"msa"`` (default) uses greedy loading + MSA convergence.
-        ``"fw"`` uses Frank-Wolfe via AssignmentLoop.
-    max_iter : int
-        Max iterations for FW convergence.
+        ``"msa"`` (default) or ``"fw"`` — convergence method after greedy loading.
     max_rounds : int
-        Max iterations for MSA convergence.
+        Max convergence iterations.
     """
-    if method == "fw":
-        from osrm.assignment.plots import generate_validation_report
-
-        return generate_validation_report(
-            network_name="Chicago Sketch",
-            prepare_fn=_prepare_chicago_network,
-            run_fn=_run_chicago_assignment,
-            copy_fn=_copy_clean_osrm,
-            tmp_path=Path(tmp_path),
-            output_path=output_path,
-            max_iter=max_iter,
-            detail_scale=1.00,
-            sweep_scales=[1.00],
-            vc_scales=[],
-            methods=["fw"],
-        )
     return generate_hillclimber_validation_report(
         network_name="Chicago Sketch",
         prepare_fn=_prepare_chicago_network,
@@ -192,9 +172,10 @@ def generate_chicago_report(
         state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
         sample_rate=0.10,
         max_rounds=max_rounds,
+        method=method,
         intro_html=(
-            "<p>Chicago Sketch MSA validation at <b>100% demand</b>. "
-            "Full-load scalability and convergence check.</p>"
+            f"<p>{method.upper()} validation at <b>100% Chicago Sketch demand</b>. "
+            f"Full-load scalability and convergence check.</p>"
         ),
     )
 
