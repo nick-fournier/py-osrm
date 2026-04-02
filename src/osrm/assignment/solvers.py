@@ -370,7 +370,7 @@ class MatrixFreeHillClimber:
         engine,
         entries: Sequence[ODLedgerEntry],
         *,
-        max_pairs_per_call: int = 512,
+        max_pairs_per_call: int = 100_000,
     ) -> List[Optional[float]]:
         """Compute shortest-path durations for sampled ledger entries via Table.
 
