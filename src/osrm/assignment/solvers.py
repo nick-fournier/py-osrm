@@ -329,7 +329,11 @@ class TrafficAssignmentSolver:
           4. Clip, update VDF, customize, reload
         """
         msa_results: List[MSAIterationResult] = []
-        full_pass = sample_rate >= 1.0 or len(trips) <= 1
+        use_fw = method == "fw"
+        # FW line search requires accurate gradients — always route full demand.
+        # MSA can use sampled routing (stochastic MSA); gap is noisier but
+        # the 1/(m+1) step schedule still guarantees convergence.
+        full_pass = sample_rate >= 1.0 or len(trips) <= 1 or use_fw
         prev_volume = initial_volume.copy()
 
         for m in range(1, max_rounds + 1):
@@ -380,7 +384,6 @@ class TrafficAssignmentSolver:
             )
 
             # 3. Blend: step size depends on method
-            use_fw = method == "fw"
             if use_fw:
                 alpha = loop._fw_line_search(
                     prev_density, aon_density,
