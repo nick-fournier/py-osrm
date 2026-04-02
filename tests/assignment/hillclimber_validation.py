@@ -50,24 +50,52 @@ def slice_trips_by_departure(
     n_slices: int,
     bin_width_s: float,
 ) -> list[DemandTrip]:
-    """Split each OD trip evenly across fixed departure-time slices."""
+    """Partition OD trips into departure-time slices for incremental loading.
+
+    When the trip count exceeds ``n_slices``, trips are partitioned into
+    contiguous blocks sorted by volume descending (high-demand first).
+    Each trip appears in exactly one slice at its full volume, so total
+    routing work = len(trips) rather than n_slices × len(trips).
+
+    When the trip count is small (≤ n_slices), falls back to volume-
+    splitting: each trip is replicated across all slices with 1/n_slices
+    of its original volume.  This preserves gradual loading behaviour
+    for tiny networks (e.g. Braess with 1 OD pair).
+    """
     if n_slices <= 0:
         raise ValueError("n_slices must be positive")
     if bin_width_s <= 0:
         raise ValueError("bin_width_s must be positive")
 
-    sliced: list[DemandTrip] = []
-    for trip in trips:
-        per_slice = trip.volume / n_slices
-        if per_slice <= 0:
-            continue
-        for slice_idx in range(n_slices):
-            sliced.append(DemandTrip(
-                origin=trip.origin,
-                destination=trip.destination,
-                volume=per_slice,
-                departure_time_s=slice_idx * bin_width_s,
-            ))
+    positive_trips = [t for t in trips if t.volume > 0]
+
+    if len(positive_trips) <= n_slices:
+        # Small network: volume-split across all slices
+        sliced: list[DemandTrip] = []
+        for trip in positive_trips:
+            per_slice = trip.volume / n_slices
+            for slice_idx in range(n_slices):
+                sliced.append(DemandTrip(
+                    origin=trip.origin,
+                    destination=trip.destination,
+                    volume=per_slice,
+                    departure_time_s=slice_idx * bin_width_s,
+                ))
+        return sliced
+
+    # Large network: partition into contiguous blocks, high demand first
+    sorted_trips = sorted(positive_trips, key=lambda t: t.volume, reverse=True)
+
+    n = len(sorted_trips)
+    sliced = []
+    for i, trip in enumerate(sorted_trips):
+        slice_idx = min(i * n_slices // n, n_slices - 1)
+        sliced.append(DemandTrip(
+            origin=trip.origin,
+            destination=trip.destination,
+            volume=trip.volume,
+            departure_time_s=slice_idx * bin_width_s,
+        ))
     return sliced
 
 
@@ -116,7 +144,7 @@ def run_hillclimber_case(
     trips = trip_builder(meta, demand_scale)
     logger.info("Built %d OD pairs in %.1fs", len(trips), time.monotonic() - t0)
 
-    logger.info("Slicing into %d departure bins...", load_steps)
+    logger.info("Partitioning into %d load slices (high-demand first)...", load_steps)
     t0 = time.monotonic()
     sliced_trips = slice_trips_by_departure(
         trips,
@@ -124,8 +152,8 @@ def run_hillclimber_case(
         bin_width_s=bin_width_s,
     )
     logger.info(
-        "Sliced to %d trip-records in %.1fs",
-        len(sliced_trips), time.monotonic() - t0,
+        "Partitioned %d OD pairs into %d slices in %.1fs (total routes = %d)",
+        len(trips), load_steps, time.monotonic() - t0, len(sliced_trips),
     )
     run_base = copy_fn(base_path, run_dir)
     config = AssignmentConfig(
