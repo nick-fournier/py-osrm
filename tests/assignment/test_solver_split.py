@@ -5,6 +5,7 @@ import numpy as np
 from osrm.assignment import (
     AssignmentConfig,
     AssignmentLoop,
+    AssignmentResult,
     DemandTrip,
     HillClimberResult,
     MatrixAssignmentSolver,
@@ -13,7 +14,7 @@ from osrm.assignment import (
     ODMatrixAdapter,
     TripStreamAdapter,
 )
-from osrm.assignment.solvers import ODLedgerEntry, RouteAssignment
+from osrm.assignment.assignment_loop import ODLedgerEntry, RouteAssignment
 
 
 def _trip(dep_s: float, volume: float = 1.0) -> DemandTrip:
@@ -175,11 +176,11 @@ def test_matrix_free_solver_runs_statefully_across_slices(monkeypatch):
             state_obj.flow_vph = state_obj.density_vpkm * state_obj.speed_kmh
 
     solver._make_loop = lambda: FakeLoop()  # type: ignore[method-assign]
-    monkeypatch.setattr("osrm.assignment.solvers.osrm_module.customize", lambda *args, **kwargs: customize_calls.append(args))
+    monkeypatch.setattr("osrm.assignment.assignment_loop.osrm_module.customize", lambda *args, **kwargs: customize_calls.append(args))
 
     result = solver.run_stream(stream)
 
-    assert isinstance(result, HillClimberResult)
+    assert isinstance(result, AssignmentResult)
     assert result.n_batches == 2
     assert route_calls == [2, 1]
     assert len(customize_calls) == 2
@@ -266,7 +267,7 @@ def test_matrix_free_solver_runs_msa(monkeypatch):
 
     solver._make_loop = lambda: FakeLoop()  # type: ignore[method-assign]
     monkeypatch.setattr(
-        "osrm.assignment.solvers.osrm_module.customize",
+        "osrm.assignment.assignment_loop.osrm_module.customize",
         lambda *args, **kwargs: customize_calls.append(args),
     )
 

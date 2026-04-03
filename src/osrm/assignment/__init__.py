@@ -1,8 +1,4 @@
-"""Traffic assignment module for py-osrm.
-
-Provides network state tracking, volume-delay functions, density smoothing,
-and segment speed CSV generation for iterative traffic assignment using OSRM.
-"""
+"""Traffic assignment module for py-osrm."""
 
 from osrm.assignment.vdf import BiParabolicVDF
 from osrm.assignment.network_state import NetworkState
@@ -12,18 +8,22 @@ from osrm.assignment.segment_speed_writer import SegmentSpeedWriter
 from osrm.assignment.od_matrix import ODMatrixAdapter, DemandTrip
 from osrm.assignment.trip_stream import TripBatch, TripStreamAdapter
 from osrm.assignment.assignment_loop import (
-    AssignmentLoop, AssignmentConfig, AssignmentResult, StopReason,
-)
-from osrm.assignment.solvers import (
-    HillClimberBatchResult,
+    AssignmentSolver,
+    AssignmentLoop,
+    AssignmentConfig,
+    AssignmentResult,
+    StopReason,
+    IterationResult,
+    RoutedTripPath,
+    RouteAssignment,
+    ODLedgerEntry,
+    ODLedger,
     HillClimberResult,
+    HillClimberBatchResult,
     MSAIterationResult,
     TrafficAssignmentSolver,
     MatrixAssignmentSolver,
     MatrixFreeHillClimber,
-    ODLedger,
-    ODLedgerEntry,
-    RouteAssignment,
 )
 from osrm.assignment import plots
 
@@ -38,18 +38,21 @@ __all__ = [
     "DemandTrip",
     "TripBatch",
     "TripStreamAdapter",
+    "AssignmentSolver",
     "AssignmentLoop",
     "AssignmentConfig",
     "AssignmentResult",
     "StopReason",
-    "HillClimberBatchResult",
+    "IterationResult",
+    "RoutedTripPath",
+    "RouteAssignment",
+    "ODLedgerEntry",
+    "ODLedger",
     "HillClimberResult",
+    "HillClimberBatchResult",
     "MSAIterationResult",
     "TrafficAssignmentSolver",
     "MatrixAssignmentSolver",
     "MatrixFreeHillClimber",
-    "ODLedger",
-    "ODLedgerEntry",
-    "RouteAssignment",
     "plots",
 ]
