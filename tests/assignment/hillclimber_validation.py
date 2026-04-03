@@ -245,7 +245,15 @@ def run_hillclimber_case(
     )
     solver = AssignmentSolver(run_base, config)
     state_patch = state_patch_factory(meta) if state_patch_factory else None
-    result = solver.run(sliced_trips, state_patch=state_patch)
+    result = solver.run_stream(
+        sliced_trips,
+        max_batch_size=max_batch_size,
+        state_patch=state_patch,
+        max_od=max_od,
+        max_rounds=max_rounds,
+        gap_threshold=gap_threshold,
+        method=method,
+    )
     return HillClimberValidationCase(
         base_path=run_base,
         meta=meta,
