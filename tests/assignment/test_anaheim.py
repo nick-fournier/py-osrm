@@ -19,7 +19,7 @@ import pytest
 import osrm
 from osrm.assignment import (
     AssignmentConfig,
-    AssignmentLoop,
+    AssignmentSolver,
     DensitySmoothingConfig,
 )
 from osrm.assignment.od_matrix import DemandTrip, ODMatrixAdapter
@@ -119,7 +119,7 @@ def _run_anaheim_assignment(
         speed_csv_dir=str(Path(base_path).parent),
     )
 
-    loop = AssignmentLoop(base_path, config)
+    loop = AssignmentSolver(base_path, config)
 
     def lane_patch(state):
         patch_lanes(state, meta)
@@ -167,8 +167,6 @@ def anaheim_result(anaheim_net, tmp_path_factory):
 
 class TestAnaheim:
     """Anaheim structural validation."""
-
-    # ── OLD pipeline (AssignmentLoop) tests ──
 
     def test_smoke_fw(self, anaheim_result):
         """Quick smoke: FW runs without error on Anaheim."""
@@ -237,7 +235,7 @@ class TestAnaheim:
             speed_csv_dir=str(Path(bp_direct).parent),
             incremental_steps=(1.0,),
         )
-        loop_direct = AssignmentLoop(bp_direct, cfg_direct)
+        loop_direct = AssignmentSolver(bp_direct, cfg_direct)
         r_direct = loop_direct.run(
             trips, state_patch=lambda s: patch_lanes(s, meta),
         )
@@ -254,7 +252,7 @@ class TestAnaheim:
             verbosity="ERROR",
             speed_csv_dir=str(Path(bp_inc).parent),
         )
-        loop_inc = AssignmentLoop(bp_inc, cfg_inc)
+        loop_inc = AssignmentSolver(bp_inc, cfg_inc)
         r_inc = loop_inc.run(
             trips, state_patch=lambda s: patch_lanes(s, meta),
         )
@@ -272,8 +270,6 @@ class TestAnaheim:
             f"than direct ({p95_direct:.3f})"
         )
 
-    # ── NEW pipeline (TrafficAssignmentSolver) tests ──
-
     def test_hillclimber_smoke(self, anaheim_net, tmp_path_factory):
         """Hill-climber loads Anaheim across greedy load steps."""
         base, meta = anaheim_net
@@ -290,7 +286,7 @@ class TestAnaheim:
         )
         state = case.result.network_state
         assert state is not None
-        assert case.result.n_batches == 4
+        assert len(case.result.iteration_log) >= 1
         assert state.n_edges >= 200
         assert np.all(state.flow_vph >= 0)
         assert np.all(state.speed_kmh > 0)

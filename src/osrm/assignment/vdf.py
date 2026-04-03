@@ -27,7 +27,7 @@ class BiParabolicVDF:
     def __init__(
         self,
         kc_ratio: float = 1.0 / 3.0,
-        min_speed_kmh: float = 5.0,
+        min_speed_kmh: float = 0.01,
     ) -> None:
         self.kc_ratio = kc_ratio
         self.min_speed_kmh = min_speed_kmh
@@ -103,7 +103,7 @@ class BiParabolicVDF:
 
         Flows exceeding q_c are clamped to q_c (returns k_c). This is
         the analytic inverse of the uncongested parabolic branch. For
-        assignment, use k = q / v instead (see AssignmentLoop._update_state).
+        assignment use ``demand_to_density`` which handles all q ≥ 0.
 
         Parameters
         ----------
@@ -137,6 +137,55 @@ class BiParabolicVDF:
     ) -> np.ndarray:
         """Full pipeline: flow → density → speed. Single pass, no iteration."""
         k = self.flow_to_density(q, v_f, k_j)
+        return self.density_to_speed(k, v_f, k_j)
+
+    def demand_to_density(
+        self,
+        q: np.ndarray,
+        v_f: np.ndarray,
+        k_j: np.ndarray,
+    ) -> np.ndarray:
+        """Extended q → k mapping for flow-based assignment.
+
+        Two-piece monotone function defined for ALL q ≥ 0:
+
+        q ≤ q_c:  k = k_c · (1 − √(1 − q/q_c))       [exact MFD inverse]
+        q > q_c:  k = k_c + (k_j − k_c) · √(1 − q_c/q) [asymptotic extension]
+
+        The first piece is the standard uncongested inverse. The second
+        piece maps oversaturated demand (q > q_c) into the congested
+        density range (k_c, k_j), approaching k_j asymptotically as
+        q → ∞. The two pieces are C⁰ continuous at q = q_c (both
+        yield k_c).
+
+        See docs/traffic_assignment_design.md §3.7.3 for derivation.
+        """
+        q = np.asarray(q, dtype=np.float64)
+        v_f = np.asarray(v_f, dtype=np.float64)
+        k_j = np.asarray(k_j, dtype=np.float64)
+
+        k_c = self.critical_density(k_j)
+        q_c = self.capacity_flow(v_f, k_j)
+
+        # Uncongested branch: exact inverse
+        safe_qc = np.where(q_c > 0, q_c, 1.0)
+        ratio = np.clip(q / safe_qc, 0.0, 1.0)
+        k_under = k_c * (1.0 - np.sqrt(1.0 - ratio))
+
+        # Oversaturated branch: asymptotic extension toward k_j
+        safe_q = np.where(q > 0, q, 1.0)
+        k_over = k_c + (k_j - k_c) * np.sqrt(np.maximum(1.0 - q_c / safe_q, 0.0))
+
+        return np.where(q <= q_c, k_under, k_over)
+
+    def demand_to_speed(
+        self,
+        q: np.ndarray,
+        v_f: np.ndarray,
+        k_j: np.ndarray,
+    ) -> np.ndarray:
+        """Full pipeline: demand → density (extended) → speed."""
+        k = self.demand_to_density(q, v_f, k_j)
         return self.density_to_speed(k, v_f, k_j)
 
     def density_to_flow(

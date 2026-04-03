@@ -20,7 +20,7 @@ from osrm.assignment import (
     AssignmentConfig,
     DemandTrip,
     DensitySmoothingConfig,
-    TrafficAssignmentSolver,
+    AssignmentSolver,
 )
 from osrm.assignment.plots import (
     _add_congestion_map_section,
@@ -236,25 +236,16 @@ def run_hillclimber_case(
     )
     run_base = copy_fn(base_path, run_dir)
     config = AssignmentConfig(
+        method=method,
+        max_iterations=max_rounds,
+        convergence_gap=gap_threshold,
         bin_width_s=bin_width_s,
         smoothing=DensitySmoothingConfig(method="none"),
         speed_csv_dir=str(Path(run_base).parent),
     )
-    solver = TrafficAssignmentSolver(
-        run_base,
-        config,
-        default_batch_size=max_batch_size or len(sliced_trips),
-    )
+    solver = AssignmentSolver(run_base, config)
     state_patch = state_patch_factory(meta) if state_patch_factory else None
-    result = solver.run_stream(
-        sliced_trips,
-        max_batch_size=max_batch_size,
-        state_patch=state_patch,
-        max_od=max_od,
-        max_rounds=max_rounds,
-        gap_threshold=gap_threshold,
-        method=method,
-    )
+    result = solver.run(sliced_trips, state_patch=state_patch)
     return HillClimberValidationCase(
         base_path=run_base,
         meta=meta,
@@ -271,6 +262,9 @@ def hillclimber_final_gap(result: object) -> float | None:
     msa_results = getattr(result, "msa_results", []) or []
     if msa_results:
         return msa_results[-1].relative_gap
+    iteration_log = getattr(result, "iteration_log", []) or []
+    if iteration_log:
+        return iteration_log[-1].relative_gap
     return None
 
 
@@ -279,14 +273,18 @@ def hillclimber_final_tstt(
     *,
     min_speed_kmh: float = 1.08,
 ) -> float:
-    """Return final TSTT from MSA or greedy loading."""
+    """Return final TSTT from iteration log, MSA, or greedy loading."""
+    iteration_log = getattr(result, "iteration_log", []) or []
+    if iteration_log:
+        return float(iteration_log[-1].tstt)
+
     msa_results = getattr(result, "msa_results", []) or []
     if msa_results:
         return float(msa_results[-1].link_tstt)
 
     batch_results = getattr(result, "batch_results", []) or []
     if batch_results:
-        return float(batch_results[-1].network_tstt)
+        return float(batch_results[-1].tstt)
     return 0.0
 
 
@@ -299,7 +297,7 @@ def _msa_step_label(iteration: int) -> str:
 
 
 def _convergence_series(result: object) -> dict:
-    """Return plotting arrays for MSA convergence, if present."""
+    """Return plotting arrays for convergence, if present."""
     msa_results = getattr(result, "msa_results", []) or []
     if msa_results:
         return {
@@ -316,6 +314,23 @@ def _convergence_series(result: object) -> dict:
             "customize_times": [r.customize_time_s for r in msa_results],
             "engine_times": [r.engine_time_s for r in msa_results],
             "gaps": [r.relative_gap for r in msa_results],
+        }
+    iteration_log = getattr(result, "iteration_log", []) or []
+    if iteration_log:
+        return {
+            "kind": "msa",
+            "labels": [
+                _msa_step_label(r.iteration) for r in iteration_log
+            ],
+            "network_tstt": [r.tstt for r in iteration_log],
+            "state_change_norm": [r.state_change_norm for r in iteration_log],
+            "speeds": [r.mean_speed_kmh for r in iteration_log],
+            "max_k": [getattr(r, "max_k_over_kj", 0.0) for r in iteration_log],
+            "median_k": [getattr(r, "median_k_over_kj", 0.0) for r in iteration_log],
+            "route_times": [r.route_time_s for r in iteration_log],
+            "customize_times": [r.customize_time_s for r in iteration_log],
+            "engine_times": [r.engine_time_s for r in iteration_log],
+            "gaps": [r.relative_gap for r in iteration_log],
         }
     return {
         "kind": None,
@@ -341,8 +356,9 @@ def _add_batch_sections(
 ) -> None:
     """Add load-step evolution plots."""
     result = case.result
-    greedy_labels = [_load_step_label(b.batch_index) for b in result.batch_results]
-    greedy_tstt = [b.network_tstt for b in result.batch_results]
+    batch_results = getattr(result, "batch_results", []) or []
+    greedy_labels = [_load_step_label(b.iteration) for b in batch_results]
+    greedy_tstt = [b.tstt for b in batch_results]
     refinement = _convergence_series(result)
 
     convergence_labels = greedy_labels + refinement["labels"]
@@ -425,9 +441,9 @@ def _add_batch_sections(
     fig = go.Figure()
 
     # Build unified x-axis labels and y-values
-    greedy_speeds = [b.mean_speed_kmh for b in result.batch_results]
-    greedy_max_k = [b.max_k_over_kj for b in result.batch_results]
-    greedy_median_k = [b.median_k_over_kj for b in result.batch_results]
+    greedy_speeds = [b.mean_speed_kmh for b in batch_results]
+    greedy_max_k = [b.max_k_over_kj for b in batch_results]
+    greedy_median_k = [b.median_k_over_kj for b in batch_results]
     all_labels = greedy_labels + refinement["labels"]
     all_speeds = greedy_speeds + refinement["speeds"]
     all_max_k = greedy_max_k + refinement["max_k"]
@@ -481,14 +497,14 @@ def _add_batch_sections(
     figs.append(fig)
     refinement_note = ""
     if refinement["kind"] == "msa":
-        msa_results = getattr(result, "msa_results", []) or []
+        n_refinement = len(refinement["labels"])
         final_gap = hillclimber_final_gap(result)
         gap_str = (
             f" Final gap={final_gap:.6f}."
             if final_gap is not None else ""
         )
         refinement_note = (
-            f" After greedy loading, {len(msa_results)} MSA iteration(s) "
+            f" After greedy loading, {n_refinement} iteration(s) "
             f"converged link densities toward user equilibrium."
             f"{gap_str}"
         )
@@ -502,10 +518,10 @@ def _add_batch_sections(
     )
 
     # --- Runtime: unified per-step timing ---
-    rt_labels = [_load_step_label(b.batch_index) for b in result.batch_results]
-    rt_route = [b.route_time_s for b in result.batch_results]
-    rt_cust = [b.customize_time_s for b in result.batch_results]
-    rt_engine = [b.engine_time_s for b in result.batch_results]
+    rt_labels = [_load_step_label(b.iteration) for b in batch_results]
+    rt_route = [b.route_time_s for b in batch_results]
+    rt_cust = [b.customize_time_s for b in batch_results]
+    rt_engine = [b.engine_time_s for b in batch_results]
     rt_labels.extend(refinement["labels"])
     rt_route.extend(refinement["route_times"])
     rt_cust.extend(refinement["customize_times"])
@@ -535,7 +551,7 @@ def _add_batch_sections(
     ))
 
     # Vertical separator between greedy and refinement
-    n_greedy = len(result.batch_results)
+    n_greedy = len(batch_results)
     if refinement["kind"] is not None:
         fig.add_vline(
             x=n_greedy - 0.5,

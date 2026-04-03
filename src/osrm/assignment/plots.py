@@ -266,13 +266,12 @@ def vdf_flow_traveltime(
     vdf: BiParabolicVDF | None = None,
     path: Optional[str] = None,
 ) -> go.Figure:
-    """Plot the flow–travel-time relationship with static surrogate overlays.
+    """Plot the flow–travel-time relationship (MFD branches only).
 
     Travel time t = L / v(k) for a link of length *link_length_km*.
     This is the cost function that assignment directly optimizes:
     on the uncongested branch, travel time increases with flow;
     at breakdown, both flow drops and travel time spikes.
-    Dashed overlays show two single-valued static closures above capacity.
     """
     vdf = vdf or BiParabolicVDF()
     k_c = vdf.kc_ratio * k_j
@@ -287,13 +286,6 @@ def vdf_flow_traveltime(
 
     t_ff = link_length_km / (v_f / 60.0)
     t_c = link_length_km / (v_f / 2.0 / 60.0)
-    q_surrogate = np.linspace(0.0, q_c * surrogate_max_ratio, 500)
-    tt_queue = _queue_delay_surrogate_traveltime(
-        q_surrogate, q_c, v_f, link_length_km, analysis_period_hr
-    )
-    tt_tail = _steep_tail_surrogate_traveltime(
-        q_surrogate, q_c, v_f, link_length_km, tail_power
-    )
 
     mask_unc = k <= k_c
     mask_con = k > k_c
@@ -310,16 +302,6 @@ def vdf_flow_traveltime(
         line=dict(color="#F44336", width=3),
     ))
     fig.add_trace(go.Scatter(
-        x=q_surrogate, y=tt_queue,
-        mode="lines", name="Queue-delay surrogate",
-        line=dict(color="#4CAF50", width=3, dash="dash"),
-    ))
-    fig.add_trace(go.Scatter(
-        x=q_surrogate, y=tt_tail,
-        mode="lines", name=f"Steep-tail surrogate (power {tail_power:.0f})",
-        line=dict(color="#9C27B0", width=3, dash="dot"),
-    ))
-    fig.add_trace(go.Scatter(
         x=[q_c], y=[t_c],
         mode="markers+text", name=f"Capacity (q_c={q_c:.0f})",
         marker=dict(size=12, color="#FF9800", symbol="diamond"),
@@ -332,7 +314,7 @@ def vdf_flow_traveltime(
 
     fig.update_layout(
         title=f"Flow–Travel Time (L={link_length_km} km, v_f={v_f}, k_j={k_j})",
-        xaxis_title="Flow / demand rate q (veh/hr)",
+        xaxis_title="Flow q (veh/hr)",
         yaxis_title="Travel time (min)",
         template="plotly_white",
         legend=dict(x=0.05, y=0.95),
@@ -567,6 +549,195 @@ def vdf_inverse_mfd(
     return _save_or_show(fig, path)
 
 
+def _vdf_extended_cost_chain(
+    v_f: float = 60.0,
+    k_j: float = 150.0,
+    link_length_km: float = 1.0,
+    max_demand_ratio: float = 5.0,
+    analysis_period_hr: float = 1.0,
+    tail_power: float = 20.0,
+    vdf: BiParabolicVDF | None = None,
+) -> go.Figure:
+    """Three-panel plot of the extended q→k→v→t cost chain for oversaturated demand.
+
+    Left:   Extended q → k mapping (uncongested inverse + asymptotic extension)
+            with MFD congested-branch inverse as reference
+    Center: Speed–flow (MFD parametric + extended demand mapping)
+    Right:  Flow–travel time comparing all surrogate cost functions:
+            MFD cost chain, BPR, queue-delay, steep-tail, and MFD parametric
+    """
+    vdf = vdf or BiParabolicVDF()
+    k_c = vdf.kc_ratio * k_j
+    q_c = v_f * k_c / 2.0
+    v_c = v_f / 2.0
+
+    # --- Demand range: 0 to max_demand_ratio × q_c ---
+    q_demand = np.linspace(0.001, q_c * max_demand_ratio, 1000)
+    v_f_arr = np.full_like(q_demand, v_f)
+    k_j_arr = np.full_like(q_demand, k_j)
+
+    # Extended mapping: demand → density → speed → travel time
+    k_ext = vdf.demand_to_density(q_demand, v_f_arr, k_j_arr)
+    v_ext = vdf.density_to_speed(k_ext, v_f_arr, k_j_arr)
+    tt_ext = link_length_km / v_ext * 60.0  # minutes
+
+    # Parametric MFD (for the backward-bending reference)
+    k_param = np.linspace(0.001, k_j * 0.999, 500)
+    v_param = vdf.density_to_speed(k_param, np.full_like(k_param, v_f), np.full_like(k_param, k_j))
+    q_param = vdf.density_to_flow(k_param, np.full_like(k_param, v_f), np.full_like(k_param, k_j))
+    tt_param = link_length_km / v_param * 60.0
+
+    # MFD congested-branch inverse for q→k panel (maps q→k on the congested side)
+    q_inv = np.linspace(0.001, q_c * 0.999, 300)
+    disc = np.sqrt(np.maximum(1.0 - 2.0 * q_inv / (v_f * k_c), 0.0))
+    k_congested_inv = k_c + (k_j - k_c) * disc
+
+    # BPR comparison: t = t0 * [1 + 0.15 * (q/qc)^4]
+    t0_min = link_length_km / v_f * 60.0
+    tt_bpr = t0_min * (1.0 + 0.15 * (q_demand / q_c) ** 4)
+
+    # Queue-delay and steep-tail surrogates
+    tt_queue = _queue_delay_surrogate_traveltime(
+        q_demand, q_c, v_f, link_length_km, analysis_period_hr
+    )
+    tt_tail = _steep_tail_surrogate_traveltime(
+        q_demand, q_c, v_f, link_length_km, tail_power
+    )
+
+    # Masks for uncongested / oversaturated
+    mask_under = q_demand <= q_c
+    mask_over = q_demand > q_c
+
+    # Parametric MFD masks
+    mask_param_unc = k_param <= k_c
+    mask_param_con = k_param > k_c
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=[
+            "q → k Mapping",
+            "Speed vs Demand",
+            "Travel Time vs Demand (all surrogates)",
+        ],
+        horizontal_spacing=0.08,
+    )
+
+    # === Panel 1: q → k mapping ===
+    # MFD congested-branch inverse (reference)
+    fig.add_trace(go.Scatter(
+        x=q_inv, y=k_congested_inv,
+        mode="lines", name="MFD congested inverse",
+        line=dict(color="#999", width=1.5, dash="dot"),
+        legendgroup="mfd_ref",
+    ), row=1, col=1)
+    # Extended mapping
+    fig.add_trace(go.Scatter(
+        x=q_demand[mask_under], y=k_ext[mask_under],
+        mode="lines", name="Uncongested inverse",
+        line=dict(color="#2196F3", width=2.5),
+        legendgroup="ext",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=q_demand[mask_over], y=k_ext[mask_over],
+        mode="lines", name="Asymptotic extension",
+        line=dict(color="#F44336", width=2.5),
+        legendgroup="ext",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=[q_c], y=[k_c],
+        mode="markers", showlegend=False,
+        marker=dict(size=10, color="#FF9800", symbol="diamond"),
+    ), row=1, col=1)
+    fig.add_hline(y=k_j, line_dash="dot", line_color="gray", row=1, col=1)
+    fig.add_hline(y=k_c, line_dash="dot", line_color="#ddd", row=1, col=1)
+
+    # === Panel 2: Speed vs demand ===
+    # MFD parametric (backward-bending reference)
+    fig.add_trace(go.Scatter(
+        x=q_param[mask_param_unc], y=v_param[mask_param_unc],
+        mode="lines", name="MFD parametric",
+        line=dict(color="#999", width=1.5, dash="dot"),
+        legendgroup="mfd_ref", showlegend=False,
+    ), row=1, col=2)
+    fig.add_trace(go.Scatter(
+        x=q_param[mask_param_con], y=v_param[mask_param_con],
+        mode="lines",
+        line=dict(color="#999", width=1.5, dash="dot"),
+        legendgroup="mfd_ref", showlegend=False,
+    ), row=1, col=2)
+    # Extended cost chain
+    fig.add_trace(go.Scatter(
+        x=q_demand, y=v_ext,
+        mode="lines", name="MFD cost chain v(q)",
+        line=dict(color="#4CAF50", width=3),
+        legendgroup="chain",
+    ), row=1, col=2)
+
+    # === Panel 3: Travel time vs demand (all surrogates) ===
+    # MFD parametric (backward-bending reference)
+    fig.add_trace(go.Scatter(
+        x=q_param[mask_param_unc], y=tt_param[mask_param_unc],
+        mode="lines",
+        line=dict(color="#999", width=1.5, dash="dot"),
+        legendgroup="mfd_ref", showlegend=False,
+    ), row=1, col=3)
+    fig.add_trace(go.Scatter(
+        x=q_param[mask_param_con], y=tt_param[mask_param_con],
+        mode="lines",
+        line=dict(color="#999", width=1.5, dash="dot"),
+        legendgroup="mfd_ref", showlegend=False,
+    ), row=1, col=3)
+    # Extended MFD cost chain
+    fig.add_trace(go.Scatter(
+        x=q_demand, y=tt_ext,
+        mode="lines", name="MFD cost chain t(q)",
+        line=dict(color="#4CAF50", width=3),
+        legendgroup="chain",
+    ), row=1, col=3)
+    # BPR
+    fig.add_trace(go.Scatter(
+        x=q_demand, y=tt_bpr,
+        mode="lines", name="BPR(0.15, 4)",
+        line=dict(color="#9C27B0", width=2.5, dash="dash"),
+        legendgroup="surr",
+    ), row=1, col=3)
+    # Queue-delay
+    fig.add_trace(go.Scatter(
+        x=q_demand, y=tt_queue,
+        mode="lines", name="Queue-delay",
+        line=dict(color="#FF9800", width=2.5, dash="dashdot"),
+        legendgroup="surr",
+    ), row=1, col=3)
+    # Steep-tail
+    fig.add_trace(go.Scatter(
+        x=q_demand, y=tt_tail,
+        mode="lines", name=f"Steep-tail (power {tail_power:.0f})",
+        line=dict(color="#00BCD4", width=2.5, dash="dot"),
+        legendgroup="surr",
+    ), row=1, col=3)
+    # Capacity marker
+    fig.add_trace(go.Scatter(
+        x=[q_c], y=[tt_ext[np.argmin(np.abs(q_demand - q_c))]],
+        mode="markers", showlegend=False,
+        marker=dict(size=8, color="#FF9800", symbol="diamond"),
+    ), row=1, col=3)
+
+    fig.update_xaxes(title_text="Demand q (veh/hr)", row=1, col=1)
+    fig.update_xaxes(title_text="Demand q (veh/hr)", row=1, col=2)
+    fig.update_xaxes(title_text="Demand q (veh/hr)", row=1, col=3)
+    fig.update_yaxes(title_text="Density k (veh/km)", row=1, col=1)
+    fig.update_yaxes(title_text="Speed v (km/h)", row=1, col=2)
+    fig.update_yaxes(title_text="Travel time (min)", range=[0, 100], row=1, col=3)
+
+    fig.update_layout(
+        title=f"Extended Cost Chain: q → k → v → t  (v_f={v_f}, k_j={k_j}, L={link_length_km}km)",
+        template="plotly_white",
+        height=450,
+        showlegend=True,
+    )
+    return fig
+
+
 def vdf_theory(output_dir: str = "plots") -> Path:
     """Generate a single combined VDF theory validation report.
 
@@ -608,6 +779,11 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         _vdf_near_jam_detail(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_inverse_accuracy(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_multi_class(vdf=vdf),
+        _vdf_extended_cost_chain(
+            v_f=v_f, k_j=k_j, vdf=vdf,
+            analysis_period_hr=analysis_period_hr,
+            tail_power=tail_power,
+        ),
     ]
 
     descriptions = [
@@ -650,12 +826,8 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         This backward bend is why BPR-style $t(V)$ cost functions are monotonic
         approximations — they avoid the multi-valued regime. Our density-based
         VDF handles both branches natively via $t = L / v(k)$, where $k$ is
-        always single-valued. The dashed overlays show two <b>static surrogate</b>
-        closures that extend beyond capacity with a single-valued demand-based
-        cost. Beyond $q_c$, those overlays interpret the horizontal axis as
-        <b>demand rate</b> rather than realized throughput: a queue-delay surrogate
-        (green) and a steep-tail surrogate (purple,
-        power {tail_power:.0f}).</p>""",
+        always single-valued. See §10 for the monotone cost extensions that
+        resolve the backward bend for assignment.</p>""",
 
         f"""<h2>5. Queue Delay and Steep-Tail Static Surrogates</h2>
         <p>The backward-bending MFD is physically meaningful, but static assignment
@@ -716,6 +888,43 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         curves from just those two inputs. Motorways have higher v<sub>f</sub> and k<sub>j</sub>
         (more lanes × higher jam density per lane), while residential streets have lower
         values of both. The shape is consistent across classes — only the scale changes.</p>""",
+
+        f"""<h2>10. Extended Cost Chain for Flow-Based Assignment</h2>
+        <p>The MFD inverse (§6) only exists for $q \\leq q_c$. For <b>flow-based
+        assignment</b>, we need a monotone mapping from <em>any</em> demand level to
+        a unique cost. The extended q → k mapping provides this:</p>
+
+        <p><b>Uncongested</b> ($q \\leq q_c$): &emsp;
+        $k(q) = k_c \\left(1 - \\sqrt{{1 - \\dfrac{{q}}{{q_c}}}}\\right)$
+        &emsp; (exact MFD inverse, maps $[0, q_c] \\to [0, k_c]$)</p>
+
+        <p><b>Oversaturated</b> ($q > q_c$): &emsp;
+        $k(q) = k_c + (k_j - k_c)\\sqrt{{1 - \\dfrac{{q_c}}{{q}}}}$
+        &emsp; (asymptotic extension, maps $(q_c, \\infty) \\to (k_c, k_j)$)</p>
+
+        <p>The two pieces join at $q = q_c$ where both yield $k = k_c = {k_c:.0f}$.
+        As $q \\to \\infty$, density approaches $k_j = {k_j:.0f}$ asymptotically —
+        speed approaches zero but never reaches it, giving an unbounded, monotone
+        cost function $t(q) = L / v(k(q))$.</p>
+
+        <p><b>Left panel:</b> The piecewise q → k mapping. The blue uncongested branch
+        is the exact MFD inverse; the red extension smoothly carries density toward
+        $k_j$ for oversaturated demand. The dotted gray curve shows the MFD's
+        congested-branch inverse for reference — it only exists for $q \\leq q_c$
+        and maps to densities above $k_c$.</p>
+
+        <p><b>Center panel:</b> Speed as a function of demand. The dotted gray curves show
+        the classic backward-bending MFD parametric; the solid green line is the single-valued
+        extended mapping — speed drops monotonically with demand.</p>
+
+        <p><b>Right panel:</b> All candidate cost functions compared on a log scale.
+        The <b>MFD cost chain</b> (green) is our physically-grounded approach. For
+        comparison: <b>BPR(0.15,4)</b> — the standard calibrated function;
+        <b>queue-delay</b> — adds $H/2 \\cdot (q/q_c - 1)$ delay above capacity;
+        <b>steep-tail</b> (power {tail_power:.0f}) — a numerically simple power-law.
+        The gray dotted curves show the backward-bending MFD parametric.
+        Near capacity the MFD cost chain is steepest (best rerouting signal);
+        all four surrogates are monotone and guarantee MSA convergence.</p>""",
     ]
 
     _write_combined_report(
@@ -757,6 +966,15 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         <p><b>Wardrop relative gap:</b> &emsp;
         $\\text{{gap}} = \\dfrac{{\\sum_a V_a \\cdot t_a}}{{\\sum_{{rs}} d_{{rs}} \\cdot \\pi_{{rs}}}} - 1$
         &emsp; where $t_a = L_a / v_a$ is link travel time, $\\pi_{{rs}}$ is shortest-path cost.</p>
+
+        <p><b>Extended demand → density mapping</b> (§10, for flow-based assignment):</p>
+        <p>$$k(q) =
+        \\begin{{cases}}
+        k_c \\left(1 - \\sqrt{{1 - \\dfrac{{q}}{{q_c}}}}\\right), & q \\leq q_c \\\\[6pt]
+        k_c + (k_j - k_c)\\sqrt{{1 - \\dfrac{{q_c}}{{q}}}}, & q > q_c
+        \\end{{cases}}$$</p>
+        <p>Cost chain: $q \\xrightarrow{{k(q)}} k \\xrightarrow{{v(k)}} v \\xrightarrow{{L/v}} t$
+        &emsp; — monotone for all $q \\geq 0$, guaranteeing MSA convergence.</p>
         </div>
 
         <p><b>Parameters (matching assignment defaults):</b>

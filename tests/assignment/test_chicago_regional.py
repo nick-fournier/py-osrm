@@ -26,13 +26,12 @@ import pytest
 import osrm
 from osrm.assignment import (
     AssignmentConfig,
-    AssignmentLoop,
+    AssignmentSolver,
     DensitySmoothingConfig,
 )
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import LinkClass, tntp_to_osm, patch_lanes
 from osrm.assignment.tntp import parse_net, parse_trips, load_node_coords, parse_flow
-from .hillclimber_validation import generate_hillclimber_validation_report
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "chicago_regional"
 logger = logging.getLogger(__name__)
@@ -171,7 +170,7 @@ def _run_regional_assignment(
         speed_csv_dir=str(Path(base_path).parent),
     )
 
-    loop = AssignmentLoop(base_path, config)
+    loop = AssignmentSolver(base_path, config)
 
     def lane_patch(state):
         patch_lanes(state, meta)
@@ -179,47 +178,7 @@ def _run_regional_assignment(
     return loop.run(trips, state_patch=lane_patch)
 
 
-# ── report generators ────────────────────────────────────────────────
-
-def generate_regional_report(
-    tmp_path: str | Path,
-    output_path: str = "plots/chicago_regional_validation.html",
-    max_rounds: int = 20,
-    method: str = "msa",
-) -> Path:
-    """Generate Chicago Regional validation report.
-
-    Parameters
-    ----------
-    method : str
-        ``"msa"`` (default) or ``"fw"`` — convergence method after greedy loading.
-    max_rounds : int
-        Max convergence iterations.
-    """
-    return generate_hillclimber_validation_report(
-        network_name="Chicago Regional",
-        prepare_fn=_prepare_regional_network,
-        copy_fn=_copy_clean_osrm,
-        trip_builder=_build_hillclimber_trips,
-        tmp_path=tmp_path,
-        output_path=output_path,
-        detail_scale=1.00,
-        bin_width_s=3600.0,
-        state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
-        load_rate=0.10,
-        max_rounds=max_rounds,
-        method=method,
-        intro_html=(
-            f"<p>{method.upper()} validation at "
-            "<b>100% demand</b> (1,360,428 vph across 1,790 zones, "
-            "39,018 links). Primary scaling benchmark.</p>"
-        ),
-    )
-
-
 # ── pytest entry points ──────────────────────────────────────────────
-
-# ── OLD pipeline (AssignmentLoop) tests ──
 
 @pytest.mark.slow
 def test_chicago_regional_matrix(tmp_path):
@@ -229,48 +188,3 @@ def test_chicago_regional_matrix(tmp_path):
     assert result.n_iterations >= 1
     assert result.total_system_travel_time > 0
 
-
-# ── NEW pipeline (TrafficAssignmentSolver) tests ──
-
-@pytest.mark.slow
-def test_chicago_regional_hillclimber(tmp_path):
-    """Hill-climber assignment on Chicago Regional (slow)."""
-    base, meta = _prepare_regional_network(tmp_path)
-
-    from osrm.assignment.solvers import MatrixFreeHillClimber, TripStreamAdapter
-    from .hillclimber_validation import (
-        compute_volume_threshold,
-        slice_trips_by_departure,
-        _median_link_speed_from_meta,
-    )
-
-    trips = _build_hillclimber_trips(meta, demand_scale=1.0)
-    load_steps = 10
-    median_speed = _median_link_speed_from_meta(meta) or 30.0
-    vol_threshold = compute_volume_threshold(
-        median_speed_kmh=median_speed, n_slices=load_steps,
-    )
-    sliced = slice_trips_by_departure(
-        trips, n_slices=load_steps, bin_width_s=3600.0,
-        volume_threshold=vol_threshold,
-    )
-
-    config = AssignmentConfig(
-        bin_width_s=3600.0,
-        smoothing=DensitySmoothingConfig(method="none"),
-        speed_csv_dir=str(Path(base).parent),
-    )
-    solver = MatrixFreeHillClimber(base, config, default_batch_size=len(sliced))
-
-    def lane_patch(state):
-        patch_lanes(state, meta)
-
-    result = solver.run_stream(
-        sliced,
-        state_patch=lane_patch,
-        max_od=100_000,
-        max_rounds=3,
-        gap_threshold=0.05,
-    )
-    assert result.n_trips > 0
-    assert len(result.batch_results) > 0

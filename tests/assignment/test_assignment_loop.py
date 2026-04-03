@@ -15,9 +15,8 @@ import pytest
 import osrm
 from osrm.assignment import (
     AssignmentConfig,
-    AssignmentLoop,
+    AssignmentSolver,
     DensitySmoothingConfig,
-    MatrixFreeHillClimber,
     ODMatrixAdapter,
     DemandTrip,
 )
@@ -110,7 +109,7 @@ def _build_monaco_trip_stream(base_path: str) -> list[DemandTrip]:
     return trips
 
 
-class TestAssignmentLoop:
+class TestAssignmentSolver:
     def test_smoke_runs_to_completion(self, monaco_work):
         """Assignment loop completes without error on Monaco."""
         coords = _get_sample_coords(monaco_work, n=6)
@@ -128,7 +127,7 @@ class TestAssignmentLoop:
             verbosity="ERROR",
         )
 
-        loop = AssignmentLoop(monaco_work, config)
+        loop = AssignmentSolver(monaco_work, config)
         result = loop.run(adapter.trips())
 
         assert result.iterations == 3
@@ -150,7 +149,7 @@ class TestAssignmentLoop:
             verbosity="ERROR",
         )
 
-        loop = AssignmentLoop(monaco_work, config)
+        loop = AssignmentSolver(monaco_work, config)
         result = loop.run(adapter.trips())
 
         assert np.sum(result.network_state.flow_vph > 0) > 0
@@ -169,7 +168,7 @@ class TestAssignmentLoop:
             verbosity="ERROR",
         )
 
-        loop = AssignmentLoop(monaco_work, config)
+        loop = AssignmentSolver(monaco_work, config)
         result = loop.run(adapter.trips())
 
         state = result.network_state
@@ -194,7 +193,7 @@ class TestAssignmentLoop:
             verbosity="ERROR",
         )
 
-        loop = AssignmentLoop(monaco_work, config)
+        loop = AssignmentSolver(monaco_work, config)
         result = loop.run(adapter.trips())
 
         gaps = [r.relative_gap for r in result.iteration_log]
@@ -218,7 +217,7 @@ class TestAssignmentLoop:
             verbosity="ERROR",
         )
 
-        loop = AssignmentLoop(monaco_work, config)
+        loop = AssignmentSolver(monaco_work, config)
         result = loop.run(adapter.trips())
 
         log_dict = result.log_as_dict()
@@ -228,28 +227,6 @@ class TestAssignmentLoop:
         assert "max_density_delta" in log_dict
         assert len(log_dict["iteration"]) == 2
 
-    def test_matrix_free_hill_climber_smoke(self, monaco_work):
-        """Matrix-free hill-climber MVP runs across multiple Monaco batches."""
-        trips = _build_monaco_trip_stream(monaco_work)
-
-        solver = MatrixFreeHillClimber(
-            monaco_work,
-            AssignmentConfig(
-                bin_width_s=1800.0,
-                smoothing=DensitySmoothingConfig(method="none"),
-                verbosity="ERROR",
-            ),
-            default_batch_size=3,
-        )
-
-        result = solver.run_stream(trips, max_batch_size=3)
-
-        assert result.n_batches >= 2
-        assert result.n_trips == len(trips)
-        assert result.network_state is not None
-        assert result.network_state.n_edges > 0
-        assert np.any(result.network_state.density_vpkm > 0)
-        assert all(b.batch_tstt > 0 for b in result.batch_results)
 
 
 class TestODMatrixAdapter:

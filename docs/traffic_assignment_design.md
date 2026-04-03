@@ -360,17 +360,195 @@ formulations that require iterative inversion. For N edges, the entire
 flow-to-speed conversion is a single vectorized NumPy operation — O(N) with
 no loops.
 
-### 3.7  Oversaturation policy
+### 3.7  Oversaturation: flow-based assignment with extended q → k mapping
 
-When assigned flow exceeds capacity, physical queuing occurs. For the first
-prototype, we use a simple penalty:
+#### 3.7.1  Why density-based blending fails
 
-- Clamp density at k_j (speed → 0 is not useful).
-- Instead, set speed to a configurable floor (e.g., 5 km/h).
-- Optionally report oversaturated links for diagnostics.
+The original approach blended **density** across MSA iterations, computing
+AON density as `k_aon = demand / (v_routing × Δt)`.  This creates a
+positive feedback loop:
 
-Spillback modeling (queues propagating upstream) is deferred but partially
-addressed by the mesoscopic density smoothing in §3.8.
+1. Congested network → low `v_routing`
+2. `k_aon = demand / v_routing` inflates (large demand ÷ small speed)
+3. MSA blends the inflated density into state → more congestion
+4. Lower speed → even higher `k_aon` → density ratchets toward k_j
+
+The root cause is that `k_aon` depends on the *current state* (via
+`v_routing`), violating MSA's requirement that the auxiliary problem be
+independent of the iterate.
+
+More fundamentally, `k_aon = demand / v` assumes all demand physically
+traverses the link at speed `v`.  But the MFD's throughput q(k) = k × v(k)
+is a parabola that **peaks at q_c**.  When demand exceeds q_c, the equation
+`demand = k × v(k)` has **no solution** — no density produces that
+throughput.  The fixed point does not exist, and density diverges regardless
+of VDF shape.
+
+```
+     q(k)
+      ^
+      |     ×  ← q_c (MFD peak, maximum throughput)
+      |    / \
+      |── ─ ── ──  ← demand > q_c (NO INTERSECTION)
+      |  /     \
+      | /       \___→ 0
+      └──────────────→ k
+      0   k_c    k_j
+```
+
+This is not a numerical issue.  It is a mathematical impossibility: the MFD
+cannot serve more flow than its capacity q_c at any density.  Excess demand
+must spread across alternative routes or accept queueing delay.
+
+#### 3.7.2  Solution: blend flow, derive density
+
+The fix is to blend **flow** (demand volume, state-independent) and derive
+density through a monotone q → k mapping:
+
+```
+1. AON:    Route all demand → q_aon per link (state-independent)
+2. Blend:  q_n = q_{n-1} + (1/n)(q_aon - q_{n-1})     [MSA]
+3. Map:    k = f(q)                                     [monotone, defined ∀ q ≥ 0]
+4. VDF:    v = g(k)                                     [bi-parabolic MFD]
+5. Cost:   t = L / v                                    [→ OSRM customize]
+```
+
+MSA convergence is **guaranteed** because:
+
+- `q_aon` depends only on shortest paths (state-independent auxiliary)
+- `t(q) = L / g(f(q))` is monotone non-decreasing (more flow → more cost)
+- Both conditions of Sheffi (1985) are satisfied
+
+#### 3.7.3  The q → k mapping
+
+The mapping is piecewise: the exact MFD inverse below capacity, and a
+monotone extension above.
+
+**Below capacity** (q ≤ q_c): exact uncongested inverse (§3.6)
+
+```
+k(q) = k_c · (1 − √(1 − q / q_c))
+```
+
+This maps [0, q_c] → [0, k_c].  It is the analytically exact inverse of the
+uncongested parabolic branch.
+
+**Above capacity** (q > q_c): asymptotic extension toward k_j
+
+```
+k(q) = k_c + (k_j − k_c) · √(1 − q_c / q)
+```
+
+This maps (q_c, ∞) → (k_c, k_j).  Properties:
+
+| Property | Value |
+|----------|-------|
+| Continuous at q_c | k(q_c) = k_c ✓ |
+| Monotone increasing | dk/dq = (k_j − k_c) · q_c / (2 · q² · √(1 − q_c/q)) > 0 ✓ |
+| Bounded | k → k_j as q → ∞ (never exceeds jam density) |
+| Parameter-free | Uses only k_c, k_j, q_c from the MFD |
+| C⁰ at q_c | Values match; slopes do not (left side is vertical, right side enters with finite slope) |
+
+The C⁰ (but not C¹) junction at q_c is acceptable: MSA convergence requires
+monotonicity and continuity of the cost function, not differentiability.
+
+**Physical interpretation:**
+
+Below capacity, density equals the true physical occupancy (vehicles per km
+present on the link at any instant).  Above capacity, density is a
+*generalized density* — an accounting variable that maps demand to the
+congested branch of the VDF to produce the correct cost penalty.  This is
+analogous to how BPR allows V/C > 1 without physical meaning — it simply
+produces increasing cost.  The key difference: the MFD-calibrated mapping
+uses only v_f and k_j (physical link properties) rather than arbitrary
+α/β constants.
+
+**Vectorized implementation:**
+
+```python
+def demand_to_density(q, v_f, k_j, kc_ratio=1/3):
+    """Monotone q → k mapping. Exact inverse below q_c, asymptotic above."""
+    k_c = kc_ratio * k_j
+    q_c = v_f * k_c / 2.0
+
+    uncongested = k_c * (1.0 - np.sqrt(np.maximum(1.0 - q / q_c, 0.0)))
+    congested   = k_c + (k_j - k_c) * np.sqrt(np.maximum(1.0 - q_c / q, 0.0))
+
+    return np.where(q <= q_c, uncongested, congested)
+```
+
+#### 3.7.4  OSRM speed resolution and the removed speed floor
+
+The original code imposed a speed floor of 1.08 km/h to match OSRM's
+assumed quantization.  Investigation of OSRM's `convertToDuration()`
+function reveals that OSRM stores segment durations as **deci-seconds**
+(0.1 s resolution) in 22-bit packed integers:
+
+```
+MAX_SEGMENT_DURATION = 2²² − 2 = 4,194,302 deci-seconds ≈ 116 hours
+```
+
+For a 200 m link, the effective minimum speed before hitting the 22-bit cap
+is approximately 0.002 km/h.  OSRM can distinguish 0.1 km/h from 0.05 km/h
+on a 200 m segment (7,200 vs 14,400 deci-seconds — ample resolution).
+
+**The 1.08 km/h floor was our self-imposed limitation, not OSRM's.**
+Removing it allows the VDF's congested branch to produce arbitrarily low
+speeds as k approaches k_j, and OSRM can represent the corresponding cost
+differences through its deci-second duration storage.
+
+#### 3.7.5  The complete cost chain: t(q)
+
+Composing the q → k mapping with the bi-parabolic VDF produces a monotone
+travel-time function of demand:
+
+```
+t(q) = L / v(k(q))
+```
+
+Representative values for a 1 km link (v_f = 60 km/h, k_j = 150 veh/km):
+
+| q / q_c | k (veh/km) | v (km/h) | t / t_ff | BPR t / t_ff |
+|---------|-----------|---------|---------|-------------|
+| 0.00 | 0.0 | 60.00 | 1.0 | 1.0 |
+| 0.50 | 14.6 | 51.21 | 1.2 | 1.0 |
+| 0.83 | 29.6 | 42.25 | 1.4 | 1.1 |
+| 1.00 | 50.0 | 30.00 | 2.0 | 1.2 |
+| 1.33 | 100.0 | 11.25 | 5.3 | 1.5 |
+| 2.00 | 120.7 | 6.21 | 9.7 | 3.4 |
+| 3.00 | 131.6 | 3.80 | 15.8 | 13.2 |
+| 4.00 | 136.6 | 2.75 | 21.9 | 39.4 |
+| 8.00 | 143.5 | 1.31 | 45.9 | 615.4 |
+
+Below ~3× capacity, the MFD cost function is **steeper** than BPR(0.15, 4),
+providing a stronger rerouting signal in the regime where most links operate
+at equilibrium.  Above ~3.5× capacity, BPR's power-4 growth overtakes the
+MFD's asymptotic approach to k_j.  This is acceptable because links at 4×+
+capacity are extremely rare at equilibrium — MSA redistributes demand well
+before reaching such extreme overloads.
+
+The cost function t(q) has **infinite slope** as q → q_c from below (from
+the uncongested inverse's vertical tangent at k_c), providing an especially
+strong deterrent against loading beyond capacity.
+
+#### 3.7.6  Comparison with BPR
+
+| Property | BPR | MFD (this framework) |
+|----------|-----|---------------------|
+| Cost function | t = t₀[1 + α(V/C)^β] | t = L / v(k(q)) |
+| Parameters | t₀, C, α, β (4, calibrated) | v_f, k_j (2, physical) |
+| Physical basis | None (empirical curve fit) | Fundamental diagram |
+| Below capacity | Gentle rise (~1.15× at capacity) | Moderate rise (2× at capacity) |
+| Above capacity | Power-law growth (unbounded) | Asymptotic toward k_j (bounded but steep) |
+| Density as state variable | No | Yes |
+| Closed-form inverse | No (iterative for V → t) | Yes (§3.6) |
+| Convergence guarantee | Yes (monotone) | Yes (monotone) |
+
+Both frameworks guarantee MSA convergence.  The MFD approach trades BPR's
+unbounded growth at extreme oversaturation for physical grounding and
+parameter economy.  In practice, the near-capacity regime (0.8–1.5× q_c) is
+where equilibrium solutions concentrate, and the MFD provides a steeper,
+more realistic cost gradient in exactly that range.
 
 ### 3.8  Mesoscopic density model: spatial smoothing
 

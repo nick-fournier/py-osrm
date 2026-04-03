@@ -138,8 +138,8 @@ def _add_convergence_comparison(
 ):
     """Convergence overlay: TSTT, gap, Δk for MSA vs FW on one network."""
 
-    msa_batches = comp.msa_case.result.batch_results or []
-    fw_batches = comp.fw_case.result.batch_results or []
+    msa_batches = getattr(comp.msa_case.result, "batch_results", []) or []
+    fw_batches = getattr(comp.fw_case.result, "batch_results", []) or []
     msa_ref = _convergence_series(comp.msa_case.result)
     fw_ref = _convergence_series(comp.fw_case.result)
 

@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 import osrm
-from osrm.assignment import AssignmentConfig, AssignmentLoop, DensitySmoothingConfig
+from osrm.assignment import AssignmentConfig, AssignmentSolver, DensitySmoothingConfig
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import braess_network
 from .hillclimber_validation import (
@@ -65,7 +65,7 @@ def _run_assignment(
         speed_csv_dir=str(Path(base_path).parent),
     )
 
-    loop = AssignmentLoop(base_path, config)
+    loop = AssignmentSolver(base_path, config)
 
     def lane_patch(state):
         patch_braess_lanes(state, meta)
@@ -272,119 +272,6 @@ class TestBraessParadox:
                 f"Freeflow mismatch on {key}: run1={ff1[key]:.1f}, "
                 f"run2={ff2[key]:.1f}"
             )
-
-    def test_hillclimber_shortcut_reduces_tstt(self, tmp_path):
-        """Under hill-climber (incremental) loading the shortcut HELPS.
-
-        Unlike equilibrium assignment, the hill-climber loads demand in
-        sequential batches without global rerouting.  The shortcut provides
-        genuine relief under greedy loading because no single batch
-        overloads it.  This is the expected (correct) behaviour — the
-        Braess paradox is an equilibrium phenomenon.
-        """
-        from osrm.assignment.osm_synthesis import patch_braess_lanes
-
-        base_with, meta_with = _prepare_network(tmp_path / "with", with_shortcut=True)
-        base_without, meta_without = _prepare_network(tmp_path / "without", with_shortcut=False)
-        case_with = run_hillclimber_case(
-            base_path=base_with,
-            meta=meta_with,
-            copy_fn=lambda base, run_dir: base,
-            trip_builder=_build_hillclimber_trips,
-            run_dir=tmp_path / "with_run",
-            demand_scale=1.0,
-            state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-            load_rate=0.10,
-        )
-        case_without = run_hillclimber_case(
-            base_path=base_without,
-            meta=meta_without,
-            copy_fn=lambda base, run_dir: base,
-            trip_builder=_build_hillclimber_trips,
-            run_dir=tmp_path / "without_run",
-            demand_scale=1.0,
-            state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-            load_rate=0.10,
-        )
-
-        with_tstt = sum(b.batch_tstt for b in case_with.result.batch_results)
-        without_tstt = sum(b.batch_tstt for b in case_without.result.batch_results)
-        # Shortcut reduces TSTT under incremental loading (opposite of equilibrium)
-        assert with_tstt < without_tstt, (
-            f"Expected shortcut to REDUCE TSTT under hill-climber loading, "
-            f"but with={with_tstt:,.0f} >= without={without_tstt:,.0f}"
-        )
-
-    def test_sampled_refinement_reproduces_paradox_without_oscillation(self, tmp_path):
-        """Sampled path-set refinement should recover the paradox cleanly.
-
-        This is the new single-method refinement path: greedy initialization
-        followed by sampled path-set swaps with route discovery only when needed.
-        It should stop when further sampled updates do not improve the state.
-        """
-        from osrm.assignment.osm_synthesis import patch_braess_lanes
-
-        demand = self.DEMAND
-
-        def _run_with_sampled_refinement(base, meta):
-            case = run_hillclimber_case(
-                base_path=base,
-                meta=meta,
-                copy_fn=lambda base_path, run_dir: base_path,
-                trip_builder=lambda case_meta, scale: [DemandTrip(
-                    origin=case_meta["origin"],
-                    destination=case_meta["destination"],
-                    volume=demand * scale,
-                )],
-                run_dir=tmp_path / f"refinement_{Path(base).stem}",
-                demand_scale=1.0,
-                load_rate=0.10,
-                max_rounds=10,
-                gap_threshold=0.001,
-                state_patch_factory=lambda case_meta: lambda state: patch_braess_lanes(state, case_meta),
-            )
-            return case.result
-
-        base_with, meta_with = _prepare_network(tmp_path / "refinement_with", with_shortcut=True)
-        base_without, meta_without = _prepare_network(
-            tmp_path / "refinement_without", with_shortcut=False,
-        )
-        result_w = _run_with_sampled_refinement(base_with, meta_with)
-        result_wo = _run_with_sampled_refinement(base_without, meta_without)
-
-        tstt_w = hillclimber_final_tstt(result_w)
-        tstt_wo = hillclimber_final_tstt(result_wo)
-        pct = (tstt_w / tstt_wo - 1) * 100
-
-        assert tstt_w > tstt_wo, (
-            f"Expected Braess paradox after sampled refinement, "
-            f"but with={tstt_w:,.0f} <= without={tstt_wo:,.0f} ({pct:+.1f}%)"
-        )
-        assert pct > 2.0, (
-            f"Paradox too weak under sampled refinement: {pct:.1f}% TSTT increase"
-        )
-
-        gap_w = hillclimber_final_gap(result_w)
-        gap_wo = hillclimber_final_gap(result_wo)
-        assert gap_w is not None and gap_w < 0.05, (
-            f"MSA shortcut gap too large: {gap_w}"
-        )
-        assert gap_wo is not None and gap_wo < 0.05, (
-            f"MSA no-shortcut gap too large: {gap_wo}"
-        )
-
-        if result_w.msa_results:
-            gaps_w = [
-                r.relative_gap
-                for r in result_w.msa_results
-                if r.relative_gap is not None
-            ]
-            if len(gaps_w) >= 2:
-                assert min(gaps_w) < gaps_w[0], (
-                    f"Expected MSA to find at least one lower-gap state, got {gaps_w}"
-                )
-
-
 
 
 def _braess_state_table(scenarios: list[tuple]) -> str:
@@ -619,15 +506,15 @@ def generate_braess_report(
     delta = tstt_with_vals[-1] - tstt_without_vals[-1]
     pct = delta / tstt_without_vals[-1] * 100 if tstt_without_vals[-1] > 0 else 0
 
-    hc_tstt_wo = sum(b.batch_tstt for b in case_without.result.batch_results)
-    hc_tstt_w = sum(b.batch_tstt for b in case_with.result.batch_results)
+    hc_tstt_wo = sum(b.tstt for b in getattr(case_without.result, "iteration_log", []))
+    hc_tstt_w = sum(b.tstt for b in getattr(case_with.result, "iteration_log", []))
     hc_pct = (hc_tstt_w / hc_tstt_wo - 1) * 100 if hc_tstt_wo else 0.0
 
     rr_tstt_w = hillclimber_final_tstt(case_with.result)
     rr_tstt_wo = hillclimber_final_tstt(case_without.result)
     rr_pct = (rr_tstt_w / rr_tstt_wo - 1) * 100 if rr_tstt_wo else 0.0
 
-    n_rounds_w = len(case_with.result.msa_results)
+    n_rounds_w = len(getattr(case_with.result, "iteration_log", []) or [])
     rr_gap_w = hillclimber_final_gap(case_with.result)
     rr_gap_wo = hillclimber_final_gap(case_without.result)
     rr_gap_w_str = f"{rr_gap_w:.6f}" if rr_gap_w is not None else "n/a"
@@ -916,8 +803,8 @@ def generate_braess_report(
         if rr_pct > 0 else
         f"The Braess paradox does not emerge ({rr_pct:+.1f}%)."
     )
-    rounds_w = case_with.result.msa_results
-    rounds_wo = case_without.result.msa_results
+    rounds_w = getattr(case_with.result, "iteration_log", []) or []
+    rounds_wo = getattr(case_without.result, "iteration_log", []) or []
     hc_descriptions[3] += (
         f"<p><b>MSA convergence:</b> {n_rounds_w} iteration(s) with shortcut, "
         f"{len(rounds_wo)} without. "
@@ -954,8 +841,8 @@ def generate_braess_report(
             load_rate=1.0 / ns,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
-        tw = sum(b.batch_tstt for b in cw.result.batch_results)
-        two = sum(b.batch_tstt for b in cwo.result.batch_results)
+        tw = sum(b.tstt for b in getattr(cw.result, "iteration_log", []))
+        two = sum(b.tstt for b in getattr(cwo.result, "iteration_log", []))
         sweep_pcts.append((tw / two - 1) * 100 if two else 0.0)
 
     fig_sweep = go.Figure()

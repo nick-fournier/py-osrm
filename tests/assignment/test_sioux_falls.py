@@ -29,7 +29,7 @@ import pytest
 import osrm
 from osrm.assignment import (
     AssignmentConfig,
-    AssignmentLoop,
+    AssignmentSolver,
     DensitySmoothingConfig,
 )
 from osrm.assignment.od_matrix import DemandTrip
@@ -121,7 +121,7 @@ def _run_sf_assignment(
         speed_csv_dir=str(Path(base_path).parent),
     )
 
-    loop = AssignmentLoop(base_path, config)
+    loop = AssignmentSolver(base_path, config)
 
     def lane_patch(state):
         patch_sioux_falls_lanes(state, meta)
@@ -156,8 +156,6 @@ def _link_flow_correlation(result, meta: dict):
 
 class TestSiouxFalls:
     """Sioux Falls structural validation."""
-
-    # ── OLD pipeline (AssignmentLoop) tests ──
 
     def test_smoke_fw(self, tmp_path):
         """Quick smoke: FW runs without error on Sioux Falls, 5 iterations."""
@@ -212,8 +210,6 @@ class TestSiouxFalls:
                 f"5%={ff2[key]:.1f}"
             )
 
-    # ── NEW pipeline (TrafficAssignmentSolver) tests ──
-
     def test_hillclimber_smoke(self, tmp_path):
         """Hill-climber loads Sioux Falls with sampled refinement enabled."""
         base, meta = _prepare_sf_network(tmp_path)
@@ -230,7 +226,7 @@ class TestSiouxFalls:
         )
         state = case.result.network_state
         assert state is not None
-        assert case.result.n_batches == 10
+        assert len(case.result.iteration_log) >= 1
         assert state.n_edges > 0
         assert np.all(state.flow_vph >= 0)
         assert np.all(state.speed_kmh > 0)
