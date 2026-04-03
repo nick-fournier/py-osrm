@@ -149,6 +149,11 @@ class MSAIterationResult:
     max_k_over_kj: float
     median_k_over_kj: float
     mean_speed_kmh: float
+    median_speed_kmh: float
+    max_speed_kmh: float
+    min_speed_kmh: float
+    median_tt_s: float
+    max_tt_s: float
     route_time_s: float
     customize_time_s: float
     engine_time_s: float
@@ -171,6 +176,11 @@ class HillClimberBatchResult:
     max_k_over_kj: float
     median_k_over_kj: float
     mean_speed_kmh: float
+    median_speed_kmh: float
+    max_speed_kmh: float
+    min_speed_kmh: float
+    median_tt_s: float
+    max_tt_s: float
 
 
 @dataclass
@@ -201,6 +211,11 @@ class HillClimberResult:
             "max_k_over_kj": [r.max_k_over_kj for r in self.batch_results],
             "median_k_over_kj": [r.median_k_over_kj for r in self.batch_results],
             "mean_speed_kmh": [r.mean_speed_kmh for r in self.batch_results],
+            "median_speed_kmh": [r.median_speed_kmh for r in self.batch_results],
+            "max_speed_kmh": [r.max_speed_kmh for r in self.batch_results],
+            "min_speed_kmh": [r.min_speed_kmh for r in self.batch_results],
+            "median_tt_s": [r.median_tt_s for r in self.batch_results],
+            "max_tt_s": [r.max_tt_s for r in self.batch_results],
         }
 
 
@@ -437,7 +452,20 @@ class TrafficAssignmentSolver:
             )
             k_over_kj = state.density_vpkm / np.maximum(state.jam_density, 1e-9)
             median_k_over_kj = float(np.median(k_over_kj[k_over_kj > 0])) if np.any(k_over_kj > 0) else 0.0
-            mean_speed = float(np.median(state.speed_kmh))
+
+            # Link speed statistics (only over links with nonzero density)
+            active = state.density_vpkm > 0
+            active_speeds = state.speed_kmh[active] if np.any(active) else state.speed_kmh
+            mean_speed = float(np.mean(active_speeds))
+            median_speed = float(np.median(active_speeds))
+            max_speed = float(np.max(active_speeds))
+            min_speed = float(np.min(active_speeds))
+
+            # Link travel time statistics (only over active links)
+            active_tt = post_link_tt_s[active] if np.any(active) else post_link_tt_s
+            median_tt = float(np.median(active_tt))
+            max_tt = float(np.max(active_tt))
+
             iter_time = time.monotonic() - iter_start
 
             iter_result = MSAIterationResult(
@@ -450,6 +478,11 @@ class TrafficAssignmentSolver:
                 max_k_over_kj=max_k_over_kj,
                 median_k_over_kj=median_k_over_kj,
                 mean_speed_kmh=mean_speed,
+                median_speed_kmh=median_speed,
+                max_speed_kmh=max_speed,
+                min_speed_kmh=min_speed,
+                median_tt_s=median_tt,
+                max_tt_s=max_tt,
                 route_time_s=route_time,
                 customize_time_s=customize_time,
                 engine_time_s=engine_time,
@@ -463,11 +496,15 @@ class TrafficAssignmentSolver:
 
             method_label = "FW" if use_fw else "MSA"
             logger.info(
-                "%s iter %d: \u03b1=%.3f \u0394k=%.4f gap=%s TSTT=%.0f "
-                u"v\u0305=%.1f km/h k/kj=%.2f (%.1fs)",
+                "%s iter %d: α=%.3f Δk=%.4f gap=%s TSTT=%.0f "
+                "v̄=%.1f v̂=%.1f v↓=%.1f km/h  "
+                "t̃=%.1f t↑=%.1fs  k/kj=%.2f (%.1fs)",
                 method_label, m, alpha, state_change_norm,
                 f"{relative_gap:.4f}" if relative_gap is not None else "n/a",
-                link_tstt, mean_speed, max_k_over_kj, iter_time,
+                link_tstt,
+                mean_speed, median_speed, min_speed,
+                median_tt, max_tt,
+                max_k_over_kj, iter_time,
             )
 
             # Convergence checks
@@ -691,7 +728,20 @@ class TrafficAssignmentSolver:
 
             max_k_over_kj = float(np.max(state.density_vpkm / np.maximum(state.jam_density, 1e-9)))
             median_k_over_kj = float(np.median(state.density_vpkm / np.maximum(state.jam_density, 1e-9)))
-            median_speed = float(np.median(state.speed_kmh))
+
+            # Speed and travel time statistics over active links
+            active = state.density_vpkm > 0
+            active_speeds = state.speed_kmh[active] if np.any(active) else state.speed_kmh
+            mean_speed = float(np.mean(active_speeds))
+            median_speed = float(np.median(active_speeds))
+            max_speed = float(np.max(active_speeds))
+            min_speed = float(np.min(active_speeds))
+            post_speed_ms = np.maximum(state.speed_kmh / 3.6, 0.001)
+            post_link_tt_s = state.length_m / post_speed_ms
+            active_tt = post_link_tt_s[active] if np.any(active) else post_link_tt_s
+            median_tt = float(np.median(active_tt))
+            max_tt = float(np.max(active_tt))
+
             batch_result = HillClimberBatchResult(
                 batch_index=batch.batch_index,
                 departure_bin=batch.departure_bin,
@@ -703,7 +753,12 @@ class TrafficAssignmentSolver:
                 engine_time_s=engine_time,
                 max_k_over_kj=max_k_over_kj,
                 median_k_over_kj=median_k_over_kj,
-                mean_speed_kmh=median_speed,
+                mean_speed_kmh=mean_speed,
+                median_speed_kmh=median_speed,
+                max_speed_kmh=max_speed,
+                min_speed_kmh=min_speed,
+                median_tt_s=median_tt,
+                max_tt_s=max_tt,
             )
             batch_results.append(batch_result)
 

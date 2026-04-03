@@ -43,6 +43,45 @@ def _save_or_show(fig: go.Figure, path: Optional[str] = None) -> go.Figure:
     return fig
 
 
+def _freeflow_branch_traveltime(
+    q: np.ndarray,
+    q_c: float,
+    v_f: float,
+    link_length_km: float,
+) -> np.ndarray:
+    """Travel time on the uncongested branch as a function of demand rate."""
+    ratio = np.clip(q / q_c, 0.0, 1.0)
+    return 120.0 * link_length_km / (v_f * (1.0 + np.sqrt(1.0 - ratio)))
+
+
+def _queue_delay_surrogate_traveltime(
+    q: np.ndarray,
+    q_c: float,
+    v_f: float,
+    link_length_km: float,
+    analysis_period_hr: float,
+) -> np.ndarray:
+    """Single-valued static surrogate: running time + average point-queue delay."""
+    t_free = _freeflow_branch_traveltime(q, q_c, v_f, link_length_km)
+    t_c = 120.0 * link_length_km / v_f
+    over_capacity = np.maximum(q / q_c - 1.0, 0.0)
+    queue_delay_min = 30.0 * analysis_period_hr * over_capacity
+    return np.where(q <= q_c, t_free, t_c + queue_delay_min)
+
+
+def _steep_tail_surrogate_traveltime(
+    q: np.ndarray,
+    q_c: float,
+    v_f: float,
+    link_length_km: float,
+    tail_power: float,
+) -> np.ndarray:
+    """Single-valued static surrogate: uncongested branch + large-power tail."""
+    t_free = _freeflow_branch_traveltime(q, q_c, v_f, link_length_km)
+    t_c = 120.0 * link_length_km / v_f
+    return np.where(q <= q_c, t_free, t_c * np.power(q / q_c, tail_power))
+
+
 # ---------------------------------------------------------------------------
 # 1. VDF Theory Plots
 # ---------------------------------------------------------------------------
@@ -221,15 +260,19 @@ def vdf_flow_traveltime(
     v_f: float = 60.0,
     k_j: float = 150.0,
     link_length_km: float = 1.0,
+    analysis_period_hr: float = 1.0,
+    surrogate_max_ratio: float = 1.2,
+    tail_power: float = 20.0,
     vdf: BiParabolicVDF | None = None,
     path: Optional[str] = None,
 ) -> go.Figure:
-    """Plot the flow–travel-time relationship (backward-bending).
+    """Plot the flow–travel-time relationship with static surrogate overlays.
 
     Travel time t = L / v(k) for a link of length *link_length_km*.
     This is the cost function that assignment directly optimizes:
     on the uncongested branch, travel time increases with flow;
     at breakdown, both flow drops and travel time spikes.
+    Dashed overlays show two single-valued static closures above capacity.
     """
     vdf = vdf or BiParabolicVDF()
     k_c = vdf.kc_ratio * k_j
@@ -244,6 +287,13 @@ def vdf_flow_traveltime(
 
     t_ff = link_length_km / (v_f / 60.0)
     t_c = link_length_km / (v_f / 2.0 / 60.0)
+    q_surrogate = np.linspace(0.0, q_c * surrogate_max_ratio, 500)
+    tt_queue = _queue_delay_surrogate_traveltime(
+        q_surrogate, q_c, v_f, link_length_km, analysis_period_hr
+    )
+    tt_tail = _steep_tail_surrogate_traveltime(
+        q_surrogate, q_c, v_f, link_length_km, tail_power
+    )
 
     mask_unc = k <= k_c
     mask_con = k > k_c
@@ -251,13 +301,23 @@ def vdf_flow_traveltime(
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=q[mask_unc], y=tt[mask_unc],
-        mode="lines", name="Uncongested",
+        mode="lines", name="Uncongested MFD branch",
         line=dict(color="#2196F3", width=3),
     ))
     fig.add_trace(go.Scatter(
         x=q[mask_con], y=tt[mask_con],
-        mode="lines", name="Congested",
+        mode="lines", name="Congested MFD branch",
         line=dict(color="#F44336", width=3),
+    ))
+    fig.add_trace(go.Scatter(
+        x=q_surrogate, y=tt_queue,
+        mode="lines", name="Queue-delay surrogate",
+        line=dict(color="#4CAF50", width=3, dash="dash"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=q_surrogate, y=tt_tail,
+        mode="lines", name=f"Steep-tail surrogate (power {tail_power:.0f})",
+        line=dict(color="#9C27B0", width=3, dash="dot"),
     ))
     fig.add_trace(go.Scatter(
         x=[q_c], y=[t_c],
@@ -272,11 +332,12 @@ def vdf_flow_traveltime(
 
     fig.update_layout(
         title=f"Flow–Travel Time (L={link_length_km} km, v_f={v_f}, k_j={k_j})",
-        xaxis_title="Flow q (veh/hr)",
+        xaxis_title="Flow / demand rate q (veh/hr)",
         yaxis_title="Travel time (min)",
         template="plotly_white",
         legend=dict(x=0.05, y=0.95),
     )
+    fig.update_xaxes(range=[0.0, q_c * surrogate_max_ratio])
     return _save_or_show(fig, path)
 
 
@@ -528,12 +589,21 @@ def vdf_theory(output_dir: str = "plots") -> Path:
     v_f, k_j = 60.0, cfg.default_jam_density_per_lane * cfg.default_n_lanes
     k_c = vdf.kc_ratio * k_j
     q_c = v_f * k_c / 2.0
+    analysis_period_hr = 1.0
+    tail_power = 20.0
 
     figs = [
         vdf_speed_density(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_flow_density(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_speed_flow(v_f=v_f, k_j=k_j, vdf=vdf),
-        vdf_flow_traveltime(v_f=v_f, k_j=k_j, vdf=vdf),
+        vdf_flow_traveltime(
+            v_f=v_f,
+            k_j=k_j,
+            analysis_period_hr=analysis_period_hr,
+            tail_power=tail_power,
+            vdf=vdf,
+        ),
+        None,
         vdf_inverse_mfd(v_f=v_f, k_j=k_j, vdf=vdf),
         _vdf_near_jam_detail(v_f=v_f, k_j=k_j, vdf=vdf),
         vdf_inverse_accuracy(v_f=v_f, k_j=k_j, vdf=vdf),
@@ -580,9 +650,33 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         This backward bend is why BPR-style $t(V)$ cost functions are monotonic
         approximations — they avoid the multi-valued regime. Our density-based
         VDF handles both branches natively via $t = L / v(k)$, where $k$ is
-        always single-valued.</p>""",
+        always single-valued. The dashed overlays show two <b>static surrogate</b>
+        closures that extend beyond capacity with a single-valued demand-based
+        cost. Beyond $q_c$, those overlays interpret the horizontal axis as
+        <b>demand rate</b> rather than realized throughput: a queue-delay surrogate
+        (green) and a steep-tail surrogate (purple,
+        power {tail_power:.0f}).</p>""",
 
-        f"""<h2>5. Inverse MFD: Flow → Density</h2>
+        f"""<h2>5. Queue Delay and Steep-Tail Static Surrogates</h2>
+        <p>The backward-bending MFD is physically meaningful, but static assignment
+        needs a single-valued cost curve in demand space. A queue-delay surrogate
+        keeps the <b>running time</b> on the uncongested branch up to capacity and,
+        for $q &gt; q_c$, adds the average delay from a point queue that forms when
+        arrivals exceed discharge:</p>
+        <p>$$t^{{queue}}(q) =
+        \\begin{{cases}}
+        t_{{run}}(q), & q \\leq q_c \\\\
+        t_c + \\dfrac{{H}}{{2}}\\left(\\dfrac{{q}}{{q_c}} - 1\\right), & q &gt; q_c
+        \\end{{cases}}$$</p>
+        <p>where $H$ is the analysis period and $t_c = 2L/v_f$ is the running time
+        at capacity. In this report the overlay uses $H = {analysis_period_hr:.0f}$ hour, so the queue
+        penalty grows by 30 minutes for each additional capacity's worth of demand.
+        The purple comparator is the proposed steep-tail extension
+        $t^{{tail}}(q) = t_c (q/q_c)^{{{tail_power:.0f}}}$ above capacity. It is numerically simple
+        and monotone, but unlike queue delay it does not correspond to an explicit
+        storage or discharge process.</p>""",
+
+        f"""<h2>6. Inverse MFD: Flow → Density</h2>
         <p>The closed-form inversion of the MFD. Given flow $q$, density on each branch is:</p>
         <p><b>Free-flow:</b> &emsp; $k(q) = k_c \\left(1 - \\sqrt{{1 - \\dfrac{{2q}}{{v_f k_c}}}}\\right)$</p>
         <p><b>Congested:</b> &emsp; $k(q) = k_c + (k_j - k_c)\\sqrt{{1 - \\dfrac{{2q}}{{v_f k_c}}}}$</p>
@@ -593,7 +687,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         and the inversion has no real solution, which is why convergence blending
         operates in volume space with a constant-factor density derivation.</p>""",
 
-        f"""<h2>6. Near-Jam Behaviour (k → k<sub>j</sub>)</h2>
+        f"""<h2>7. Near-Jam Behaviour (k → k<sub>j</sub>)</h2>
         <p>This panel zooms into the congested branch near jam density to show the steep
         speed gradient that impacts convergence. At k/k<sub>j</sub> = 0.90, speed is just
         {vdf.density_to_speed(np.array([0.9*k_j]), np.array([v_f]), np.array([k_j]))[0]:.1f} km/h.
@@ -607,7 +701,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         represent virtual queue / spillback — physically impossible density but
         mathematically stable.</p>""",
 
-        """<h2>7. Inverse Round-Trip Accuracy</h2>
+        """<h2>8. Inverse Round-Trip Accuracy</h2>
         <p>A key advantage of this VDF over BPR: the flow-to-density inversion has a
         <b>closed-form solution</b> via the quadratic formula — no Newton solver needed.
         Left panel: q<sub>in</sub> vs q<sub>out</sub> after q → k(q) → q(k) round-trip
@@ -615,7 +709,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         be near machine epsilon (~10<sup>-10</sup>). This confirms the vectorized NumPy
         implementation is numerically exact.</p>""",
 
-        """<h2>8. Speed–Density by Road Class</h2>
+        """<h2>9. Speed–Density by Road Class</h2>
         <p>The bi-parabolic model is "parameter-light" — only v<sub>f</sub> (free-flow speed)
         and k<sub>j</sub> (jam density) are needed per link. k<sub>c</sub> = k<sub>j</sub>/3 is derived,
         not calibrated. This overlay shows how different road classes produce different
@@ -645,6 +739,20 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         <p><b>Inverse MFD</b> ($0 \\leq q \\leq q_c$):</p>
         <p>Free-flow: &emsp; $k(q) = k_c \\left(1 - \\sqrt{{1 - \\dfrac{{2q}}{{v_f k_c}}}}\\right)$</p>
         <p>Congested: &emsp; $k(q) = k_c + (k_j - k_c)\\sqrt{{1 - \\dfrac{{2q}}{{v_f k_c}}}}$</p>
+
+        <p><b>Static surrogate options</b> (single-valued demand-based costs):</p>
+        <p>Queue-delay: &emsp;</p>
+        <p>$$t^{{queue}}(q) =
+        \\begin{{cases}}
+        t_{{run}}(q), & q \\leq q_c \\\\
+        t_c + \\dfrac{{H}}{{2}}\\left(\\dfrac{{q}}{{q_c}} - 1\\right), & q &gt; q_c
+        \\end{{cases}}$$</p>
+        <p>Steep tail: &emsp;</p>
+        <p>$$t^{{tail}}(q) =
+        \\begin{{cases}}
+        t_{{run}}(q), & q \\leq q_c \\\\
+        t_c \\left(\\dfrac{{q}}{{q_c}}\\right)^{{{tail_power:.0f}}}, & q &gt; q_c
+        \\end{{cases}}$$</p>
 
         <p><b>Wardrop relative gap:</b> &emsp;
         $\\text{{gap}} = \\dfrac{{\\sum_a V_a \\cdot t_a}}{{\\sum_{{rs}} d_{{rs}} \\cdot \\pi_{{rs}}}} - 1$
