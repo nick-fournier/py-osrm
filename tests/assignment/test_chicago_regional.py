@@ -140,7 +140,7 @@ def _build_trips(meta: dict) -> list:
     return trips
 
 
-def _build_hillclimber_trips(
+def _build_validation_trips(
     meta: dict, demand_scale: float
 ) -> list[DemandTrip]:
     meta_scaled = dict(meta)

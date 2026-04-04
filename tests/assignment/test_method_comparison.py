@@ -20,10 +20,10 @@ from osrm.assignment.plots import (
     _write_combined_report,
 )
 
-from .hillclimber_validation import (
-    HillClimberValidationCase,
+from .validation import (
+    ValidationCase,
     iteration_series,
-    run_hillclimber_case,
+    run_validation_case,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,8 +36,8 @@ FW_COLOR = "#E65100"
 @dataclass
 class _NetworkComparison:
     name: str
-    msa_case: HillClimberValidationCase
-    fw_case: HillClimberValidationCase
+    msa_case: ValidationCase
+    fw_case: ValidationCase
     meta: dict
 
 
@@ -65,14 +65,14 @@ def _run_network(
         gap_threshold=0.001,
     )
     logger.info("Running %s with MSA...", name)
-    msa_case = run_hillclimber_case(
+    msa_case = run_validation_case(
         base_path=base,
         run_dir=tmp_path / "msa",
         method="msa",
         **common,
     )
     logger.info("Running %s with FW...", name)
-    fw_case = run_hillclimber_case(
+    fw_case = run_validation_case(
         base_path=base,
         run_dir=tmp_path / "fw",
         method="fw",
@@ -85,14 +85,14 @@ def _run_anaheim(tmp_path: Path, max_rounds: int) -> _NetworkComparison:
     from .test_anaheim import (
         _prepare_anaheim_network,
         _copy_clean_osrm,
-        _build_hillclimber_trips,
+        _build_validation_trips,
         patch_lanes,
     )
     return _run_network(
         "Anaheim",
         _prepare_anaheim_network,
         _copy_clean_osrm,
-        _build_hillclimber_trips,
+        _build_validation_trips,
         lambda meta: lambda state: patch_lanes(state, meta),
         tmp_path / "anaheim",
         max_rounds,
@@ -103,14 +103,14 @@ def _run_chicago_sketch(tmp_path: Path, max_rounds: int) -> _NetworkComparison:
     from .test_chicago_sketch import (
         _prepare_chicago_network,
         _copy_clean_osrm,
-        _build_hillclimber_trips,
+        _build_validation_trips,
         patch_lanes,
     )
     return _run_network(
         "Chicago Sketch",
         _prepare_chicago_network,
         _copy_clean_osrm,
-        _build_hillclimber_trips,
+        _build_validation_trips,
         lambda meta: lambda state: patch_lanes(state, meta),
         tmp_path / "chi_sketch",
         max_rounds,

@@ -21,7 +21,7 @@ import osrm
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import LinkClass, tntp_to_osm, patch_lanes
 from osrm.assignment.tntp import parse_net, parse_trips, load_node_coords, parse_flow
-from .hillclimber_validation import generate_hillclimber_validation_report
+from .validation import generate_validation_report
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "chicago_sketch"
 
@@ -98,7 +98,7 @@ def _build_trips(meta: dict) -> list:
     return trips
 
 
-def _build_hillclimber_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
+def _build_validation_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
     meta_scaled = dict(meta)
     meta_scaled["od_matrix"] = meta["od_matrix"] * demand_scale
     return _build_trips(meta_scaled)
@@ -122,11 +122,11 @@ def generate_chicago_report(
     max_rounds : int
         Max convergence iterations.
     """
-    return generate_hillclimber_validation_report(
+    return generate_validation_report(
         network_name="Chicago Sketch",
         prepare_fn=_prepare_chicago_network,
         copy_fn=_copy_clean_osrm,
-        trip_builder=_build_hillclimber_trips,
+        trip_builder=_build_validation_trips,
         tmp_path=tmp_path,
         output_path=output_path,
         detail_scale=1.00,

@@ -31,7 +31,7 @@ from osrm.assignment.plots import (
 
 
 @dataclass
-class HillClimberValidationCase:
+class ValidationCase:
     """Materialized assignment validation run."""
 
     base_path: str
@@ -41,7 +41,7 @@ class HillClimberValidationCase:
     total_demand: float
 
 
-def run_hillclimber_case(
+def run_validation_case(
     *,
     base_path: str,
     meta: dict,
@@ -73,7 +73,7 @@ def run_hillclimber_case(
     solver = AssignmentSolver(run_base, config)
     state_patch = state_patch_factory(meta) if state_patch_factory else None
     result = solver.assign_matrix(trips, state_patch=state_patch)
-    return HillClimberValidationCase(
+    return ValidationCase(
         base_path=run_base,
         meta=meta,
         trips=trips,
@@ -82,7 +82,7 @@ def run_hillclimber_case(
     )
 
 
-def hillclimber_final_gap(result: object) -> float | None:
+def validation_final_gap(result: object) -> float | None:
     """Return the final convergence gap, if available."""
     gap = getattr(result, "final_gap", None)
     if gap is not None:
@@ -93,7 +93,7 @@ def hillclimber_final_gap(result: object) -> float | None:
     return None
 
 
-def hillclimber_final_tstt(
+def validation_final_tstt(
     result: object,
     *,
     min_speed_kmh: float = 1.08,
@@ -130,7 +130,7 @@ def iteration_series(result: object) -> dict:
 def _add_batch_sections(
     figs: list[go.Figure | None],
     descriptions: list[str],
-    case: HillClimberValidationCase,
+    case: ValidationCase,
     *,
     detail_scale: float,
 ) -> None:
@@ -184,9 +184,9 @@ def _add_batch_sections(
         template="plotly_white",
     )
     figs.append(fig)
-    final_gap = hillclimber_final_gap(result)
+    final_gap = validation_final_gap(result)
     gap_str = f"{final_gap:.6f}" if final_gap is not None else "n/a"
-    final_tstt = hillclimber_final_tstt(result)
+    final_tstt = validation_final_tstt(result)
     descriptions.append(
         "<h2>Convergence</h2>"
         "<p>MSA iterations blend all-or-nothing auxiliary loadings "
@@ -262,7 +262,7 @@ def _add_batch_sections(
     )
 
 
-def generate_hillclimber_validation_report(
+def generate_validation_report(
     *,
     network_name: str,
     prepare_fn,
@@ -282,7 +282,7 @@ def generate_hillclimber_validation_report(
     tmp_path.mkdir(parents=True, exist_ok=True)
 
     base, meta = prepare_fn(tmp_path)
-    case = run_hillclimber_case(
+    case = run_validation_case(
         base_path=base,
         meta=meta,
         copy_fn=copy_fn,
@@ -367,10 +367,10 @@ def generate_hillclimber_validation_report(
     return Path(output_path)
 
 
-def build_hillclimber_report_sections(
+def build_validation_report_sections(
     *,
     network_name: str,
-    case: HillClimberValidationCase,
+    case: ValidationCase,
     detail_scale: float,
 ) -> tuple[list[go.Figure | None], list[str]]:
     """Build the shared report sections used by assignment validations."""

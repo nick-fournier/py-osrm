@@ -6,7 +6,7 @@ benchmark (24 nodes, 76 links, 528 OD pairs).
 The TNTP demand (360,600 total) represents a BPR-calibrated hourly volume
 that exceeds the physical capacity of realistic 2–3 lane roads. Matrix
 validation stays at 15% demand (54,090 vph), which is representative of an
-actual peak hour for a ~200k population city. Hill-climber validation uses
+actual peak hour for a ~200k population city. Assignment validation uses
 30% demand (108,180 vph) so sampled refinement is exercised on a more
 meaningfully loaded network.
 
@@ -34,9 +34,9 @@ from osrm.assignment import (
 )
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import sioux_falls_network, patch_sioux_falls_lanes
-from .hillclimber_validation import (
-    generate_hillclimber_validation_report,
-    run_hillclimber_case,
+from .validation import (
+    generate_validation_report,
+    run_validation_case,
 )
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "sioux_falls"
@@ -88,7 +88,7 @@ def _build_trips(meta: dict) -> list:
     return trips
 
 
-def _build_hillclimber_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
+def _build_validation_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
     meta_scaled = dict(meta)
     meta_scaled["od_matrix"] = meta["od_matrix"] * demand_scale
     return _build_trips(meta_scaled)
@@ -210,14 +210,14 @@ class TestSiouxFalls:
                 f"5%={ff2[key]:.1f}"
             )
 
-    def test_hillclimber_smoke(self, tmp_path):
-        """Hill-climber loads Sioux Falls with sampled refinement enabled."""
+    def test_validation_smoke(self, tmp_path):
+        """Assignment loads Sioux Falls with sampled refinement enabled."""
         base, meta = _prepare_sf_network(tmp_path)
-        case = run_hillclimber_case(
+        case = run_validation_case(
             base_path=base,
             meta=meta,
             copy_fn=_copy_clean_osrm,
-            trip_builder=_build_hillclimber_trips,
+            trip_builder=_build_validation_trips,
             run_dir=tmp_path / "hc_run",
             demand_scale=0.30,
             state_patch_factory=lambda m: lambda s: patch_sioux_falls_lanes(s, m),
@@ -246,11 +246,11 @@ def generate_sioux_falls_report(
     max_rounds : int
         Max convergence iterations.
     """
-    return generate_hillclimber_validation_report(
+    return generate_validation_report(
         network_name="Sioux Falls",
         prepare_fn=_prepare_sf_network,
         copy_fn=_copy_clean_osrm,
-        trip_builder=_build_hillclimber_trips,
+        trip_builder=_build_validation_trips,
         tmp_path=tmp_path,
         output_path=output_path,
         detail_scale=0.30,

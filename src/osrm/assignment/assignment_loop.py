@@ -170,7 +170,7 @@ class AssignmentResult:
 class RoutedTripPath:
     """Per-trip path data captured during routing.
 
-    This is used by the matrix-free hill-climber to retain enough path-level
+    This is used by the matrix-free assignment solver to retain enough path-level
     information to support later selective healing without re-running a full
     all-trip assignment pass.
     """

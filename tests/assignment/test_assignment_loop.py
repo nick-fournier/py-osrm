@@ -94,7 +94,7 @@ def _get_sample_coords(base_path, n=8, seed=42):
 
 
 def _build_monaco_trip_stream(base_path: str) -> list[DemandTrip]:
-    """Create a tiny time-binned trip stream for hill-climber MVP tests."""
+    """Create a tiny time-binned trip stream for assignment MVP tests."""
     coords = _get_sample_coords(base_path, n=8, seed=123)
     departures = [0.0, 0.0, 900.0, 1200.0, 3700.0, 3900.0]
     volumes = [40.0, 25.0, 35.0, 20.0, 30.0, 15.0]

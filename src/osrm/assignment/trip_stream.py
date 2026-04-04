@@ -1,8 +1,8 @@
 """Trip-stream demand adapter for matrix-free loading scaffolds.
 
 This is the matrix-free counterpart to :mod:`od_matrix`. It does not yet
-implement a fully stateful online hill-climber; instead it provides the
-batching and time-slicing primitives that a future hill-climber solver will
+implement a fully stateful online assignment solver; instead it provides the
+batching and time-slicing primitives that a future streaming solver will
 consume.
 """
 

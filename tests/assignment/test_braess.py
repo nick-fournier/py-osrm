@@ -17,11 +17,11 @@ import osrm
 from osrm.assignment import AssignmentConfig, AssignmentSolver, DensitySmoothingConfig
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import braess_network
-from .hillclimber_validation import (
-    build_hillclimber_report_sections,
-    hillclimber_final_gap,
-    hillclimber_final_tstt,
-    run_hillclimber_case,
+from .validation import (
+    build_validation_report_sections,
+    validation_final_gap,
+    validation_final_tstt,
+    run_validation_case,
 )
 
 
@@ -73,7 +73,7 @@ def _run_assignment(
     return loop.run(trips, state_patch=lane_patch)
 
 
-def _build_hillclimber_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
+def _build_validation_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
     demand = 2500.0 * demand_scale
     return [DemandTrip(
         origin=meta["origin"],
@@ -427,7 +427,7 @@ def generate_braess_report(
     """Run Braess paradox validation and generate an interactive HTML report.
 
     Demonstrates the Braess paradox on a 4-node diamond network using MSA
-    equilibrium (matrix-based) and matrix-free hill-climber (greedy + MSA
+    equilibrium (matrix-based) and MSA assignment with MSA convergence
     refinement).  The paradox is confirmed when TSTT *increases* after adding
     a shortcut link.
 
@@ -475,7 +475,7 @@ def generate_braess_report(
             volume=demand * scale,
         )]
 
-    case_with = run_hillclimber_case(
+    case_with = run_validation_case(
         base_path=base_hc_w,
         meta=meta_hc_w,
         copy_fn=lambda base, run_dir: base,
@@ -486,7 +486,7 @@ def generate_braess_report(
         max_rounds=10,
         gap_threshold=0.001,
     )
-    case_without = run_hillclimber_case(
+    case_without = run_validation_case(
         base_path=base_hc_wo,
         meta=meta_hc_wo,
         copy_fn=lambda base, run_dir: base,
@@ -508,13 +508,13 @@ def generate_braess_report(
     hc_tstt_w = sum(b.tstt for b in getattr(case_with.result, "iteration_log", []))
     hc_pct = (hc_tstt_w / hc_tstt_wo - 1) * 100 if hc_tstt_wo else 0.0
 
-    rr_tstt_w = hillclimber_final_tstt(case_with.result)
-    rr_tstt_wo = hillclimber_final_tstt(case_without.result)
+    rr_tstt_w = validation_final_tstt(case_with.result)
+    rr_tstt_wo = validation_final_tstt(case_without.result)
     rr_pct = (rr_tstt_w / rr_tstt_wo - 1) * 100 if rr_tstt_wo else 0.0
 
     n_rounds_w = len(getattr(case_with.result, "iteration_log", []) or [])
-    rr_gap_w = hillclimber_final_gap(case_with.result)
-    rr_gap_wo = hillclimber_final_gap(case_without.result)
+    rr_gap_w = validation_final_gap(case_with.result)
+    rr_gap_wo = validation_final_gap(case_without.result)
     rr_gap_w_str = f"{rr_gap_w:.6f}" if rr_gap_w is not None else "n/a"
     rr_gap_wo_str = f"{rr_gap_wo:.6f}" if rr_gap_wo is not None else "n/a"
 
@@ -646,7 +646,7 @@ def generate_braess_report(
     descriptions.append(
         """<h2>Link State Comparison</h2>
         <p>Three scenarios: MSA without shortcut, MSA with shortcut,
-        and hill-climber with MSA refinement (with shortcut).
+        and MSA assignment with MSA convergence (with shortcut).
         Density (k, veh/km), speed (v, km/h), flow (q = k&times;v, veh/hr), and travel
         time (t = L/v) at the converged state.
         <span style="color:#F44336;font-weight:600;">Red density</span>
@@ -771,20 +771,20 @@ def generate_braess_report(
     )
 
     # ===================================================================
-    # 7. Hill-Climber Convergence
+    # 7. MSA Convergence
     # ===================================================================
     figs.append(None)
     descriptions.append(
-        "<h2>Hill-Climber Convergence</h2>"
-        "<p>Convergence diagnostics for the matrix-free hill-climber. Greedy loading "
-        "builds an initial congested state, then MSA refinement iterates toward "
+        "<h2>MSA Convergence</h2>"
+        "<p>Convergence diagnostics for the MSA assignment. "
+        "MSA iterates toward "
         "equilibrium using all-or-nothing auxiliary loading.</p>"
     )
 
     # -------------------------------------------------------------------
     # 7a. Convergence / State / Runtime
     # -------------------------------------------------------------------
-    hc_figs, hc_descriptions = build_hillclimber_report_sections(
+    hc_figs, hc_descriptions = build_validation_report_sections(
         network_name="Braess",
         case=case_with,
         detail_scale=1.0,
@@ -821,7 +821,7 @@ def generate_braess_report(
     sweep_base_w, sweep_meta_w = _prepare_network(tmp_path / "sweep_w", with_shortcut=True)
     sweep_base_wo, sweep_meta_wo = _prepare_network(tmp_path / "sweep_wo", with_shortcut=False)
     for ns in sweep_steps:
-        cw = run_hillclimber_case(
+        cw = run_validation_case(
             base_path=sweep_base_w, meta=sweep_meta_w,
             copy_fn=lambda base, run_dir: base,
             trip_builder=_hc_trip_builder,
@@ -829,7 +829,7 @@ def generate_braess_report(
             demand_scale=1.0,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
-        cwo = run_hillclimber_case(
+        cwo = run_validation_case(
             base_path=sweep_base_wo, meta=sweep_meta_wo,
             copy_fn=lambda base, run_dir: base,
             trip_builder=_hc_trip_builder,
@@ -875,14 +875,14 @@ def generate_braess_report(
         "the number of greedy load steps, using greedy loading only (no post-load refinement).  "
         "The dotted grey line at 0% is where "
         "the Braess paradox would emerge (positive delta).  The delta never "
-        "crosses zero &mdash; the shortcut <b>always helps</b> under hill-climber "
+        "crosses zero &mdash; the shortcut <b>always helps</b> under MSA assignment "
         "loading.</p>"
         "<p>Two regimes are visible: a <b>rapid convergence</b> phase "
         "(1&ndash;8 load steps) where the delta drops from &minus;19% to "
         "&minus;4%, and a <b>plateau</b> beyond ~8 load steps where additional "
         "load steps barely change the result (asymptoting to ~&minus;3%).  "
         "This suggests 8&ndash;16 load steps is a practical sweet spot for "
-        "hill-climber accuracy on small networks.  The paradox is an "
+        "assignment accuracy on small networks.  The paradox is an "
         "equilibrium phenomenon that requires global re-routing; greedy "
         "incremental loading never reaches the collectively sub-optimal "
         "state.</p>"
@@ -896,7 +896,7 @@ def generate_braess_report(
         title="Braess Paradox Validation",
         intro=(
             "<p>Braess paradox validation on a 4-node diamond network using "
-            "MSA equilibrium and matrix-free hill-climber (greedy + MSA refinement).</p>"
+            "MSA equilibrium and MSA assignment with MSA convergence.</p>"
             f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.  "
             f"HC: {case_with.load_steps} greedy load step(s) (sample rate 10%), "
             "up to 10 MSA refinement rounds, gap &lt; 0.001.</p>"
