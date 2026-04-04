@@ -177,6 +177,7 @@ class StreamBatchResult:
     batch_time_s: float
     tstt: float
     queue_vehicles: float  # mean unserved demand per link per lane (veh/hr/lane)
+    total_unserved_vph: float  # network-wide total unserved (veh/hr)
     mean_speed_kmh: float
     min_speed_kmh: float
     n_oversaturated: int
@@ -191,6 +192,7 @@ class StreamResult:
     network_state: NetworkState
     batch_log: List[StreamBatchResult]
     total_time_s: float
+    unserved_vph: np.ndarray  # per-link unserved demand at end of last period
 
     def log_as_dict(self) -> Dict:
         """Convert batch log to dict for plotting."""
@@ -199,6 +201,7 @@ class StreamResult:
             "n_trips": [r.n_trips for r in self.batch_log],
             "tstt": [r.tstt for r in self.batch_log],
             "queue_vehicles": [r.queue_vehicles for r in self.batch_log],
+            "total_unserved_vph": [r.total_unserved_vph for r in self.batch_log],
             "mean_speed_kmh": [r.mean_speed_kmh for r in self.batch_log],
             "min_speed_kmh": [r.min_speed_kmh for r in self.batch_log],
             "n_oversaturated": [r.n_oversaturated for r in self.batch_log],
@@ -933,6 +936,7 @@ class AssignmentSolver:
         trips: List[DemandTrip],
         *,
         batch_size: Optional[int] = None,
+        period_duration_s: Optional[float] = None,
         state_patch=None,
         progress_callback=None,
     ) -> "StreamResult":
@@ -940,8 +944,7 @@ class AssignmentSolver:
 
         Routes trips in batches, updating network state (VDF → customize)
         between batches.  Unserved demand (vehicles on links that exceed
-        capacity) carries forward as a queue, adding to congestion in
-        subsequent batches.
+        capacity) carries forward between time periods.
 
         Unlike ``assign_matrix()`` which iterates to Wardrop equilibrium,
         this performs a single forward pass — quality depends on batch
@@ -952,17 +955,16 @@ class AssignmentSolver:
         trips : list of DemandTrip
             All trips to assign.  If trips have varying
             ``departure_time_s``, they are sorted and routed in
-            chronological order.  For single-period demand, all
-            departure times can be 0.
+            chronological order.
         batch_size : int or None
             Number of trips per loading step.  After each batch, the
             network state is updated and OSRM is re-customized.
-            Smaller batches = more accurate but more customize overhead.
-            If ``None`` (default), auto-tuned from the first batch's
-            network size: ``batch_size = max(100, n_edges // 4)``.
-            On large networks trips are spatially distributed so coarse
-            batches suffice; on small networks finer batches avoid
-            route-dumping.
+            If ``None`` (default), auto-tuned from network topology.
+        period_duration_s : float or None
+            Duration of each time period in seconds.  Trips are grouped
+            by departure time into periods.  Unserved demand from period
+            *i* carries forward as additional flow in period *i+1*.
+            If ``None`` (default), all trips are a single period.
         state_patch : callable, optional
             Called with ``(NetworkState,)`` after discovery to patch
             lane counts or jam density.
@@ -1042,25 +1044,53 @@ class AssignmentSolver:
         if state_patch:
             state_patch(state)
 
-        # Cumulative flow: accumulates across loading steps within a
-        # period.  Each batch ADDS its demand to the running total.
-        cumulative_volume = np.zeros(state.n_edges, dtype=np.float64)
-
-        # Queue: vehicles on over-capacity links that spill into the
-        # next time period.  Only meaningful for multi-period — within
-        # a single period it's diagnostic (how much demand exceeds
-        # capacity after all batches are loaded).
-        queue_veh = np.zeros(state.n_edges, dtype=np.float64)
+        # Queue carryforward: unserved demand from the previous period
+        # becomes starting flow for the next period.
+        queue_carryforward = np.zeros(state.n_edges, dtype=np.float64)
 
         batch_log: List[StreamBatchResult] = []
 
-        batches = list(adapter.iter_batches(batch_size))
-        n_batches = len(batches)
+        # Group trips into periods if multi-period requested
+        if period_duration_s is not None:
+            all_batches = list(
+                adapter.iter_time_slices(
+                    bin_width_s=period_duration_s,
+                    max_batch_size=batch_size,
+                )
+            )
+        else:
+            all_batches = list(adapter.iter_batches(batch_size))
+
+        n_batches = len(all_batches)
         logger.info("Split into %d loading batches", n_batches)
 
-        for batch in batches:
+        # Cumulative flow within the current period
+        cumulative_volume = queue_carryforward.copy()
+        current_period_bin = all_batches[0].departure_bin if all_batches else None
+
+        for batch in all_batches:
             t_batch = time.monotonic()
             bi = batch.batch_index
+
+            # Period transition: carry unserved demand forward
+            if (
+                period_duration_s is not None
+                and batch.departure_bin != current_period_bin
+            ):
+                unserved = state.unserved_demand
+                n_spill = int(np.sum(unserved > 0))
+                total_spill = float(np.sum(unserved))
+                if n_spill > 0:
+                    logger.info(
+                        "Period %s→%s: carrying %.0f veh/hr unserved "
+                        "from %d links",
+                        current_period_bin, batch.departure_bin,
+                        total_spill, n_spill,
+                    )
+                # Reset cumulative flow; start with carryforward
+                queue_carryforward = unserved.copy()
+                cumulative_volume = queue_carryforward.copy()
+                current_period_bin = batch.departure_bin
 
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
@@ -1073,8 +1103,10 @@ class AssignmentSolver:
             if len(cumulative_volume) < state.n_edges:
                 pad = state.n_edges - len(cumulative_volume)
                 cumulative_volume = np.append(cumulative_volume, np.zeros(pad))
-                queue_veh = np.append(queue_veh, np.zeros(
-                    state.n_edges - len(queue_veh)))
+                queue_carryforward = np.append(
+                    queue_carryforward,
+                    np.zeros(state.n_edges - len(queue_carryforward)),
+                )
                 if state_patch:
                     state_patch(state)
                 self.smoother.build_adjacency(state.edge_ids, state.length_m)
@@ -1088,8 +1120,7 @@ class AssignmentSolver:
             # 3. VDF: flow → density → speed
             self._update_state(state)
 
-            # 4. Unserved demand diagnostic: flow exceeding physical
-            #    throughput.  For multi-period, this would carry forward.
+            # 4. Unserved demand: flow exceeding physical throughput
             unserved_vph = state.unserved_demand
             unserved_per_lane = unserved_vph / np.maximum(state.n_lanes, 1)
             oversat_mask = unserved_vph > 0
@@ -1097,7 +1128,7 @@ class AssignmentSolver:
                 float(np.mean(unserved_per_lane[oversat_mask]))
                 if np.any(oversat_mask) else 0.0
             )
-            queue_veh = unserved_vph.copy()
+            total_unserved = float(np.sum(unserved_vph))
 
             # 5. Write CSV and re-customize OSRM
             t_cust = time.monotonic()
@@ -1132,6 +1163,7 @@ class AssignmentSolver:
                 batch_time_s=time.monotonic() - t_batch,
                 tstt=tstt,
                 queue_vehicles=mean_queue_per_lane,
+                total_unserved_vph=total_unserved,
                 mean_speed_kmh=float(np.mean(active_speeds)),
                 min_speed_kmh=float(np.min(active_speeds)),
                 n_oversaturated=int(np.sum(
@@ -1158,11 +1190,15 @@ class AssignmentSolver:
         del engine
         self.writer.cleanup()
 
+        # Final unserved demand for reporting
+        final_unserved = state.unserved_demand if state.n_edges > 0 else np.array([])
+
         logger.info(
             "Stream complete: %d trips in %d batches, %.1fs, "
-            "final queue=%.0f veh/hr/lane",
+            "final queue=%.0f veh/hr/lane, total_unserved=%.0f veh/hr",
             n_trips, n_batches, total_time,
             batch_log[-1].queue_vehicles if batch_log else 0,
+            batch_log[-1].total_unserved_vph if batch_log else 0,
         )
 
         return StreamResult(
@@ -1171,4 +1207,5 @@ class AssignmentSolver:
             network_state=state,
             batch_log=batch_log,
             total_time_s=total_time,
+            unserved_vph=final_unserved,
         )
