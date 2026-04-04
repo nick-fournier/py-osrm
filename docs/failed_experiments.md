@@ -431,8 +431,23 @@ assignment where trips are routed individually against a live network state.
    assignment builds shortest-path trees from each origin zone (O(zones)
    Dijkstra calls).  OSRM requires individual Route() calls per OD pair
    (O(OD_pairs)).  On Chicago Regional (1,790 zones, 2.3M OD pairs):
-   AequilibraE ≈ 1s/iter, py-osrm ≈ 160s/iter — a 160× structural
-   penalty.  OSRM is optimized for fast single-query latency, not for
-   shortest-path-tree enumeration.  The OSRM-backed approach is viable for
-   streaming/mesoscopic assignment (individual trip routing on a live
-   network) but cannot compete with dedicated solvers on static UE.
+   AequilibraE ≈ 0.8s/iter (BFW), py-osrm ≈ 160s/iter — a 200×
+   structural penalty.  OSRM is optimized for fast single-query latency,
+   not for shortest-path-tree enumeration.
+
+10. **Streaming assignment IS competitive with converged static UE.**
+    AequilibraE BFW needs ~200 iterations to converge Chi-Regional
+    (rgap 3.7e-4 at 100 iters), totaling ~160s.  py-osrm streaming
+    routes 1.4M trips in ~100s as a single greedy pass.  For ABM global
+    loops that need one converged assignment per iteration, streaming is
+    same-ballpark and provides time-dependent routing, real turn penalties,
+    and trip-level (not zone-aggregated) paths.
+
+    Measured on same machine (AequilibraE 1.6.1, BFW, 100 iters):
+
+    | Network          | Zones | Links  |  Trips  | AeqE 100it |  /iter  | rgap@100 |
+    |------------------|------:|-------:|--------:|-----------:|--------:|---------:|
+    | Sioux Falls      |    24 |     76 |   361k  |     1.7s   | 0.017s  | 2.1e-4   |
+    | Anaheim          |    38 |    914 |   105k  |     2.3s   | 0.023s  | 1.3e-6   |
+    | Chicago Sketch   |   387 |  2,950 |  1.26M  |    10.7s   | 0.107s  | 1.3e-5   |
+    | Chicago Regional | 1,790 | 39,018 |  1.36M  |    80.6s   | 0.806s  | 3.7e-4   |
