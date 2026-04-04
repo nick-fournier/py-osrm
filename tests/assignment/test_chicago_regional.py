@@ -32,6 +32,7 @@ from osrm.assignment import (
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import LinkClass, tntp_to_osm, patch_lanes
 from osrm.assignment.tntp import parse_net, parse_trips, load_node_coords, parse_flow
+from .validation import generate_validation_report
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "chicago_regional"
 logger = logging.getLogger(__name__)
@@ -176,6 +177,33 @@ def _run_regional_assignment(
         patch_lanes(state, meta)
 
     return loop.run(trips, state_patch=lane_patch)
+
+
+# ── report generation ────────────────────────────────────────────────
+
+def generate_regional_report(
+    tmp_path: str | Path,
+    output_path: str = "plots/chicago_regional_validation.html",
+    max_rounds: int = 20,
+    method: str = "msa",
+) -> Path:
+    """Generate Chicago Regional validation report."""
+    return generate_validation_report(
+        network_name="Chicago Regional",
+        prepare_fn=_prepare_regional_network,
+        copy_fn=_copy_clean_osrm,
+        trip_builder=_build_validation_trips,
+        tmp_path=tmp_path,
+        output_path=output_path,
+        detail_scale=1.00,
+        state_patch_factory=lambda meta: lambda state: patch_lanes(state, meta),
+        max_rounds=max_rounds,
+        method=method,
+        intro_html=(
+            f"<p>{method.upper()} validation at <b>100% Chicago Regional demand</b>. "
+            f"Full-load scalability and convergence check.</p>"
+        ),
+    )
 
 
 # ── pytest entry points ──────────────────────────────────────────────
