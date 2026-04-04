@@ -739,6 +739,82 @@ def _vdf_extended_cost_chain(
     return fig
 
 
+def _vdf_kc_ratio_calibration() -> go.Figure:
+    """Plot the logistic kc_ratio calibration function and its effect on MFD."""
+    vdf = BiParabolicVDF(min_speed_kmh=0.01)
+    v_f, k_j = 60.0, 150.0
+
+    # Left panel: logistic calibration curve
+    dist = np.linspace(0, 5000, 500)
+    kc_ratio = 0.20 + 0.25 / (1.0 + np.exp(-0.003 * (dist - 500.0)))
+
+    # Right panel: MFD for three representative kc_ratio values
+    k = np.linspace(0, k_j, 300)
+    examples = [
+        (0.21, "Urban grid (~100 m)", "#F44336"),
+        (0.325, "Arterial (~500 m)", "#FF9800"),
+        (0.44, "Highway (~2 km)", "#4CAF50"),
+    ]
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=[
+            "k<sub>c</sub>/k<sub>j</sub> Calibration",
+            "Effect on MFD Shape",
+        ],
+    )
+
+    # Left: logistic curve
+    fig.add_trace(go.Scatter(
+        x=dist.tolist(), y=kc_ratio.tolist(),
+        mode="lines", line=dict(color="#1565C0", width=2.5),
+        showlegend=False,
+    ), row=1, col=1)
+    # Annotate example points
+    for kc, label, color in examples:
+        d_val = 500.0 - np.log(0.25 / (kc - 0.20) - 1.0) / 0.003
+        fig.add_trace(go.Scatter(
+            x=[d_val], y=[kc], mode="markers",
+            marker=dict(size=10, color=color, symbol="diamond"),
+            name=f"{label}: k_c/k_j={kc:.2f}",
+            showlegend=True,
+        ), row=1, col=1)
+
+    # Right: MFD curves for each kc_ratio
+    for kc, label, color in examples:
+        v_arr = vdf.density_to_speed(
+            k, np.full_like(k, v_f), np.full_like(k, k_j),
+            kc_ratio=kc,
+        )
+        q = k * v_arr
+        fig.add_trace(go.Scatter(
+            x=k.tolist(), y=q.tolist(),
+            mode="lines", line=dict(color=color, width=2),
+            name=f"k_c/k_j={kc:.2f}",
+            showlegend=False,
+        ), row=1, col=2)
+        # Mark capacity point
+        k_c_val = kc * k_j
+        q_c_val = v_f * k_c_val / 2.0
+        fig.add_trace(go.Scatter(
+            x=[k_c_val], y=[q_c_val], mode="markers",
+            marker=dict(size=8, color=color, symbol="diamond"),
+            showlegend=False,
+        ), row=1, col=2)
+
+    fig.update_xaxes(title_text="Intersection distance (m)", row=1, col=1)
+    fig.update_yaxes(title_text="k<sub>c</sub> / k<sub>j</sub>", row=1, col=1)
+    fig.update_xaxes(title_text="Density k (veh/km)", row=1, col=2)
+    fig.update_yaxes(title_text="Flow q (veh/hr)", row=1, col=2)
+
+    fig.update_layout(
+        title="Per-Link k<sub>c</sub> Calibration from Intersection Spacing",
+        template="plotly_white",
+        height=400,
+    )
+    return fig
+
+
 def vdf_theory(output_dir: str = "plots") -> Path:
     """Generate a single combined VDF theory validation report.
 
@@ -785,6 +861,7 @@ def vdf_theory(output_dir: str = "plots") -> Path:
             analysis_period_hr=analysis_period_hr,
             tail_power=tail_power,
         ),
+        _vdf_kc_ratio_calibration(),
     ]
 
     descriptions = [
@@ -884,9 +961,9 @@ def vdf_theory(output_dir: str = "plots") -> Path:
 
         """<h2>9. Speed–Density by Road Class</h2>
         <p>The bi-parabolic model is "parameter-light" — only v<sub>f</sub> (free-flow speed)
-        and k<sub>j</sub> (jam density) are needed per link. k<sub>c</sub> = k<sub>j</sub>/3 is derived,
-        not calibrated. This overlay shows how different road classes produce different
-        curves from just those two inputs. Motorways have higher v<sub>f</sub> and k<sub>j</sub>
+        and k<sub>j</sub> (jam density) are needed per link. k<sub>c</sub> is calibrated per link
+        from intersection spacing (§11). This overlay shows how different road classes produce
+        different curves from just those two inputs. Motorways have higher v<sub>f</sub> and k<sub>j</sub>
         (more lanes × higher jam density per lane), while residential streets have lower
         values of both. The shape is consistent across classes — only the scale changes.</p>""",
 
@@ -926,6 +1003,32 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         The gray dotted curves show the backward-bending MFD parametric.
         Near capacity the MFD cost chain is steepest (best rerouting signal);
         all four surrogates are monotone and guarantee MSA convergence.</p>""",
+
+        """<h2>11. Per-Link k<sub>c</sub> Calibration</h2>
+        <p>The default model uses a fixed k<sub>c</sub>/k<sub>j</sub> ratio for all links.
+        In reality, critical density depends on <b>intersection spacing</b>: dense urban grids
+        with frequent signals reach capacity at lower density than uninterrupted highway segments.</p>
+
+        <p>We calibrate k<sub>c</sub>/k<sub>j</sub> per link using a logistic function of
+        intersection distance (the cumulative link length between true intersections,
+        where "true" means node degree &gt; 2):</p>
+
+        <p>$$\\frac{k_c}{k_j} = 0.20 + \\frac{0.25}{1 + e^{-0.003 \\cdot (d - 500)}}$$</p>
+
+        <p>This gives:</p>
+        <ul>
+        <li><b>Urban grid</b> (~100 m spacing): k<sub>c</sub>/k<sub>j</sub> ≈ 0.21 — capacity reached early,
+            strong congestion sensitivity</li>
+        <li><b>Arterial</b> (~500 m): k<sub>c</sub>/k<sub>j</sub> ≈ 0.33 — the classical default</li>
+        <li><b>Highway</b> (&gt;2 km): k<sub>c</sub>/k<sub>j</sub> ≈ 0.45 — links absorb more density
+            before breakdown</li>
+        </ul>
+
+        <p><b>Left panel:</b> The logistic calibration curve.
+        <b>Right panel:</b> Effect on the flow–density MFD — lower k<sub>c</sub>/k<sub>j</sub>
+        shifts the capacity peak left (lower density, lower capacity flow) and creates
+        a longer congested branch. This also distributes the q<sub>c</sub> gap across
+        different density levels instead of concentrating it at one point.</p>""",
     ]
 
     _write_combined_report(
@@ -976,6 +1079,9 @@ def vdf_theory(output_dir: str = "plots") -> Path:
         \\end{{cases}}$$</p>
         <p>Cost chain: $q \\xrightarrow{{k(q)}} k \\xrightarrow{{v(k)}} v \\xrightarrow{{L/v}} t$
         &emsp; — monotone for all $q \\geq 0$, guaranteeing MSA convergence.</p>
+
+        <p><b>Per-link k<sub>c</sub> calibration</b> (§11, from intersection spacing $d$):</p>
+        <p>$$\\frac{{k_c}}{{k_j}} = 0.20 + \\frac{{0.25}}{{1 + e^{{-0.003(d - 500)}}}}$$</p>
         </div>
 
         <p><b>Parameters (matching assignment defaults):</b>
