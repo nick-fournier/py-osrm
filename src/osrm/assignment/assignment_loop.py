@@ -177,7 +177,7 @@ class StreamBatchResult:
     engine_time_s: float
     batch_time_s: float
     tstt: float
-    queue_vehicles: float
+    queue_vehicles: float  # mean unserved demand per link per lane (veh/hr/lane)
     mean_speed_kmh: float
     min_speed_kmh: float
     n_oversaturated: int
@@ -1096,7 +1096,12 @@ class AssignmentSolver:
             # 4. Unserved demand diagnostic: flow exceeding physical
             #    throughput.  For multi-period, this would carry forward.
             unserved_vph = state.unserved_demand
-            total_queue = float(np.sum(unserved_vph))
+            unserved_per_lane = unserved_vph / np.maximum(state.n_lanes, 1)
+            oversat_mask = unserved_vph > 0
+            mean_queue_per_lane = (
+                float(np.mean(unserved_per_lane[oversat_mask]))
+                if np.any(oversat_mask) else 0.0
+            )
             queue_veh = unserved_vph.copy()
 
             # 5. Write CSV and re-customize OSRM
@@ -1131,7 +1136,7 @@ class AssignmentSolver:
                 engine_time_s=engine_time,
                 batch_time_s=time.monotonic() - t_batch,
                 tstt=tstt,
-                queue_vehicles=total_queue,
+                queue_vehicles=mean_queue_per_lane,
                 mean_speed_kmh=float(np.mean(active_speeds)),
                 min_speed_kmh=float(np.min(active_speeds)),
                 n_oversaturated=int(np.sum(
@@ -1142,17 +1147,17 @@ class AssignmentSolver:
 
             if bi % max(1, n_batches // 10) == 0 or bi == n_batches - 1:
                 logger.info(
-                    "Batch %d/%d: %d trips, queue=%.0f veh/hr, "
+                    "Batch %d/%d: %d trips, queue=%.0f veh/hr/lane, "
                     "mean_speed=%.1f km/h, oversat=%d, "
                     "route=%.1fs, cust=%.1fs",
                     bi + 1, n_batches, len(batch.trips),
-                    total_queue, batch_result.mean_speed_kmh,
+                    mean_queue_per_lane, batch_result.mean_speed_kmh,
                     batch_result.n_oversaturated,
                     route_time, customize_time,
                 )
 
             if progress_callback:
-                progress_callback(bi, n_batches, total_queue)
+                progress_callback(bi, n_batches, mean_queue_per_lane)
 
         total_time = time.monotonic() - t_start
         del engine
@@ -1160,7 +1165,7 @@ class AssignmentSolver:
 
         logger.info(
             "Stream complete: %d trips in %d batches, %.1fs, "
-            "final queue=%.0f veh",
+            "final queue=%.0f veh/hr/lane",
             n_trips, n_batches, total_time,
             batch_log[-1].queue_vehicles if batch_log else 0,
         )

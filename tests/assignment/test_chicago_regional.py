@@ -260,7 +260,7 @@ def generate_regional_stream_report(
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=labels, y=blog["queue_vehicles"], name="Unserved demand (veh/hr)",
+        x=labels, y=blog["queue_vehicles"], name="Queue (veh/hr/lane)",
         mode="lines+markers",
         line=dict(color="#D32F2F", width=2.5),
         marker=dict(size=5),
@@ -274,7 +274,7 @@ def generate_regional_stream_report(
     fig.update_layout(
         title="Stream Loading Progression",
         xaxis_title="Loading Batch",
-        yaxis=dict(title="Unserved demand (veh/hr)"),
+        yaxis=dict(title="Mean queue per lane (veh/hr/lane)"),
         yaxis2=dict(title="Mean speed (km/h)", overlaying="y", side="right"),
         template="plotly_white",
     )
