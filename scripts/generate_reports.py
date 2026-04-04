@@ -75,6 +75,10 @@ def _scene_chi_sketch_fw(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_sketch import generate_chicago_report
     return generate_chicago_report(tempfile.mkdtemp(), method="fw", max_rounds=max_iter)
 
+def _scene_chi_sketch_stream(*, max_iter=20, **_kw):
+    from tests.assignment.test_chicago_sketch import generate_chicago_stream_report
+    return generate_chicago_stream_report(tempfile.mkdtemp())
+
 def _scene_chi_region_msa(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_regional import generate_regional_report
     return generate_regional_report(tempfile.mkdtemp(), method="msa", max_rounds=max_iter)
@@ -111,6 +115,7 @@ SCENES = {
     "chi-sketch": {
         "msa": ("Chicago Sketch MSA", _scene_chi_sketch_msa),
         "fw":  ("Chicago Sketch FW", _scene_chi_sketch_fw),
+        "stream": ("Chicago Sketch Stream", _scene_chi_sketch_stream),
     },
     "chi-region": {
         "msa": ("Chicago Regional MSA", _scene_chi_region_msa),
