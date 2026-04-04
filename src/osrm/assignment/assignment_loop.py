@@ -268,16 +268,17 @@ class AssignmentSolver:
         )
         self._engine: Optional[osrm_module.OSRM] = None
 
-    def _create_engine(self) -> osrm_module.OSRM:
+    def _create_engine(self, *, quiet: bool = False) -> osrm_module.OSRM:
         """Create a fresh OSRM engine instance."""
-        logger.info("Loading OSRM engine from %s", self.base_path)
+        _log = logger.debug if quiet else logger.info
+        _log("Loading OSRM engine from %s", self.base_path)
         t0 = time.monotonic()
         eng = osrm_module.OSRM(
             storage_config=self.base_path,
             algorithm="MLD",
             use_shared_memory=False,
         )
-        logger.info("Engine loaded in %.2fs", time.monotonic() - t0)
+        _log("Engine loaded in %.2fs", time.monotonic() - t0)
         return eng
 
     def _snap_trips(
@@ -1084,7 +1085,7 @@ class AssignmentSolver:
             # 6. Reload engine with updated weights
             t_engine = time.monotonic()
             del engine
-            engine = self._create_engine()
+            engine = self._create_engine(quiet=True)
             engine_time = time.monotonic() - t_engine
 
             # Metrics
@@ -1114,7 +1115,7 @@ class AssignmentSolver:
 
             if bi % max(1, n_batches // 10) == 0 or bi == n_batches - 1:
                 logger.info(
-                    "Batch %d/%d: %d trips, queue=%.0f veh, "
+                    "Batch %d/%d: %d trips, queue=%.0f veh/hr, "
                     "mean_speed=%.1f km/h, oversat=%d, "
                     "route=%.1fs, cust=%.1fs",
                     bi + 1, n_batches, len(batch.trips),
