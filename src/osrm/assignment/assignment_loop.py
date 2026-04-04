@@ -995,28 +995,46 @@ class AssignmentSolver:
         # Re-wrap after snapping
         adapter = TripStreamAdapter(snapped_trips, sort_by_departure=False)
 
-        # Auto-tune batch_size from network discovery if not specified.
-        # Route a sample to estimate network size, then target a
-        # reasonable number of customize cycles.  Aim for ~50-200 batches
-        # on large networks (enough granularity without excessive
-        # customize overhead) and smaller batches on small networks
-        # to avoid route-dumping.
+        # Auto-tune batch_size so each batch adds ~5 vehicles per link.
+        # Route a probe sample to measure avg edges per route, then:
+        #   trips_per_veh_per_link = n_edges / avg_edges_per_route
+        #   batch_size = 5 × trips_per_veh_per_link
         if batch_size is None:
             sample_n = min(5000, n_trips)
             sample = snapped_trips[:sample_n]
+
+            # Discover network topology from probe
             probe_state = self._discover_network(engine, sample)
-            # Extrapolate: if we saw E edges in S trips out of N total,
-            # the full network is roughly E * (N/S)^0.3 (sub-linear
-            # growth — most edges are discovered early).
-            n_edges_est = probe_state.n_edges
+
+            # Route probe to measure edge traversals per trip.
+            # aon_volume is in trip.volume units; normalize by total
+            # volume to get avg edges per unit of demand.
+            probe_vol, _ = self._route_and_accumulate(
+                engine, sample, probe_state,
+            )
+            total_volume = sum(t.volume for t in sample)
+            total_traversals = float(np.sum(probe_vol))
+            avg_edges_per_route = total_traversals / max(total_volume, 1.0)
+
+            # Extrapolate edge count: probe discovers edges sub-linearly.
+            # If S trips found E edges, full N trips find ~E*(N/S)^0.3.
+            n_edges_probe = probe_state.n_edges
             if sample_n < n_trips:
-                coverage_ratio = n_trips / sample_n
-                n_edges_est = int(n_edges_est * coverage_ratio ** 0.3)
-            # Target: ~100 batches, clamped to [100, n_trips]
-            batch_size = max(100, n_trips // 100)
+                n_edges_est = int(
+                    n_edges_probe * (n_trips / sample_n) ** 0.3
+                )
+            else:
+                n_edges_est = n_edges_probe
+
+            trips_per_1vpl = n_edges_est / max(avg_edges_per_route, 1.0)
+            batch_size = max(100, int(5 * trips_per_1vpl))
+
             logger.info(
-                "Auto-tuned batch_size=%d (~%d batches, %d edges from %d-trip probe)",
-                batch_size, n_trips // batch_size, probe_state.n_edges, sample_n,
+                "Auto-tuned batch_size=%d (~%d batches): "
+                "%d probe edges → %d est edges, "
+                "%.1f avg edges/route",
+                batch_size, max(1, n_trips // batch_size),
+                n_edges_probe, n_edges_est, avg_edges_per_route,
             )
 
         logger.info(
