@@ -8,6 +8,7 @@ from osrm.assignment.segment_speed_writer import SegmentSpeedWriter
 from osrm.assignment.od_matrix import ODMatrixAdapter, DemandTrip
 from osrm.assignment.trip_stream import TripBatch, TripStreamAdapter
 from osrm.assignment.assignment_loop import (
+    AggregatedRoute,
     AssignmentSolver,
     AssignmentConfig,
     AssignmentResult,
@@ -29,6 +30,7 @@ __all__ = [
     "DemandTrip",
     "TripBatch",
     "TripStreamAdapter",
+    "AggregatedRoute",
     "AssignmentSolver",
     "AssignmentConfig",
     "AssignmentResult",

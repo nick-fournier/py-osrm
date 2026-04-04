@@ -6,8 +6,8 @@ of (origin, destination, volume, departure_time) trips.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -19,6 +19,7 @@ class DemandTrip:
     destination: Tuple[float, float]  # (lon, lat)
     volume: float                     # vehicles per time period
     departure_time_s: float = 0.0     # seconds from epoch
+    trip_id: Optional[str] = None     # unique ID for ABM runs
 
 
 class ODMatrixAdapter:

@@ -49,6 +49,9 @@ using EdgeMap = std::unordered_map<std::pair<uint64_t,uint64_t>, int, PairHash>;
 static inline double as_number(const json::Value& v) {
     return std::get<json::Number>(v).value;
 }
+static inline const std::string& as_string(const json::Value& v) {
+    return std::get<json::String>(v).value;
+}
 static inline const json::Array& as_array(const json::Value& v) {
     return std::get<json::Array>(v);
 }
@@ -70,7 +73,8 @@ void init_Assignment(nb::module_& m) {
            nb::ndarray<double, nb::ndim<2>, nb::c_contig, nb::device::cpu> coords,
            nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> volumes,
            nb::ndarray<uint64_t, nb::ndim<2>, nb::c_contig, nb::device::cpu> edge_ids,
-           int    n_threads)
+           int    n_threads,
+           bool   return_routes)
     {
 
         // Optionally cap TBB parallelism
@@ -102,6 +106,10 @@ void init_Assignment(nb::module_& m) {
                 auto& rp = params[i];
                 rp.annotations = true;
                 rp.annotations_type = ann_type;
+                if (return_routes) {
+                    rp.overview = RouteParameters::OverviewType::Full;
+                    rp.geometries = RouteParameters::GeometriesType::Polyline6;
+                }
                 rp.coordinates.push_back(
                     Coordinate{FloatLongitude{c_ptr[i*4]}, FloatLatitude{c_ptr[i*4+1]}});
                 rp.coordinates.push_back(
@@ -137,6 +145,8 @@ void init_Assignment(nb::module_& m) {
         double tstt = 0.0;
 
         std::vector<NewEdge> new_edges;
+        std::vector<std::string> route_geoms;
+        if (return_routes) route_geoms.resize(n_trips);
 
         for (size_t ti = 0; ti < n_trips; ++ti) {
             if (statuses[ti] != osrm::engine::Status::Ok) continue;
@@ -151,6 +161,14 @@ void init_Assignment(nb::module_& m) {
             double route_dur = as_number(route.values.at("duration"));
             double trip_vol  = vol_ptr[ti];
             tstt += trip_vol * route_dur;
+
+            // Capture route geometry if requested
+            if (return_routes) {
+                auto geom_it = route.values.find("geometry");
+                if (geom_it != route.values.end()) {
+                    route_geoms[ti] = as_string(geom_it->second);
+                }
+            }
 
             const auto& legs_arr = as_array(route.values.at("legs"));
 
@@ -208,18 +226,29 @@ void init_Assignment(nb::module_& m) {
                 ne.from_id, ne.to_id, ne.length_m, ne.speed_kmh));
         }
 
-        return nb::make_tuple(py_volume, tstt, py_new_edges);
+        if (return_routes) {
+            nb::list py_geoms;
+            for (const auto& g : route_geoms) {
+                py_geoms.append(g);
+            }
+            return nb::make_tuple(py_volume, tstt, py_new_edges, py_geoms);
+        }
+        return nb::make_tuple(py_volume, tstt, py_new_edges, nb::none());
     },
     nb::arg("engine"),
     nb::arg("coords"),
     nb::arg("volumes"),
     nb::arg("edge_ids"),
     nb::arg("n_threads") = 0,
+    nb::arg("return_routes") = false,
     "Route OD pairs and accumulate link volume in C++.\n\n"
     "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
     "builds RouteParameters internally — no Python param construction.\n"
     "Uses JSON route results (correct uint64 OSM node IDs at any scale).\n\n"
-    "n_threads: 0 = use all cores, >0 = cap TBB parallelism.\n\n"
-    "Returns (volume, tstt, new_edges)."
+    "n_threads: 0 = use all cores, >0 = cap TBB parallelism.\n"
+    "return_routes: if True, also returns per-trip encoded polyline6 strings.\n\n"
+    "Returns (volume, tstt, new_edges, route_geometries).\n"
+    "route_geometries is a list of polyline6 strings when return_routes=True,\n"
+    "otherwise None."
     );
 }

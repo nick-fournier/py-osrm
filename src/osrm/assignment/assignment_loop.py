@@ -184,6 +184,14 @@ class StreamBatchResult:
 
 
 @dataclass
+class AggregatedRoute:
+    """A unique route with aggregated demand and optional trip IDs."""
+
+    demand: float
+    trip_ids: List[str] = field(default_factory=list)
+
+
+@dataclass
 class StreamResult:
     """Final result of stream assignment."""
 
@@ -193,6 +201,7 @@ class StreamResult:
     batch_log: List[StreamBatchResult]
     total_time_s: float
     unserved_vph: np.ndarray  # per-link unserved demand at end of last period
+    routes: Optional[Dict[str, AggregatedRoute]] = None  # polyline6 → route info
 
     def log_as_dict(self) -> Dict:
         """Convert batch log to dict for plotting."""
@@ -340,6 +349,7 @@ class AssignmentSolver:
                 destination=snapped[tuple(trip.destination)],
                 volume=trip.volume,
                 departure_time_s=trip.departure_time_s,
+                trip_id=trip.trip_id,
             ))
         logger.info(
             "Trip rebuild in %.1fs, snap total %.1fs",
@@ -398,7 +408,9 @@ class AssignmentSolver:
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
         state: NetworkState,
-    ) -> Tuple[np.ndarray, float]:
+        *,
+        return_routes: bool = False,
+    ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
         """Route all trips, accumulate link volume.
 
         Uses C++ accumulation when available — route results never cross
@@ -410,19 +422,26 @@ class AssignmentSolver:
             All-or-nothing demand volume (vehicles) per link.
         aon_tstt : float
             AON total system travel time (vehicle-seconds).
+        polylines : list of str or None
+            Per-trip polyline6 geometry strings when return_routes=True.
         """
         try:
-            return self._route_and_accumulate_cpp(engine, trips, state)
+            return self._route_and_accumulate_cpp(
+                engine, trips, state, return_routes=return_routes,
+            )
         except Exception:
             logger.debug("C++ accumulation unavailable, using Python fallback")
-            return self._route_and_accumulate_py(engine, trips, state)
+            vol, tstt = self._route_and_accumulate_py(engine, trips, state)
+            return vol, tstt, None
 
     def _route_and_accumulate_cpp(
         self,
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
         state: NetworkState,
-    ) -> Tuple[np.ndarray, float]:
+        *,
+        return_routes: bool = False,
+    ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
         """C++ fast path: route + accumulate in one native call."""
         from osrm.osrm_ext import batch_route_accumulate
 
@@ -439,12 +458,13 @@ class AssignmentSolver:
         default_jam = (self.config.default_jam_density_per_lane
                        * self.config.default_n_lanes)
 
-        volume, tstt, new_edges = batch_route_accumulate(
+        volume, tstt, new_edges, route_geoms = batch_route_accumulate(
             engine._engine,
             coords,
             volumes,
             state.edge_ids.astype(np.uint64),
             self.config.n_threads,
+            return_routes,
         )
 
         # Register any newly discovered edges
@@ -459,7 +479,7 @@ class AssignmentSolver:
             volume = np.append(volume,
                                np.zeros(state.n_edges - len(volume)))
 
-        return volume, float(tstt)
+        return volume, float(tstt), route_geoms
 
     def _route_and_accumulate_py(
         self,
@@ -703,12 +723,11 @@ class AssignmentSolver:
                 n_inc, len(inc_steps), step_frac * 100,
             )
             t_route = time.monotonic()
-            aon_volume, aon_tstt = self._route_and_accumulate(
+            aon_volume, aon_tstt, _ = self._route_and_accumulate(
                 engine, trips, state,
             )
             route_time = time.monotonic() - t_route
 
-            # Grow arrays if new edges discovered
             if len(prev_volume) < state.n_edges:
                 pad = state.n_edges - len(prev_volume)
                 prev_volume = np.append(prev_volume, np.zeros(pad))
@@ -749,7 +768,7 @@ class AssignmentSolver:
 
             # 2. Route all trips, get all-or-nothing volume
             t_route = time.monotonic()
-            aon_volume, aon_tstt = self._route_and_accumulate(
+            aon_volume, aon_tstt, _ = self._route_and_accumulate(
                 engine, trips, state,
             )
             route_time = time.monotonic() - t_route
@@ -937,6 +956,7 @@ class AssignmentSolver:
         *,
         batch_size: Optional[int] = None,
         period_duration_s: Optional[float] = None,
+        return_routes: bool = False,
         state_patch=None,
         progress_callback=None,
     ) -> "StreamResult":
@@ -965,6 +985,11 @@ class AssignmentSolver:
             by departure time into periods.  Unserved demand from period
             *i* carries forward as additional flow in period *i+1*.
             If ``None`` (default), all trips are a single period.
+        return_routes : bool
+            If True, capture polyline6-encoded route geometries from
+            OSRM and aggregate them in the result.  Each unique route
+            maps to an :class:`AggregatedRoute` with total demand and
+            trip IDs (when ``DemandTrip.trip_id`` is set).
         state_patch : callable, optional
             Called with ``(NetworkState,)`` after discovery to patch
             lane counts or jam density.
@@ -1006,7 +1031,7 @@ class AssignmentSolver:
             # Route probe to measure edge traversals per trip.
             # aon_volume is in trip.volume units; normalize by total
             # volume to get avg edges per unit of demand.
-            probe_vol, _ = self._route_and_accumulate(
+            probe_vol, _, _ = self._route_and_accumulate(
                 engine, sample, probe_state,
             )
             total_volume = sum(t.volume for t in sample)
@@ -1049,6 +1074,9 @@ class AssignmentSolver:
         queue_carryforward = np.zeros(state.n_edges, dtype=np.float64)
 
         batch_log: List[StreamBatchResult] = []
+        route_demands: Optional[Dict[str, AggregatedRoute]] = None
+        if return_routes:
+            route_demands = {}
 
         # Group trips into periods if multi-period requested
         if period_duration_s is not None:
@@ -1094,10 +1122,24 @@ class AssignmentSolver:
 
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
-            aon_volume, aon_tstt = self._route_and_accumulate(
+            aon_volume, aon_tstt, batch_polylines = self._route_and_accumulate(
                 engine, batch.trips, state,
+                return_routes=return_routes,
             )
             route_time = time.monotonic() - t_route
+
+            # Aggregate polylines into route_demands dict
+            if return_routes and batch_polylines is not None:
+                for trip, polyline in zip(batch.trips, batch_polylines):
+                    if not polyline:
+                        continue
+                    rec = route_demands.get(polyline)
+                    if rec is None:
+                        rec = AggregatedRoute(demand=0.0)
+                        route_demands[polyline] = rec
+                    rec.demand += trip.volume
+                    if trip.trip_id is not None:
+                        rec.trip_ids.append(trip.trip_id)
 
             # Grow arrays if new edges were discovered
             if len(cumulative_volume) < state.n_edges:
@@ -1201,6 +1243,12 @@ class AssignmentSolver:
             batch_log[-1].total_unserved_vph if batch_log else 0,
         )
 
+        if return_routes and route_demands:
+            logger.info(
+                "Captured %d unique routes (from %d trips)",
+                len(route_demands), n_trips,
+            )
+
         return StreamResult(
             n_trips=n_trips,
             n_batches=n_batches,
@@ -1208,4 +1256,5 @@ class AssignmentSolver:
             batch_log=batch_log,
             total_time_s=total_time,
             unserved_vph=final_unserved,
+            routes=route_demands,
         )
