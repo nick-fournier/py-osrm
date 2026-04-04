@@ -813,81 +813,6 @@ def generate_braess_report(
     figs.extend(hc_figs[2:5])
     descriptions.extend(hc_descriptions[2:5])
 
-    # -------------------------------------------------------------------
-    # 7b. Load-Step Sensitivity
-    # -------------------------------------------------------------------
-    sweep_steps = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]
-    sweep_pcts: list[float] = []
-    sweep_base_w, sweep_meta_w = _prepare_network(tmp_path / "sweep_w", with_shortcut=True)
-    sweep_base_wo, sweep_meta_wo = _prepare_network(tmp_path / "sweep_wo", with_shortcut=False)
-    for ns in sweep_steps:
-        cw = run_validation_case(
-            base_path=sweep_base_w, meta=sweep_meta_w,
-            copy_fn=lambda base, run_dir: base,
-            trip_builder=_hc_trip_builder,
-            run_dir=tmp_path / f"sweep_w_{ns}",
-            demand_scale=1.0,
-            state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        )
-        cwo = run_validation_case(
-            base_path=sweep_base_wo, meta=sweep_meta_wo,
-            copy_fn=lambda base, run_dir: base,
-            trip_builder=_hc_trip_builder,
-            run_dir=tmp_path / f"sweep_wo_{ns}",
-            demand_scale=1.0,
-            state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        )
-        tw = sum(b.tstt for b in getattr(cw.result, "iteration_log", []))
-        two = sum(b.tstt for b in getattr(cwo.result, "iteration_log", []))
-        sweep_pcts.append((tw / two - 1) * 100 if two else 0.0)
-
-    fig_sweep = go.Figure()
-    fig_sweep.add_trace(go.Scatter(
-        x=sweep_steps, y=sweep_pcts,
-        mode="lines+markers",
-        line=dict(color="#D32F2F", width=2),
-        marker=dict(size=7),
-        hovertemplate="load steps=%{x}<br>TSTT delta=%{y:+.1f}%<extra></extra>",
-    ))
-    fig_sweep.add_hline(y=0, line_dash="dot", line_color="#999",
-                        annotation_text="paradox threshold")
-    asymptote = sweep_pcts[-1]
-    fig_sweep.add_hline(y=asymptote, line_dash="dash", line_color="#1565C0",
-                        annotation_text=f"asymptote \u2248 {asymptote:+.1f}%",
-                        annotation_position="bottom right")
-    fig_sweep.update_layout(
-        title="TSTT Delta vs Number of Greedy Load Steps",
-        xaxis_title="Number of greedy load steps",
-        yaxis_title="TSTT delta (with vs without shortcut, %)",
-        template="plotly_white",
-        xaxis=dict(
-            type="log",
-            tickvals=sweep_steps,
-            ticktext=[str(s) for s in sweep_steps],
-            fixedrange=True,
-        ),
-        yaxis=dict(fixedrange=True),
-    )
-    figs.append(fig_sweep)
-    descriptions.append(
-        "<h3>Load-Step Sensitivity (Greedy Only)</h3>"
-        "<p>TSTT delta (with-shortcut vs without-shortcut) as a function of "
-        "the number of greedy load steps, using greedy loading only (no post-load refinement).  "
-        "The dotted grey line at 0% is where "
-        "the Braess paradox would emerge (positive delta).  The delta never "
-        "crosses zero &mdash; the shortcut <b>always helps</b> under MSA assignment "
-        "loading.</p>"
-        "<p>Two regimes are visible: a <b>rapid convergence</b> phase "
-        "(1&ndash;8 load steps) where the delta drops from &minus;19% to "
-        "&minus;4%, and a <b>plateau</b> beyond ~8 load steps where additional "
-        "load steps barely change the result (asymptoting to ~&minus;3%).  "
-        "This suggests 8&ndash;16 load steps is a practical sweet spot for "
-        "assignment accuracy on small networks.  The paradox is an "
-        "equilibrium phenomenon that requires global re-routing; greedy "
-        "incremental loading never reaches the collectively sub-optimal "
-        "state.</p>"
-    )
-
     # ===================================================================
     # Write report
     # ===================================================================
@@ -898,11 +823,9 @@ def generate_braess_report(
             "<p>Braess paradox validation on a 4-node diamond network using "
             "MSA equilibrium and MSA assignment with MSA convergence.</p>"
             f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.  "
-            f"HC: {case_with.load_steps} greedy load step(s) (sample rate 10%), "
-            "up to 10 MSA refinement rounds, gap &lt; 0.001.</p>"
+            f"Validation: up to 10 MSA iterations, gap &lt; 0.001.</p>"
             f"<p><b>Key finding:</b> MSA confirms the Braess paradox (+{pct:.1f}%). "
-            f"HC Greedy does <i>not</i> reproduce it ({hc_pct:+.1f}%). After MSA refinement, "
-            f"HC + MSA converges to approximate equilibrium ({rr_pct:+.1f}%).</p>"
+            f"Validation run: {rr_pct:+.1f}%.</p>"
         ),
         figures=figs,
         descriptions=descriptions,
