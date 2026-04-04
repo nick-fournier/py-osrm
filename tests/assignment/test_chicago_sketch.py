@@ -403,26 +403,33 @@ def generate_chicago_spillover_report(
         if total_queue < 1.0:
             break
 
-        # Compute throughput at current queue level
-        queue_rate = queue_veh / period_hr  # back to veh/hr for VDF
-        state.flow_vph = np.maximum(queue_rate, 0.0)
-        state.density_vpkm = vdf.demand_to_density(
-            state.flow_vph, state.freeflow_kmh, state.jam_density,
+        # Uncongested-branch drain: the queue is virtual (vehicles
+        # waiting at the entrance), so the link itself discharges at
+        # up to capacity.  flow_to_density clamps at q_c → k_c,
+        # keeping us on the uncongested branch for speed/throughput.
+        queue_rate = queue_veh / period_hr  # veh/hr
+        q_c = vdf.capacity_flow(
+            state.freeflow_kmh, state.jam_density,
+            kc_ratio=state.kc_ratio,
+        )
+        serve_rate = np.minimum(queue_rate, q_c)  # cap at capacity
+
+        state.flow_vph = serve_rate
+        state.density_vpkm = vdf.flow_to_density(
+            serve_rate, state.freeflow_kmh, state.jam_density,
             kc_ratio=state.kc_ratio,
         )
         state.speed_kmh = vdf.density_to_speed(
             state.density_vpkm, state.freeflow_kmh, state.jam_density,
             kc_ratio=state.kc_ratio,
         )
-        state.speed_kmh = np.maximum(state.speed_kmh, 1.0)
 
-        throughput = state.density_vpkm * state.speed_kmh  # veh/hr
-        discharged = throughput * period_hr  # vehicles that leave
+        discharged = serve_rate * period_hr  # vehicles that leave
         queue_veh = np.maximum(queue_veh - discharged, 0.0)
 
         # Metrics for this drain period
         queue_rate_remaining = queue_veh / period_hr
-        oversat_mask = queue_veh > 0
+        oversat_mask = queue_rate_remaining > q_c
         per_lane = queue_rate_remaining / np.maximum(state.n_lanes, 1)
         mean_q = (
             float(np.mean(per_lane[oversat_mask]))
