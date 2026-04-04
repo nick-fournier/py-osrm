@@ -320,6 +320,7 @@ def vdf_flow_traveltime(
         legend=dict(x=0.05, y=0.95),
     )
     fig.update_xaxes(range=[0.0, q_c * surrogate_max_ratio])
+    fig.update_yaxes(range=[0.0, max(10 * t_c, 30)])
     return _save_or_show(fig, path)
 
 

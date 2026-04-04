@@ -17,12 +17,6 @@ import osrm
 from osrm.assignment import AssignmentConfig, AssignmentSolver, DensitySmoothingConfig
 from osrm.assignment.od_matrix import DemandTrip
 from osrm.assignment.osm_synthesis import braess_network
-from .validation import (
-    build_validation_report_sections,
-    validation_final_gap,
-    validation_final_tstt,
-    run_validation_case,
-)
 
 
 def _prepare_network(tmp_path: Path, with_shortcut: bool):
@@ -71,15 +65,6 @@ def _run_assignment(
         patch_braess_lanes(state, meta)
 
     return loop.run(trips, state_patch=lane_patch)
-
-
-def _build_validation_trips(meta: dict, demand_scale: float) -> list[DemandTrip]:
-    demand = 2500.0 * demand_scale
-    return [DemandTrip(
-        origin=meta["origin"],
-        destination=meta["destination"],
-        volume=demand,
-    )]
 
 
 class TestBraessParadox:
@@ -422,13 +407,12 @@ def generate_braess_report(
     tmp_path: str | Path,
     output_path: str = "plots/braess_validation.html",
     demand: float = 2500.0,
-    max_iter: int = 100,
+    max_iter: int = 50,
 ) -> Path:
     """Run Braess paradox validation and generate an interactive HTML report.
 
     Demonstrates the Braess paradox on a 4-node diamond network using MSA
-    equilibrium (matrix-based) and MSA assignment with MSA convergence
-    refinement).  The paradox is confirmed when TSTT *increases* after adding
+    equilibrium.  The paradox is confirmed when TSTT *increases* after adding
     a shortcut link.
 
     Parameters
@@ -455,68 +439,18 @@ def generate_braess_report(
     tmp_path.mkdir(parents=True, exist_ok=True)
 
     # ===================================================================
-    # Run all scenarios
+    # Run MSA with and without shortcut
     # ===================================================================
-
-    # Matrix MSA
     base_with, meta_with = _prepare_network(tmp_path / "msa", with_shortcut=True)
     base_without, meta_without = _prepare_network(tmp_path / "msa", with_shortcut=False)
     result_with = _run_assignment(base_with, meta_with, demand, max_iter)
     result_without = _run_assignment(base_without, meta_without, demand, max_iter)
-
-    # HC sampled path-set refinement
-    base_hc_w, meta_hc_w = _prepare_network(tmp_path / "hc", with_shortcut=True)
-    base_hc_wo, meta_hc_wo = _prepare_network(tmp_path / "hc", with_shortcut=False)
-
-    def _hc_trip_builder(meta, scale):
-        return [DemandTrip(
-            origin=meta["origin"],
-            destination=meta["destination"],
-            volume=demand * scale,
-        )]
-
-    case_with = run_validation_case(
-        base_path=base_hc_w,
-        meta=meta_hc_w,
-        copy_fn=lambda base, run_dir: base,
-        trip_builder=_hc_trip_builder,
-        run_dir=tmp_path / "hc_with_run",
-        demand_scale=1.0,
-        state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        max_rounds=10,
-        gap_threshold=0.001,
-    )
-    case_without = run_validation_case(
-        base_path=base_hc_wo,
-        meta=meta_hc_wo,
-        copy_fn=lambda base, run_dir: base,
-        trip_builder=_hc_trip_builder,
-        run_dir=tmp_path / "hc_without_run",
-        demand_scale=1.0,
-        state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        max_rounds=10,
-        gap_threshold=0.001,
-    )
 
     # Compute key metrics
     tstt_with_vals = [r.tstt for r in result_with.iteration_log]
     tstt_without_vals = [r.tstt for r in result_without.iteration_log]
     delta = tstt_with_vals[-1] - tstt_without_vals[-1]
     pct = delta / tstt_without_vals[-1] * 100 if tstt_without_vals[-1] > 0 else 0
-
-    hc_tstt_wo = sum(b.tstt for b in getattr(case_without.result, "iteration_log", []))
-    hc_tstt_w = sum(b.tstt for b in getattr(case_with.result, "iteration_log", []))
-    hc_pct = (hc_tstt_w / hc_tstt_wo - 1) * 100 if hc_tstt_wo else 0.0
-
-    rr_tstt_w = validation_final_tstt(case_with.result)
-    rr_tstt_wo = validation_final_tstt(case_without.result)
-    rr_pct = (rr_tstt_w / rr_tstt_wo - 1) * 100 if rr_tstt_wo else 0.0
-
-    n_rounds_w = len(getattr(case_with.result, "iteration_log", []) or [])
-    rr_gap_w = validation_final_gap(case_with.result)
-    rr_gap_wo = validation_final_gap(case_without.result)
-    rr_gap_w_str = f"{rr_gap_w:.6f}" if rr_gap_w is not None else "n/a"
-    rr_gap_wo_str = f"{rr_gap_wo:.6f}" if rr_gap_wo is not None else "n/a"
 
     figs = []
     descriptions = []
@@ -637,16 +571,14 @@ def generate_braess_report(
     # 2. Link State Comparison
     # ===================================================================
     state_scenarios = [
-        (result_without.network_state, "Without (MSA)"),
-        (result_with.network_state, "With (MSA)"),
-        (case_with.result.network_state, "With (HC + MSA)"),
+        (result_without.network_state, "Without Shortcut"),
+        (result_with.network_state, "With Shortcut"),
     ]
 
     figs.append(None)
     descriptions.append(
         """<h2>Link State Comparison</h2>
-        <p>Three scenarios: MSA without shortcut, MSA with shortcut,
-        and MSA assignment with MSA convergence (with shortcut).
+        <p>Two scenarios: MSA without shortcut and MSA with shortcut.
         Density (k, veh/km), speed (v, km/h), flow (q = k&times;v, veh/hr), and travel
         time (t = L/v) at the converged state.
         <span style="color:#F44336;font-weight:600;">Red density</span>
@@ -666,8 +598,7 @@ def generate_braess_report(
         """<h2>Route Travel Times</h2>
         <p>Total travel time for each OD route, summed from link-level t = L/v.
         At user equilibrium (Wardrop), all <i>used</i> routes between an OD pair
-        should have equal travel time.  Comparing MSA and HC + MSA
-        convergence toward this condition.</p>"""
+        should have equal travel time.</p>"""
         + _braess_route_tt_table(state_scenarios)
     )
 
@@ -676,44 +607,29 @@ def generate_braess_report(
     # ===================================================================
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
-        name="MSA (matrix)",
+        name="MSA",
         x=["Without Shortcut", "With Shortcut"],
         y=[tstt_without_vals[-1], tstt_with_vals[-1]],
         marker_color="#64B5F6",
     ))
-    fig_bar.add_trace(go.Bar(
-        name="HC Greedy",
-        x=["Without Shortcut", "With Shortcut"],
-        y=[hc_tstt_wo, hc_tstt_w],
-        marker_color="#FFB74D",
-    ))
-    fig_bar.add_trace(go.Bar(
-        name="HC + MSA",
-        x=["Without Shortcut", "With Shortcut"],
-        y=[rr_tstt_wo, rr_tstt_w],
-        marker_color="#E65100",
-    ))
     fig_bar.update_layout(
-        title="TSTT by Method and Scenario",
+        title="TSTT by Scenario",
         xaxis_title="Network Scenario",
         yaxis_title="TSTT (veh\u00b7seconds)",
-        barmode="group",
         template="plotly_white",
     )
     figs.append(fig_bar)
     descriptions.append(
         "<h2>TSTT Comparison</h2>"
-        "<p>Total system travel time across methods. At equilibrium (MSA), "
-        "the Braess paradox is confirmed: adding the shortcut <i>increases</i> TSTT "
-        f"by <b>+{pct:.1f}%</b>. Under HC Greedy loading, the "
-        f"shortcut <i>reduces</i> TSTT by <b>{abs(hc_pct):.1f}%</b>. After MSA refinement, "
-        f"HC + MSA converges toward equilibrium and the paradox re-emerges at <b>{rr_pct:+.1f}%</b>.</p>"
+        "<p>Total system travel time under MSA equilibrium. "
+        "The Braess paradox is confirmed: adding the shortcut <i>increases</i> TSTT "
+        f"by <b>+{pct:.1f}%</b>.</p>"
     )
 
     # ===================================================================
     # 5. MFD Plots
     # ===================================================================
-    _add_mfd_section(figs, descriptions, case_with.result.network_state, 1.0)
+    _add_mfd_section(figs, descriptions, result_with.network_state, 1.0)
 
     # ===================================================================
     # 6. MSA Convergence
@@ -771,49 +687,6 @@ def generate_braess_report(
     )
 
     # ===================================================================
-    # 7. MSA Convergence
-    # ===================================================================
-    figs.append(None)
-    descriptions.append(
-        "<h2>MSA Convergence</h2>"
-        "<p>Convergence diagnostics for the MSA assignment. "
-        "MSA iterates toward "
-        "equilibrium using all-or-nothing auxiliary loading.</p>"
-    )
-
-    # -------------------------------------------------------------------
-    # 7a. Convergence / State / Runtime
-    # -------------------------------------------------------------------
-    hc_figs, hc_descriptions = build_validation_report_sections(
-        network_name="Braess",
-        case=case_with,
-        detail_scale=1.0,
-    )
-    # [0]=congestion map, [1]=link table, [2]=convergence, [3]=state evolution,
-    # [4]=runtime, [5]=MFD (combined), [6]=correlation (combined, if ref)
-    for i in range(2, 5):
-        hc_descriptions[i] = hc_descriptions[i].replace("<h2>", "<h3>").replace("</h2>", "</h3>")
-
-    # Enrich state evolution description with sampled refinement summary
-    rr_paradox_text = (
-        f"The Braess paradox emerges at {rr_pct:+.1f}% &mdash; confirming "
-        "convergence toward approximate Wardrop equilibrium."
-        if rr_pct > 0 else
-        f"The Braess paradox does not emerge ({rr_pct:+.1f}%)."
-    )
-    rounds_w = getattr(case_with.result, "iteration_log", []) or []
-    rounds_wo = getattr(case_without.result, "iteration_log", []) or []
-    hc_descriptions[3] += (
-        f"<p><b>MSA convergence:</b> {n_rounds_w} iteration(s) with shortcut, "
-        f"{len(rounds_wo)} without. "
-        f"Final gap: with&nbsp;=&nbsp;{rr_gap_w_str}, without&nbsp;=&nbsp;{rr_gap_wo_str}. "
-        f"{rr_paradox_text}</p>"
-    )
-
-    figs.extend(hc_figs[2:5])
-    descriptions.extend(hc_descriptions[2:5])
-
-    # ===================================================================
     # Write report
     # ===================================================================
     demand_fmt = f"{demand:,.0f}"
@@ -821,11 +694,9 @@ def generate_braess_report(
         title="Braess Paradox Validation",
         intro=(
             "<p>Braess paradox validation on a 4-node diamond network using "
-            "MSA equilibrium and MSA assignment with MSA convergence.</p>"
-            f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.  "
-            f"Validation: up to 10 MSA iterations, gap &lt; 0.001.</p>"
-            f"<p><b>Key finding:</b> MSA confirms the Braess paradox (+{pct:.1f}%). "
-            f"Validation run: {rr_pct:+.1f}%.</p>"
+            "MSA equilibrium.</p>"
+            f"<p>Demand: <b>{demand_fmt}</b> vehicles.  MSA: &alpha;=1/n, {max_iter} iterations.</p>"
+            f"<p><b>Key finding:</b> MSA confirms the Braess paradox (+{pct:.1f}%).</p>"
         ),
         figures=figs,
         descriptions=descriptions,
