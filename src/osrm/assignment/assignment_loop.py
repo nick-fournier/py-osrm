@@ -79,7 +79,6 @@ class AssignmentConfig:
     max_iterations: int = 50
     convergence_gap: float = 0.01
     bin_width_s: float = 3600.0
-    min_speed_kmh: float = 1.0
     # VDF speed floor — kept very low so the cost function captures
     # the full gradient of the MFD congested branch.  The CSV writer
     # applies a separate (slightly higher) floor for OSRM ingestion.
@@ -434,7 +433,6 @@ class AssignmentSolver:
             coords[i, 3] = t.destination[1]
             volumes[i] = t.volume
 
-        bin_width_hr = self.config.bin_width_s / 3600.0
         default_jam = (self.config.default_jam_density_per_lane
                        * self.config.default_n_lanes)
 
@@ -443,11 +441,6 @@ class AssignmentSolver:
             coords,
             volumes,
             state.edge_ids.astype(np.uint64),
-            state.freeflow_kmh.astype(np.float64),
-            bin_width_hr,
-            self.config.min_speed_kmh,
-            default_jam,
-            self.config.default_n_lanes,
             self.config.n_threads,
         )
 

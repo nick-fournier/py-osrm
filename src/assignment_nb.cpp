@@ -70,18 +70,8 @@ void init_Assignment(nb::module_& m) {
            nb::ndarray<double, nb::ndim<2>, nb::c_contig, nb::device::cpu> coords,
            nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> volumes,
            nb::ndarray<uint64_t, nb::ndim<2>, nb::c_contig, nb::device::cpu> edge_ids,
-           nb::ndarray<double,   nb::ndim<1>, nb::c_contig, nb::device::cpu> freeflow_kmh,
-           double bin_width_hr,
-           double min_speed_kmh,
-           double default_jam_density,
-           int    default_n_lanes,
            int    n_threads)
     {
-        (void)bin_width_hr;
-        (void)min_speed_kmh;
-        (void)freeflow_kmh;
-        (void)default_jam_density;
-        (void)default_n_lanes;
 
         // Optionally cap TBB parallelism
         std::unique_ptr<tbb::global_control> tbb_ctl;
@@ -224,11 +214,6 @@ void init_Assignment(nb::module_& m) {
     nb::arg("coords"),
     nb::arg("volumes"),
     nb::arg("edge_ids"),
-    nb::arg("freeflow_kmh"),
-    nb::arg("bin_width_hr"),
-    nb::arg("min_speed_kmh"),
-    nb::arg("default_jam_density"),
-    nb::arg("default_n_lanes"),
     nb::arg("n_threads") = 0,
     "Route OD pairs and accumulate link volume in C++.\n\n"
     "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
