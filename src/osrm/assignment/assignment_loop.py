@@ -1120,6 +1120,20 @@ class AssignmentSolver:
                 cumulative_volume = queue_carryforward.copy()
                 current_period_bin = batch.departure_bin
 
+                # Update state to reflect spillover-only flow and
+                # re-customize OSRM so the next batch routes against
+                # the (mostly freeflow) reality, not stale period-i weights.
+                state.flow_vph = np.maximum(cumulative_volume, 0.0)
+                self._update_state(state)
+                csv_path = self.writer.write_from_state(state, only_changed=True)
+                osrm_module.customize(
+                    self.base_path,
+                    segment_speed_file=str(csv_path),
+                    verbosity="ERROR",
+                )
+                del engine
+                engine = self._create_engine(quiet=True)
+
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
             aon_volume, aon_tstt, batch_polylines = self._route_and_accumulate(
