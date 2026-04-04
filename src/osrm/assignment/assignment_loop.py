@@ -996,18 +996,27 @@ class AssignmentSolver:
         adapter = TripStreamAdapter(snapped_trips, sort_by_departure=False)
 
         # Auto-tune batch_size from network discovery if not specified.
-        # Route a small sample to learn the network size, then set
-        # batch_size = max(100, n_edges // 4).  On large networks trips
-        # are spatially distributed so coarse batches suffice; on small
-        # networks finer batches prevent route-dumping.
+        # Route a sample to estimate network size, then target a
+        # reasonable number of customize cycles.  Aim for ~50-200 batches
+        # on large networks (enough granularity without excessive
+        # customize overhead) and smaller batches on small networks
+        # to avoid route-dumping.
         if batch_size is None:
-            sample = snapped_trips[:min(500, n_trips)]
+            sample_n = min(5000, n_trips)
+            sample = snapped_trips[:sample_n]
             probe_state = self._discover_network(engine, sample)
+            # Extrapolate: if we saw E edges in S trips out of N total,
+            # the full network is roughly E * (N/S)^0.3 (sub-linear
+            # growth — most edges are discovered early).
             n_edges_est = probe_state.n_edges
-            batch_size = max(100, n_edges_est // 4)
+            if sample_n < n_trips:
+                coverage_ratio = n_trips / sample_n
+                n_edges_est = int(n_edges_est * coverage_ratio ** 0.3)
+            # Target: ~100 batches, clamped to [100, n_trips]
+            batch_size = max(100, n_trips // 100)
             logger.info(
-                "Auto-tuned batch_size=%d (from %d discovered edges)",
-                batch_size, n_edges_est,
+                "Auto-tuned batch_size=%d (~%d batches, %d edges from %d-trip probe)",
+                batch_size, n_trips // batch_size, probe_state.n_edges, sample_n,
             )
 
         logger.info(
