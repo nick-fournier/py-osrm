@@ -106,6 +106,18 @@ class NetworkState:
     def n_edges(self) -> int:
         return len(self.edge_ids)
 
+    @property
+    def unserved_demand(self) -> np.ndarray:
+        """Demand flow minus physical throughput (veh/hr).
+
+        Positive when demand exceeds link capacity — represents the queue
+        buildup rate.  Zero when operating below capacity.  In a multi-period
+        model, ``unserved_demand × Δt`` gives the vehicles that spill into
+        the next time period.
+        """
+        q_physical = self.density_vpkm * self.speed_kmh
+        return np.maximum(self.flow_vph - q_physical, 0.0)
+
     def edge_ordinal(self, from_id: int, to_id: int) -> Optional[int]:
         """Look up edge index by OSM node pair. Returns None if not found."""
         return self._edge_index.get((from_id, to_id))

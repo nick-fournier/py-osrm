@@ -2294,8 +2294,8 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
         for i in range(state.n_edges)
     ]
     fig_mfd = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=["Speed–Density", "Flow–Density"],
+        rows=1, cols=3,
+        subplot_titles=["Speed–Density", "Flow–Density", "Unserved Demand"],
     )
     # Left: speed–density scatter
     fig_mfd.add_trace(go.Scatter(
@@ -2321,23 +2321,38 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
         line=dict(color="#999", dash="dash", width=1),
         name=curve_label, showlegend=False,
     ), row=1, col=2)
+    # Right: unserved demand (queue buildup rate) vs density
+    q_unserved = state.unserved_demand
+    q_unserved_per_lane = q_unserved / np.maximum(n_lanes, 1)
+    fig_mfd.add_trace(go.Scatter(
+        x=k_per_lane.tolist(), y=q_unserved_per_lane.tolist(), mode="markers",
+        marker=dict(size=4, color="#FF6F00", opacity=0.5),
+        hovertext=hover_labels, hoverinfo="text",
+        showlegend=False,
+    ), row=1, col=3)
     fig_mfd.update_xaxes(title_text="Density per lane (veh/km/lane)", rangemode="tozero")
     fig_mfd.update_yaxes(rangemode="tozero")
     fig_mfd.update_yaxes(title_text="Speed (km/h)", row=1, col=1)
     fig_mfd.update_yaxes(title_text="Flow per lane (veh/hr/lane)", row=1, col=2)
+    fig_mfd.update_yaxes(title_text="Unserved (veh/hr/lane)", row=1, col=3)
     fig_mfd.update_layout(
         title=f"Macroscopic Fundamental Diagram ({detail_scale:.0%} demand)",
         template="plotly_white",
-        height=450, width=1000,
+        height=450, width=1400,
     )
     figs.append(fig_mfd)
+    n_queued = int(np.sum(q_unserved > 0))
+    total_unserved = float(np.sum(q_unserved))
     descriptions.append(
         "<h2>Macroscopic Fundamental Diagram (MFD)</h2>"
         "<p>Each point is one link, normalized to per-lane density so links "
         "with different lane counts are comparable. Dashed curve: theoretical "
         f"VDF using median v<sub>f</sub>={med_vf:.0f} km/h, "
         f"k<sub>j</sub>={med_kj_lane:.0f} veh/km/lane. "
-        "Left: speed–density. Right: flow–density (inverted-U fundamental diagram).</p>"
+        "Left: speed–density. Centre: flow–density (inverted-U fundamental diagram). "
+        f"Right: unserved demand = demand − physical throughput. "
+        f"{n_queued}/{state.n_edges} links have unserved demand "
+        f"(total {total_unserved:,.0f} veh/hr).</p>"
     )
 
 
