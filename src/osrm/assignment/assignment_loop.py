@@ -166,6 +166,48 @@ class AssignmentResult:
         }
 
 
+@dataclass
+class StreamBatchResult:
+    """Metrics for one batch in stream assignment."""
+
+    batch_index: int
+    n_trips: int
+    route_time_s: float
+    customize_time_s: float
+    engine_time_s: float
+    batch_time_s: float
+    tstt: float
+    queue_vehicles: float
+    mean_speed_kmh: float
+    min_speed_kmh: float
+    n_oversaturated: int
+
+
+@dataclass
+class StreamResult:
+    """Final result of stream assignment."""
+
+    n_trips: int
+    n_batches: int
+    network_state: NetworkState
+    batch_log: List[StreamBatchResult]
+    total_time_s: float
+
+    def log_as_dict(self) -> Dict:
+        """Convert batch log to dict for plotting."""
+        return {
+            "batch": [r.batch_index for r in self.batch_log],
+            "n_trips": [r.n_trips for r in self.batch_log],
+            "tstt": [r.tstt for r in self.batch_log],
+            "queue_vehicles": [r.queue_vehicles for r in self.batch_log],
+            "mean_speed_kmh": [r.mean_speed_kmh for r in self.batch_log],
+            "min_speed_kmh": [r.min_speed_kmh for r in self.batch_log],
+            "n_oversaturated": [r.n_oversaturated for r in self.batch_log],
+            "route_time_s": [r.route_time_s for r in self.batch_log],
+            "customize_time_s": [r.customize_time_s for r in self.batch_log],
+        }
+
+
 
 
 class AssignmentSolver:
@@ -894,27 +936,190 @@ class AssignmentSolver:
         self,
         trips: List[DemandTrip],
         *,
+        batch_size: int = 10_000,
         state_patch=None,
         progress_callback=None,
-    ) -> AssignmentResult:
-        """Forward-simulation assignment for time-stamped trip streams.
+    ) -> "StreamResult":
+        """Forward-simulation assignment with incremental loading.
+
+        Routes trips in batches, updating network state (VDF → customize)
+        between batches.  Unserved demand (vehicles on links that exceed
+        capacity) carries forward as a queue, adding to congestion in
+        subsequent batches.
 
         Unlike ``assign_matrix()`` which iterates to Wardrop equilibrium,
-        this method processes trips in a single forward pass through time:
+        this performs a single forward pass — quality depends on batch
+        granularity and the resulting customize frequency.
 
-        1. Group trips by departure period
-        2. For each period, route departing trips + spillover from prior period
-        3. Accumulate flow, update network state via VDF
-        4. Compute ``unserved_demand`` — vehicles that cannot traverse at
-           physical throughput — and carry forward as spillover
+        Parameters
+        ----------
+        trips : list of DemandTrip
+            All trips to assign.  If trips have varying
+            ``departure_time_s``, they are sorted and routed in
+            chronological order.  For single-period demand, all
+            departure times can be 0.
+        batch_size : int
+            Number of trips per loading step.  After each batch, the
+            network state is updated and OSRM is re-customized.
+            Smaller batches = more accurate but more customize overhead.
+        state_patch : callable, optional
+            Called with ``(NetworkState,)`` after discovery to patch
+            lane counts or jam density.
+        progress_callback : callable, optional
+            Called with ``(batch_index, n_batches, queue_vehicles)``
+            after each batch.
 
-        No MSA blending or convergence iteration is performed.
-
-        .. note::
-           Not yet implemented. Requires multi-period OSRM weight management.
+        Returns
+        -------
+        StreamResult
         """
-        raise NotImplementedError(
-            "assign_stream() is not yet implemented. "
-            "Multi-period OSRM weight management is required. "
-            "Use assign_matrix() for single-period static equilibrium."
+        from osrm.assignment.trip_stream import TripStreamAdapter
+
+        t_start = time.monotonic()
+        n_trips = len(trips)
+        logger.info(
+            "Stream assignment: %d trips, batch_size=%d, n_threads=%d",
+            n_trips, batch_size, self.config.n_threads,
+        )
+
+        engine = self._create_engine()
+
+        # Sort trips by departure time
+        adapter = TripStreamAdapter(trips, sort_by_departure=True)
+
+        # Snap coordinates (done once for all trips)
+        snapped_trips = self._snap_trips(engine, adapter.trips())
+
+        # Re-wrap after snapping
+        adapter = TripStreamAdapter(snapped_trips, sort_by_departure=False)
+
+        # Network starts empty — edges discovered during routing
+        state = NetworkState.empty()
+        if state_patch:
+            state_patch(state)
+
+        # Cumulative flow: accumulates across loading steps within a
+        # period.  Each batch ADDS its demand to the running total.
+        cumulative_volume = np.zeros(state.n_edges, dtype=np.float64)
+
+        # Queue: vehicles on over-capacity links that spill into the
+        # next time period.  Only meaningful for multi-period — within
+        # a single period it's diagnostic (how much demand exceeds
+        # capacity after all batches are loaded).
+        queue_veh = np.zeros(state.n_edges, dtype=np.float64)
+
+        batch_log: List[StreamBatchResult] = []
+
+        batches = list(adapter.iter_batches(batch_size))
+        n_batches = len(batches)
+        logger.info("Split into %d loading batches", n_batches)
+
+        for batch in batches:
+            t_batch = time.monotonic()
+            bi = batch.batch_index
+
+            # 1. Route this batch against current (congested) weights
+            t_route = time.monotonic()
+            aon_volume, aon_tstt = self._route_and_accumulate(
+                engine, batch.trips, state,
+            )
+            route_time = time.monotonic() - t_route
+
+            # Grow arrays if new edges were discovered
+            if len(cumulative_volume) < state.n_edges:
+                pad = state.n_edges - len(cumulative_volume)
+                cumulative_volume = np.append(cumulative_volume, np.zeros(pad))
+                queue_veh = np.append(queue_veh, np.zeros(
+                    state.n_edges - len(queue_veh)))
+                if state_patch:
+                    state_patch(state)
+                self.smoother.build_adjacency(state.edge_ids, state.length_m)
+
+            # 2. Accumulate: add this batch's demand to cumulative flow.
+            #    aon_volume is in the same units as DemandTrip.volume
+            #    (veh/hr for TNTP, vehicles for ABM with volume=1).
+            cumulative_volume += aon_volume
+            state.flow_vph = np.maximum(cumulative_volume, 0.0)
+
+            # 3. VDF: flow → density → speed
+            self._update_state(state)
+
+            # 4. Unserved demand diagnostic: flow exceeding physical
+            #    throughput.  For multi-period, this would carry forward.
+            unserved_vph = state.unserved_demand
+            total_queue = float(np.sum(unserved_vph))
+            queue_veh = unserved_vph.copy()
+
+            # 5. Write CSV and re-customize OSRM
+            t_cust = time.monotonic()
+            csv_path = self.writer.write_from_state(state, only_changed=True)
+            osrm_module.customize(
+                self.base_path,
+                segment_speed_file=str(csv_path),
+                verbosity="ERROR",
+            )
+            customize_time = time.monotonic() - t_cust
+
+            # 6. Reload engine with updated weights
+            t_engine = time.monotonic()
+            del engine
+            engine = self._create_engine()
+            engine_time = time.monotonic() - t_engine
+
+            # Metrics
+            active = state.flow_vph > 0
+            active_speeds = state.speed_kmh[active] if np.any(active) else state.speed_kmh
+            link_time_s = state.length_m * 3.6 / np.maximum(
+                state.speed_kmh, self.config.vdf_min_speed_kmh,
+            )
+            tstt = float(np.sum(state.flow_vph * link_time_s))
+
+            batch_result = StreamBatchResult(
+                batch_index=bi,
+                n_trips=len(batch.trips),
+                route_time_s=route_time,
+                customize_time_s=customize_time,
+                engine_time_s=engine_time,
+                batch_time_s=time.monotonic() - t_batch,
+                tstt=tstt,
+                queue_vehicles=total_queue,
+                mean_speed_kmh=float(np.mean(active_speeds)),
+                min_speed_kmh=float(np.min(active_speeds)),
+                n_oversaturated=int(np.sum(
+                    state.density_vpkm > self.vdf.critical_density(state.jam_density)
+                )),
+            )
+            batch_log.append(batch_result)
+
+            if bi % max(1, n_batches // 10) == 0 or bi == n_batches - 1:
+                logger.info(
+                    "Batch %d/%d: %d trips, queue=%.0f veh, "
+                    "mean_speed=%.1f km/h, oversat=%d, "
+                    "route=%.1fs, cust=%.1fs",
+                    bi + 1, n_batches, len(batch.trips),
+                    total_queue, batch_result.mean_speed_kmh,
+                    batch_result.n_oversaturated,
+                    route_time, customize_time,
+                )
+
+            if progress_callback:
+                progress_callback(bi, n_batches, total_queue)
+
+        total_time = time.monotonic() - t_start
+        del engine
+        self.writer.cleanup()
+
+        logger.info(
+            "Stream complete: %d trips in %d batches, %.1fs, "
+            "final queue=%.0f veh",
+            n_trips, n_batches, total_time,
+            batch_log[-1].queue_vehicles if batch_log else 0,
+        )
+
+        return StreamResult(
+            n_trips=n_trips,
+            n_batches=n_batches,
+            network_state=state,
+            batch_log=batch_log,
+            total_time_s=total_time,
         )

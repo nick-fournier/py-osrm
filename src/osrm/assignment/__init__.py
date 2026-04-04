@@ -11,6 +11,8 @@ from osrm.assignment.assignment_loop import (
     AssignmentSolver,
     AssignmentConfig,
     AssignmentResult,
+    StreamResult,
+    StreamBatchResult,
     StopReason,
     IterationResult,
 )
@@ -30,6 +32,8 @@ __all__ = [
     "AssignmentSolver",
     "AssignmentConfig",
     "AssignmentResult",
+    "StreamResult",
+    "StreamBatchResult",
     "StopReason",
     "IterationResult",
     "plots",
