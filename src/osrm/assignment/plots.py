@@ -1815,11 +1815,11 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
             bucket["xs"].extend([round(x0, 5), round(x1, 5), None])
             bucket["ys"].extend([round(y0, 5), round(y1, 5), None])
 
-    # One trace per color bucket
+    # One trace per color bucket (Scatter, not Scattergl — gl has None-gap bugs)
     for color, bucket in color_buckets.items():
         if not bucket["xs"]:
             continue
-        fig.add_trace(go.Scattergl(
+        fig.add_trace(go.Scatter(
             x=bucket["xs"], y=bucket["ys"], mode="lines",
             line=dict(color=color, width=1),
             hoverinfo="skip",
