@@ -166,20 +166,6 @@ class AssignmentResult:
         }
 
 
-@dataclass
-class RoutedTripPath:
-    """Per-trip path data captured during routing.
-
-    This is used by the matrix-free assignment solver to retain enough path-level
-    information to support later selective healing without re-running a full
-    all-trip assignment pass.
-    """
-
-    trip_index: int
-    edge_indices: List[int]
-    density_contribution: List[float]
-    duration_s: float
-
 
 
 class AssignmentSolver:
@@ -362,27 +348,23 @@ class AssignmentSolver:
         logger.info("Discovered %d unique directed edges", state.n_edges)
         return state
 
-    def _route_and_accumulate_with_paths(
+    def _route_and_accumulate(
         self,
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
         state: NetworkState,
-    ) -> Tuple[np.ndarray, np.ndarray, float, List[RoutedTripPath]]:
-        """Route all trips, accumulate link density and volume.
+    ) -> Tuple[np.ndarray, float]:
+        """Route all trips, accumulate link volume.
 
         Uses C++ accumulation when available — route results never cross
         the C++/Python boundary, eliminating the Python per-segment loop.
 
         Returns
         -------
-        aon_density : np.ndarray
-            All-or-nothing density (veh/km) from this iteration.
         aon_volume : np.ndarray
             All-or-nothing demand volume (vehicles) per link.
         aon_tstt : float
             AON total system travel time (vehicle-seconds).
-        routed_paths : list[RoutedTripPath]
-            Per-trip path records for refinement.
         """
         try:
             return self._route_and_accumulate_cpp(engine, trips, state)
@@ -395,7 +377,7 @@ class AssignmentSolver:
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
         state: NetworkState,
-    ) -> Tuple[np.ndarray, np.ndarray, float, List[RoutedTripPath]]:
+    ) -> Tuple[np.ndarray, float]:
         """C++ fast path: route + accumulate in one native call."""
         from osrm.osrm_ext import batch_route_accumulate
 
@@ -413,7 +395,7 @@ class AssignmentSolver:
         default_jam = (self.config.default_jam_density_per_lane
                        * self.config.default_n_lanes)
 
-        density, volume, tstt, raw_paths, new_edges = batch_route_accumulate(
+        volume, tstt, new_edges = batch_route_accumulate(
             engine._engine,
             coords,
             volumes,
@@ -433,40 +415,22 @@ class AssignmentSolver:
                 float(speed_kmh), default_jam, self.config.default_n_lanes,
             )
 
-        # Convert C++ path tuples to RoutedTripPath objects
-        routed_paths = [
-            RoutedTripPath(
-                trip_index=int(ti),
-                edge_indices=ei.tolist(),
-                density_contribution=dc.tolist(),
-                duration_s=float(dur),
-            )
-            for ti, dur, ei, dc in raw_paths
-        ]
-
-        # Ensure arrays cover all edges (including newly registered ones)
-        density = np.asarray(density, dtype=np.float64)
         volume = np.asarray(volume, dtype=np.float64)
-        if len(density) < state.n_edges:
-            density = np.append(density,
-                                np.zeros(state.n_edges - len(density)))
+        if len(volume) < state.n_edges:
             volume = np.append(volume,
                                np.zeros(state.n_edges - len(volume)))
 
-        return density, volume, float(tstt), routed_paths
+        return volume, float(tstt)
 
     def _route_and_accumulate_py(
         self,
         engine: osrm_module.OSRM,
         trips: List[DemandTrip],
         state: NetworkState,
-    ) -> Tuple[np.ndarray, np.ndarray, float, List[RoutedTripPath]]:
+    ) -> Tuple[np.ndarray, float]:
         """Python fallback: original per-segment accumulation loop."""
-        new_density = np.zeros(state.n_edges, dtype=np.float64)
         new_volume = np.zeros(state.n_edges, dtype=np.float64)
         tstt = 0.0
-        bin_width_hr = self.config.bin_width_s / 3600.0
-        routed_paths: List[RoutedTripPath] = []
 
         raw_results = self._batch_route_raw(engine, trips)
 
@@ -480,8 +444,6 @@ class AssignmentSolver:
             route = routes[0]
             route_duration_s = float(route["duration"])
             tstt += trip.volume * route_duration_s
-            trip_edge_indices: List[int] = []
-            trip_density: List[float] = []
 
             for leg in route["legs"]:
                 ann = leg["annotation"]
@@ -501,41 +463,13 @@ class AssignmentSolver:
                             from_id, to_id, dist, spd, jam_d,
                             self.config.default_n_lanes,
                         )
-                        if idx >= len(new_density):
-                            pad = state.n_edges - len(new_density)
-                            new_density = np.append(new_density, np.zeros(pad))
+                        if idx >= len(new_volume):
+                            pad = state.n_edges - len(new_volume)
                             new_volume = np.append(new_volume, np.zeros(pad))
 
                     new_volume[idx] += trip.volume
 
-                    seg_speed_kmh = (speeds[i] * 3.6) if i < len(speeds) else 0.0
-                    if seg_speed_kmh < self.config.min_speed_kmh:
-                        seg_speed_kmh = state.freeflow_kmh[idx]
-                    density_delta = trip.volume / (seg_speed_kmh * bin_width_hr)
-                    new_density[idx] += density_delta
-                    trip_edge_indices.append(idx)
-                    trip_density.append(density_delta)
-
-            routed_paths.append(RoutedTripPath(
-                trip_index=trip_idx,
-                edge_indices=trip_edge_indices,
-                density_contribution=trip_density,
-                duration_s=route_duration_s,
-            ))
-
-        return new_density, new_volume, tstt, routed_paths
-
-    def _route_and_accumulate(
-        self,
-        engine: osrm_module.OSRM,
-        trips: List[DemandTrip],
-        state: NetworkState,
-    ) -> Tuple[np.ndarray, np.ndarray, float]:
-        """Route all trips, accumulate link density and volume."""
-        new_density, new_volume, tstt, _ = self._route_and_accumulate_with_paths(
-            engine, trips, state,
-        )
-        return new_density, new_volume, tstt
+        return new_volume, tstt
 
     def _compute_relative_gap(
         self,
@@ -728,7 +662,7 @@ class AssignmentSolver:
                 n_inc, len(inc_steps), step_frac * 100,
             )
             t_route = time.monotonic()
-            _aon_density, aon_volume, aon_tstt = self._route_and_accumulate(
+            aon_volume, aon_tstt = self._route_and_accumulate(
                 engine, trips, state,
             )
             route_time = time.monotonic() - t_route
@@ -772,9 +706,9 @@ class AssignmentSolver:
         for n in range(1, self.config.max_iterations + 1):
             logger.debug("=== Iteration %d ===", n)
 
-            # 2. Route all trips, get all-or-nothing density and volume
+            # 2. Route all trips, get all-or-nothing volume
             t_route = time.monotonic()
-            _aon_density, aon_volume, aon_tstt = self._route_and_accumulate(
+            aon_volume, aon_tstt = self._route_and_accumulate(
                 engine, trips, state,
             )
             route_time = time.monotonic() - t_route

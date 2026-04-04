@@ -91,10 +91,44 @@ The auxiliary density depends on the iterate itself — this violates the MSA
 requirement that the auxiliary problem be independent of the current state.
 Density ratchets monotonically toward jam density.
 
-**Status:** UNRESOLVED — this is the core convergence bug.  Density-based
-static equilibrium may be fundamentally problematic because the MFD
-backward-bends (same flow maps to two densities).  A monotone cost function
-in volume space (queue-delay surrogate) is the proposed fix.
+**Status:** RESOLVED — see **Resolution of #4** below.
+
+#### Resolution of #4: Flow-Based MSA Blending
+
+**Fix:** Blend in **flow (demand volume) space** instead of density space.
+Flow is state-independent and additive, eliminating the feedback loop:
+
+```
+q ← (1−α)·q_prev + α·q_aon          # blend demand flow
+k  = demand_to_density(q, v_f, k_j)  # VDF monotone inverse
+v  = density_to_speed(k, v_f, k_j)   # MFD forward
+```
+
+The key insight is that `demand_to_density()` is the **monotone extension**
+of the MFD inverse — for q > q_c it continues mapping demand to density
+beyond k_c (where the physical MFD backward-bends).  This gives a unique
+k for every demand level, making the cost function strictly monotone in q.
+
+**Pipeline:** blend flow → `demand_to_density(q)` → `density_to_speed(k)`
+→ write segment-speed CSV → OSRM customize.
+
+**Results:**
+- Sioux Falls (15% demand, 20 MSA iter): gap 0.0057
+- Braess paradox: converges to gap 0.000000 at iter 3, paradox confirmed
+- Chicago Sketch (100%, 50 MSA iter): gap ~0.045
+
+**Why it works:** Flow blending satisfies the MSA mathematical requirements:
+(1) the auxiliary problem (AON routing on frozen costs) is independent of
+the current flow iterate, and (2) the cost function c(q) = L / v(k(q)) is
+monotonically increasing in q.  The bi-parabolic VDF's monotone extension
+provides this without resorting to BPR.
+
+**Also validated:** Frank-Wolfe with Beckmann line search converges with
+flow-based blending — `_fw_line_search()` uses `demand_to_speed()` for
+cost evaluation, bisection on Beckmann gradient.
+
+**Commits:** Flow-based convergence fix applied across multiple commits
+in the architecture refactor series.
 
 ---
 
@@ -303,6 +337,59 @@ pre-customize snapshot API.
 
 ---
 
+## Category F — Architectural Mismatch
+
+### 16. OSRM for Classical Static UE Assignment
+
+**Status:** CONFIRMED INFEASIBLE AT SCALE
+
+**Idea:** Use OSRM's fast Route() call as the shortest-path oracle in
+MSA/FW static user equilibrium assignment.  Route each OD pair individually,
+accumulate link flows, blend, re-customize OSRM with new speeds, repeat.
+
+**Benchmark (Chicago Regional, 10 cores):**
+
+| Method | Throughput | 2.3M OD pairs |
+|--------|-----------|---------------|
+| OSRM BatchRoute | 14,300 routes/s | 161s |
+| OSRM Table (duration only) | 153,000 pairs/s | 21s |
+| AequilibraE (open-source FW) | ~3.2M pairs/s equiv | 1s |
+
+One MSA iteration on Chicago Regional ≈ 2.7 min with OSRM vs ~1s with
+AequilibraE.  At 50 iterations: **~2.2 hours vs ~50 seconds**.
+
+**Why it's structurally wrong:** Traditional assignment builds a
+shortest-path tree from each origin zone via Dijkstra, fanning out to all
+destinations in one pass.  Cost: O(zones × |E| log |V|).  OSRM's MLD
+algorithm is optimized for fast *individual* queries — it finds a single
+source→destination path quickly but cannot enumerate an entire SPT.
+Each OD pair is a separate query: O(OD_pairs × path_length).
+
+For 1,790 zones with 72% non-zero OD pairs → 2.3M individual route calls
+per iteration.  A Dijkstra-based solver does 1,790 SPT constructions.
+
+**OSRM Table() doesn't help:** Returns only scalar durations, not
+link-level paths needed for flow accumulation.  Even if it did, 153k
+pairs/s is still ~10× slower than dedicated graph solvers.
+
+**What OSRM IS good for:** Fast individual trip routing on a weighted
+network with turn penalties, real-world road topology, and sub-second
+weight updates via MLD customization.  This maps to streaming/mesoscopic
+assignment where trips are routed individually against a live network state.
+
+**Alternatives evaluated:**
+- **Valhalla:** True per-request dynamic costing via `traffic.tar`
+  memory-mapped file — no customize step needed.  Better architecture
+  for streaming, but still per-query (same O(OD_pairs) problem for static).
+- **pgRouting:** Full SQL-level per-query weights but too slow for
+  high-volume routing.
+- **Conclusion:** For static UE, use a dedicated solver (AequilibraE,
+  TransCAD, VISUM).  For streaming mesoscopic, OSRM or Valhalla are
+  appropriate — Valhalla's live traffic API is more elegant but OSRM's
+  MLD customization is functional.
+
+---
+
 ## Lessons Learned
 
 1. **VDF smoothing addresses the wrong bottleneck.** The gradient singularity
@@ -317,10 +404,12 @@ pre-customize snapshot API.
    sophistication.  Incremental loading (25% → 100%) prevents catastrophic
    iteration-1 overshoot.
 
-4. **Density-based static equilibrium may be fundamentally ill-posed.**
+4. **Density-based static equilibrium requires a monotone extension.**
    The MFD backward-bends: same flow maps to two densities.  For q > q_c
-   there is no physical density on the uncongested branch.  A monotone cost
-   function in volume space is needed.
+   there is no physical density on the uncongested branch.  The fix is
+   `demand_to_density()` — a monotone extension that maps demand to the
+   congested branch, giving a unique cost c(q) for every demand level.
+   Blend in flow space, derive density via the monotone inverse.
 
 5. **Don't confuse TSTT stabilization with equilibrium.**  Any feasible
    flow pattern can stabilize.  Only the Wardrop gap (assigned cost vs
@@ -337,3 +426,13 @@ pre-customize snapshot API.
 8. **Organic growth creates parallel pipelines.**  Two solvers, two result
    types, two report interfaces — each sensible in isolation but
    unmaintainable together.  Consolidate early.
+
+9. **OSRM is structurally wrong for classical static UE.**  Traditional
+   assignment builds shortest-path trees from each origin zone (O(zones)
+   Dijkstra calls).  OSRM requires individual Route() calls per OD pair
+   (O(OD_pairs)).  On Chicago Regional (1,790 zones, 2.3M OD pairs):
+   AequilibraE ≈ 1s/iter, py-osrm ≈ 160s/iter — a 160× structural
+   penalty.  OSRM is optimized for fast single-query latency, not for
+   shortest-path-tree enumeration.  The OSRM-backed approach is viable for
+   streaming/mesoscopic assignment (individual trip routing on a live
+   network) but cannot compete with dedicated solvers on static UE.

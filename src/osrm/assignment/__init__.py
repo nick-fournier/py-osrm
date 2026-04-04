@@ -13,7 +13,6 @@ from osrm.assignment.assignment_loop import (
     AssignmentResult,
     StopReason,
     IterationResult,
-    RoutedTripPath,
 )
 from osrm.assignment import plots
 
@@ -33,6 +32,5 @@ __all__ = [
     "AssignmentResult",
     "StopReason",
     "IterationResult",
-    "RoutedTripPath",
     "plots",
 ]

@@ -1,14 +1,10 @@
 /*
  * C++ accumulation for traffic assignment.
  *
- * Combines OSRM routing + density/volume accumulation into a single
- * call.  Accepts numpy coordinate/volume arrays directly, builds
+ * Combines OSRM routing + volume accumulation into a single call.
+ * Accepts numpy coordinate/volume arrays directly, builds
  * RouteParameters in C++, routes via OSRM, and accumulates — no
  * Python per-trip overhead at all.
- *
- * The function mirrors the logic of
- *   assignment_loop.py :: _route_and_accumulate_with_paths
- * but executes entirely in C++.
  */
 
 #include "assignment_nb.h"
@@ -67,13 +63,6 @@ struct NewEdge {
     double   speed_kmh;
 };
 
-struct TripPath {
-    int      trip_index;
-    double   duration_s;
-    std::vector<int>    edge_indices;
-    std::vector<double> density_contributions;
-};
-
 void init_Assignment(nb::module_& m) {
 
     m.def("batch_route_accumulate",
@@ -88,6 +77,12 @@ void init_Assignment(nb::module_& m) {
            int    default_n_lanes,
            int    n_threads)
     {
+        (void)bin_width_hr;
+        (void)min_speed_kmh;
+        (void)freeflow_kmh;
+        (void)default_jam_density;
+        (void)default_n_lanes;
+
         // Optionally cap TBB parallelism
         std::unique_ptr<tbb::global_control> tbb_ctl;
         if (n_threads > 0) {
@@ -96,7 +91,6 @@ void init_Assignment(nb::module_& m) {
                 static_cast<size_t>(n_threads));
         }
 
-        // coords shape: (n_trips, 4) — [o_lon, o_lat, d_lon, d_lat]
         const size_t n_trips  = coords.shape(0);
         const size_t n_edges0 = edge_ids.shape(0);
         const double* c_ptr   = coords.data();
@@ -112,7 +106,6 @@ void init_Assignment(nb::module_& m) {
             const auto ann_type =
                 RouteParameters::AnnotationsType::Nodes |
                 RouteParameters::AnnotationsType::Distance |
-                RouteParameters::AnnotationsType::Duration |
                 RouteParameters::AnnotationsType::Speed;
 
             for (size_t i = 0; i < n_trips; ++i) {
@@ -149,16 +142,11 @@ void init_Assignment(nb::module_& m) {
             );
         }
 
-        // ── 4. accumulate (sequential, in C++) ──────────────────
-        std::vector<double> density(n_edges0, 0.0);
+        // ── 4. accumulate volume (sequential, in C++) ───────────
         std::vector<double> volume(n_edges0, 0.0);
         double tstt = 0.0;
 
         std::vector<NewEdge> new_edges;
-        std::vector<TripPath> paths;
-        paths.reserve(n_trips);
-
-        const double* ff_ptr = freeflow_kmh.data();
 
         for (size_t ti = 0; ti < n_trips; ++ti) {
             if (statuses[ti] != osrm::engine::Status::Ok) continue;
@@ -173,10 +161,6 @@ void init_Assignment(nb::module_& m) {
             double route_dur = as_number(route.values.at("duration"));
             double trip_vol  = vol_ptr[ti];
             tstt += trip_vol * route_dur;
-
-            TripPath tp;
-            tp.trip_index = static_cast<int>(ti);
-            tp.duration_s = route_dur;
 
             const auto& legs_arr = as_array(route.values.at("legs"));
 
@@ -200,9 +184,8 @@ void init_Assignment(nb::module_& m) {
                     if (it != emap.end()) {
                         idx = it->second;
                     } else {
-                        idx = static_cast<int>(density.size());
+                        idx = static_cast<int>(volume.size());
                         emap[{from_id, to_id}] = idx;
-                        density.push_back(0.0);
                         volume.push_back(0.0);
 
                         double dist = (si < dist_arr.values.size())
@@ -213,41 +196,19 @@ void init_Assignment(nb::module_& m) {
                     }
 
                     volume[idx] += trip_vol;
-
-                    double seg_speed_kmh = (si < speed_arr.values.size())
-                        ? as_number(speed_arr.values[si]) * 3.6 : 0.0;
-                    if (seg_speed_kmh < min_speed_kmh) {
-                        if (static_cast<size_t>(idx) < n_edges0) {
-                            seg_speed_kmh = ff_ptr[idx];
-                        } else {
-                            seg_speed_kmh = new_edges[idx - n_edges0].speed_kmh;
-                        }
-                    }
-
-                    double dd = trip_vol / (seg_speed_kmh * bin_width_hr);
-                    density[idx] += dd;
-                    tp.edge_indices.push_back(idx);
-                    tp.density_contributions.push_back(dd);
                 }
             }
-
-            paths.push_back(std::move(tp));
         }
 
         // ── 5. pack results into numpy / Python objects ─────────
-        size_t n_total = density.size();
+        size_t n_total = volume.size();
 
-        double* d_buf = new double[n_total];
         double* v_buf = new double[n_total];
-        std::memcpy(d_buf, density.data(), n_total * sizeof(double));
         std::memcpy(v_buf, volume.data(),  n_total * sizeof(double));
 
-        nb::capsule d_owner(d_buf, [](void* p) noexcept { delete[] static_cast<double*>(p); });
         nb::capsule v_owner(v_buf, [](void* p) noexcept { delete[] static_cast<double*>(p); });
 
         size_t shape[1] = {n_total};
-        auto py_density = nb::ndarray<nb::numpy, double, nb::ndim<1>>(
-            d_buf, 1, shape, d_owner);
         auto py_volume  = nb::ndarray<nb::numpy, double, nb::ndim<1>>(
             v_buf, 1, shape, v_owner);
 
@@ -257,28 +218,7 @@ void init_Assignment(nb::module_& m) {
                 ne.from_id, ne.to_id, ne.length_m, ne.speed_kmh));
         }
 
-        nb::list py_paths;
-        for (const auto& tp : paths) {
-            size_t pn = tp.edge_indices.size();
-            int*    ei_buf = new int[pn];
-            double* dc_buf = new double[pn];
-            std::memcpy(ei_buf, tp.edge_indices.data(), pn * sizeof(int));
-            std::memcpy(dc_buf, tp.density_contributions.data(), pn * sizeof(double));
-
-            nb::capsule ei_own(ei_buf, [](void* p) noexcept { delete[] static_cast<int*>(p); });
-            nb::capsule dc_own(dc_buf, [](void* p) noexcept { delete[] static_cast<double*>(p); });
-
-            size_t ps[1] = {pn};
-            auto py_ei = nb::ndarray<nb::numpy, int, nb::ndim<1>>(
-                ei_buf, 1, ps, ei_own);
-            auto py_dc = nb::ndarray<nb::numpy, double, nb::ndim<1>>(
-                dc_buf, 1, ps, dc_own);
-
-            py_paths.append(nb::make_tuple(
-                tp.trip_index, tp.duration_s, py_ei, py_dc));
-        }
-
-        return nb::make_tuple(py_density, py_volume, tstt, py_paths, py_new_edges);
+        return nb::make_tuple(py_volume, tstt, py_new_edges);
     },
     nb::arg("engine"),
     nb::arg("coords"),
@@ -290,11 +230,11 @@ void init_Assignment(nb::module_& m) {
     nb::arg("default_jam_density"),
     nb::arg("default_n_lanes"),
     nb::arg("n_threads") = 0,
-    "Route OD pairs and accumulate link density/volume in C++.\n\n"
+    "Route OD pairs and accumulate link volume in C++.\n\n"
     "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
     "builds RouteParameters internally — no Python param construction.\n"
     "Uses JSON route results (correct uint64 OSM node IDs at any scale).\n\n"
     "n_threads: 0 = use all cores, >0 = cap TBB parallelism.\n\n"
-    "Returns (density, volume, tstt, paths, new_edges)."
+    "Returns (volume, tstt, new_edges)."
     );
 }
