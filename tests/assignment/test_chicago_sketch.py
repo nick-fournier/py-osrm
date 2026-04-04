@@ -266,8 +266,8 @@ def generate_chicago_stream_report(
     return out
 
 
-def _build_trips_multiperiod(meta: dict, n_periods: int = 2,
-                              period_duration_s: float = 1800.0) -> list:
+def _build_trips_multiperiod(meta: dict, n_periods: int = 4,
+                              period_duration_s: float = 900.0) -> list:
     """Build trips with even demand across multiple periods.
 
     Each period gets the full OD matrix (same demand rate).  Trips in
@@ -299,10 +299,9 @@ def generate_chicago_spillover_report(
 ) -> Path:
     """Generate Chicago Sketch multi-period spillover validation report.
 
-    Runs 2 × 30-min periods with equal demand.  Unserved demand from
-    period 1 carries forward as starting flow in period 2.  Compares
-    against a single-period baseline to show the effect of queue
-    carryforward.
+    Runs 4 × 15-min demand periods, then continues with empty drain
+    periods (no new trips, only spillover) until the queue dissipates.
+    Plots end-of-period metrics with period number on X axis.
     """
     import numpy as np
     import plotly.graph_objects as go
@@ -318,39 +317,115 @@ def generate_chicago_spillover_report(
 
     base, meta = _prepare_chicago_network(tmp_path)
 
-    period_s = 1800.0  # 30 min
+    n_demand_periods = 4
+    period_s = 900.0  # 15 min
+    max_drain_periods = 10
+    # Stop early if queue drops below 2% of peak unserved
+    drain_ratio = 0.02
 
-    # ── Baseline: single-period (no spillover) ────────────────────
-    baseline_base = _copy_clean_osrm(base, tmp_path / "baseline_run")
-    baseline_trips = _build_trips(meta)
-    total_demand_1p = sum(t.volume for t in baseline_trips)
-
-    config = AssignmentConfig(
-        smoothing=DensitySmoothingConfig(method="none"),
-        speed_csv_dir=str(Path(baseline_base).parent),
+    # Build demand trips: 4 periods of equal demand
+    spill_trips = _build_trips_multiperiod(
+        meta, n_periods=n_demand_periods, period_duration_s=period_s,
     )
-    solver_bl = AssignmentSolver(baseline_base, config)
-    result_bl = solver_bl.assign_stream(
-        baseline_trips, batch_size=batch_size,
-        state_patch=lambda s: patch_lanes(s, meta),
-    )
+    per_period_demand = sum(t.volume for t in _build_trips(meta))
 
-    # ── Multi-period: 2 × 30-min with spillover ──────────────────
+    # Run with spillover
     spill_base = _copy_clean_osrm(base, tmp_path / "spillover_run")
-    spill_trips = _build_trips_multiperiod(meta, n_periods=2,
-                                            period_duration_s=period_s)
-    total_demand_2p = sum(t.volume for t in spill_trips)
-
-    config_sp = AssignmentConfig(
+    config = AssignmentConfig(
         smoothing=DensitySmoothingConfig(method="none"),
         speed_csv_dir=str(Path(spill_base).parent),
     )
-    solver_sp = AssignmentSolver(spill_base, config_sp)
-    result_sp = solver_sp.assign_stream(
+    solver = AssignmentSolver(spill_base, config)
+
+    result = solver.assign_stream(
         spill_trips, batch_size=batch_size,
         period_duration_s=period_s,
         state_patch=lambda s: patch_lanes(s, meta),
     )
+
+    # Extract end-of-period metrics from batch log.
+    # Detect period boundaries: when total_unserved_vph drops between
+    # consecutive batches, that's a period reset (carryforward).
+    blog = result.log_as_dict()
+    n_batches = len(blog["batch"])
+    unserved_series = blog["total_unserved_vph"]
+
+    # Detect period boundaries: when total_unserved_vph drops between
+    # consecutive batches, that's a period reset (carryforward).  During
+    # demand loading, unserved only grows — any drop means period reset.
+    period_end_indices = []
+    for i in range(1, n_batches):
+        if unserved_series[i] < unserved_series[i - 1] * 0.7:
+            period_end_indices.append(i - 1)
+    period_end_indices.append(n_batches - 1)  # final period
+
+    period_metrics = []
+    for p, end_idx in enumerate(period_end_indices):
+        period_metrics.append({
+            "period": p + 1,
+            "label": f"P{p+1}",
+            "has_demand": True,
+            "queue_veh_hr_lane": blog["queue_vehicles"][end_idx],
+            "total_unserved_vph": blog["total_unserved_vph"][end_idx],
+            "mean_speed_kmh": blog["mean_speed_kmh"][end_idx],
+            "n_oversaturated": blog["n_oversaturated"][end_idx],
+            "tstt": blog["tstt"][end_idx],
+        })
+
+    # Drain phase: run empty periods until queue dissipates.
+    # No routing needed — just iterate VDF on shrinking spillover.
+    state = result.network_state
+    unserved = result.unserved_vph.copy()
+
+    from osrm.assignment.vdf import BiParabolicVDF
+
+    vdf = BiParabolicVDF()
+
+    peak_unserved = float(np.sum(unserved))
+
+    for drain_p in range(max_drain_periods):
+        total_unserved = float(np.sum(unserved))
+        if total_unserved < peak_unserved * drain_ratio:
+            break
+
+        # Set flow to just the spillover
+        state.flow_vph = np.maximum(unserved, 0.0)
+
+        # VDF: flow → density → speed
+        state.density_vpkm = vdf.demand_to_density(
+            state.flow_vph, state.freeflow_kmh, state.jam_density,
+            kc_ratio=state.kc_ratio,
+        )
+        state.speed_kmh = vdf.density_to_speed(
+            state.density_vpkm, state.freeflow_kmh, state.jam_density,
+            kc_ratio=state.kc_ratio,
+        )
+        state.speed_kmh = np.maximum(state.speed_kmh, 1.0)
+
+        # Compute new unserved for this drain period
+        unserved = state.unserved_demand.copy()
+
+        oversat_mask = unserved > 0
+        unserved_per_lane = unserved / np.maximum(state.n_lanes, 1)
+        mean_q = (
+            float(np.mean(unserved_per_lane[oversat_mask]))
+            if np.any(oversat_mask) else 0.0
+        )
+        active = state.flow_vph > 0
+        active_speeds = state.speed_kmh[active] if np.any(active) else state.speed_kmh
+        link_time_s = state.length_m * 3.6 / np.maximum(state.speed_kmh, 1.0)
+        tstt = float(np.sum(state.flow_vph * link_time_s))
+
+        period_metrics.append({
+            "period": n_demand_periods + drain_p + 1,
+            "label": f"D{drain_p+1}",
+            "has_demand": False,
+            "queue_veh_hr_lane": mean_q,
+            "total_unserved_vph": float(np.sum(unserved)),
+            "mean_speed_kmh": float(np.mean(active_speeds)),
+            "n_oversaturated": int(np.sum(oversat_mask)),
+            "tstt": tstt,
+        })
 
     # ── Build report ──────────────────────────────────────────────
     node_coords = meta["nodes"]
@@ -358,203 +433,124 @@ def generate_chicago_spillover_report(
     figs: list = []
     descriptions: list[str] = []
 
-    # §1 — Congestion map: spillover final state
+    # §1 — Congestion map: peak period final state
     _add_congestion_map_section(
-        figs, descriptions, "Chicago Sketch — Period 2 (with spillover)",
-        node_coords, result_sp.network_state, link_attrs, meta, 1.0,
+        figs, descriptions,
+        f"Chicago Sketch — End of Demand (Period {n_demand_periods})",
+        node_coords, result.network_state, link_attrs, meta, 1.0,
     )
 
-    # §2 — Loading progression comparison
-    blog_bl = result_bl.log_as_dict()
-    blog_sp = result_sp.log_as_dict()
+    # §2 — Period-level metrics (the key chart)
+    x_labels = [m["label"] for m in period_metrics]
+    demand_mask = [m["has_demand"] for m in period_metrics]
+    n_demand = sum(demand_mask)
 
     fig = make_subplots(rows=2, cols=2, subplot_titles=[
         "Queue (veh/hr/lane)", "Mean Speed (km/h)",
-        "Oversaturated Links", "TSTT",
-    ], vertical_spacing=0.12, horizontal_spacing=0.10)
+        "Oversaturated Links", "Total Unserved (veh/hr)",
+    ], vertical_spacing=0.15, horizontal_spacing=0.10)
 
-    # Baseline traces
-    bl_x = list(range(len(blog_bl["batch"])))
-    sp_x = list(range(len(blog_sp["batch"])))
+    colors = ["#D32F2F", "#2E7D32", "#FF6F00", "#6A1B9A"]
+    keys = ["queue_veh_hr_lane", "mean_speed_kmh", "n_oversaturated",
+            "total_unserved_vph"]
+    y_titles = [
+        "veh/hr/lane", "km/h", "# links", "veh/hr",
+    ]
+    for idx, key in enumerate(keys):
+        row, col = divmod(idx, 2)
+        row += 1
+        col += 1
+        vals = [m[key] for m in period_metrics]
+        fig.add_trace(go.Scatter(
+            x=x_labels, y=vals,
+            mode="lines+markers",
+            line=dict(color=colors[idx], width=2.5),
+            marker=dict(size=8),
+            showlegend=False,
+        ), row=row, col=col)
 
-    fig.add_trace(go.Scatter(
-        x=bl_x, y=blog_bl["queue_vehicles"], name="1-period",
-        line=dict(color="#90CAF9", width=2, dash="dash"),
-        legendgroup="baseline", showlegend=True,
-    ), row=1, col=1)
-    fig.add_trace(go.Scatter(
-        x=sp_x, y=blog_sp["queue_vehicles"], name="2-period spillover",
-        line=dict(color="#D32F2F", width=2.5),
-        legendgroup="spillover", showlegend=True,
-    ), row=1, col=1)
+        fig.update_xaxes(title_text="Period", row=row, col=col)
+        fig.update_yaxes(title_text=y_titles[idx], row=row, col=col)
 
-    fig.add_trace(go.Scatter(
-        x=bl_x, y=blog_bl["mean_speed_kmh"], name="1-period",
-        line=dict(color="#90CAF9", width=2, dash="dash"),
-        legendgroup="baseline", showlegend=False,
-    ), row=1, col=2)
-    fig.add_trace(go.Scatter(
-        x=sp_x, y=blog_sp["mean_speed_kmh"], name="2-period spillover",
-        line=dict(color="#2E7D32", width=2.5),
-        legendgroup="spillover", showlegend=False,
-    ), row=1, col=2)
-
-    fig.add_trace(go.Scatter(
-        x=bl_x, y=blog_bl["n_oversaturated"], name="1-period",
-        line=dict(color="#90CAF9", width=2, dash="dash"),
-        legendgroup="baseline", showlegend=False,
-    ), row=2, col=1)
-    fig.add_trace(go.Scatter(
-        x=sp_x, y=blog_sp["n_oversaturated"], name="2-period spillover",
-        line=dict(color="#FF6F00", width=2.5),
-        legendgroup="spillover", showlegend=False,
-    ), row=2, col=1)
-
-    fig.add_trace(go.Scatter(
-        x=bl_x, y=blog_bl["tstt"], name="1-period",
-        line=dict(color="#90CAF9", width=2, dash="dash"),
-        legendgroup="baseline", showlegend=False,
-    ), row=2, col=2)
-    fig.add_trace(go.Scatter(
-        x=sp_x, y=blog_sp["tstt"], name="2-period spillover",
-        line=dict(color="#6A1B9A", width=2.5),
-        legendgroup="spillover", showlegend=False,
-    ), row=2, col=2)
-
-    # Mark period boundary in spillover traces
-    n_bl = len(blog_bl["batch"])
-    if n_bl < len(blog_sp["batch"]):
-        for row in range(1, 3):
-            for col in range(1, 3):
-                fig.add_vline(
-                    x=n_bl - 0.5, line_dash="dot", line_color="grey",
-                    annotation_text="Period 2", annotation_position="top",
-                    row=row, col=col,
-                )
+        # Shade demand vs drain regions
+        fig.add_vrect(
+            x0=-0.5, x1=n_demand - 0.5,
+            fillcolor="rgba(200,200,255,0.15)", line_width=0,
+            row=row, col=col,
+        )
+        if len(period_metrics) > n_demand:
+            fig.add_vrect(
+                x0=n_demand - 0.5, x1=len(period_metrics) - 0.5,
+                fillcolor="rgba(200,255,200,0.15)", line_width=0,
+                row=row, col=col,
+            )
 
     fig.update_layout(
-        title="Loading Progression: 1-Period vs 2-Period Spillover",
+        title="Per-Period Metrics: Demand → Drain",
         height=600, template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
-    figs.append(fig)
-    descriptions.append(
-        "<h2>Loading Progression Comparison</h2>"
-        "<p>Dashed blue = single-period baseline. Solid = 2-period with "
-        "queue carryforward. Vertical dotted line marks the start of period 2. "
-        "Spillover from period 1 adds to period 2's congestion.</p>"
-    )
-
-    # §3 — Per-link flow comparison: baseline vs spillover final state
-    s_bl = result_bl.network_state
-    s_sp = result_sp.network_state
-
-    # Match links by edge_id
-    bl_edges = {
-        (int(s_bl.edge_ids[i, 0]), int(s_bl.edge_ids[i, 1])): i
-        for i in range(s_bl.n_edges)
-    }
-    sp_edges = {
-        (int(s_sp.edge_ids[i, 0]), int(s_sp.edge_ids[i, 1])): i
-        for i in range(s_sp.n_edges)
-    }
-    common = set(bl_edges) & set(sp_edges)
-
-    bl_flow = np.array([s_bl.flow_vph[bl_edges[k]] for k in common])
-    sp_flow = np.array([s_sp.flow_vph[sp_edges[k]] for k in common])
-    bl_speed = np.array([s_bl.speed_kmh[bl_edges[k]] for k in common])
-    sp_speed = np.array([s_sp.speed_kmh[sp_edges[k]] for k in common])
-
-    fig = make_subplots(rows=1, cols=2, subplot_titles=[
-        "Flow: Baseline vs Spillover", "Speed: Baseline vs Spillover",
-    ])
-    fig.add_trace(go.Scattergl(
-        x=bl_flow, y=sp_flow, mode="markers",
-        marker=dict(size=3, color="#1565C0", opacity=0.5),
-        name="Links",
-    ), row=1, col=1)
-    max_flow = max(float(np.max(bl_flow)), float(np.max(sp_flow))) * 1.05
-    fig.add_trace(go.Scatter(
-        x=[0, max_flow], y=[0, max_flow],
-        mode="lines", line=dict(color="grey", dash="dash", width=1),
-        name="y=x", showlegend=False,
-    ), row=1, col=1)
-
-    fig.add_trace(go.Scattergl(
-        x=bl_speed, y=sp_speed, mode="markers",
-        marker=dict(size=3, color="#2E7D32", opacity=0.5),
-        name="Links", showlegend=False,
-    ), row=1, col=2)
-    max_spd = max(float(np.max(bl_speed)), float(np.max(sp_speed))) * 1.05
-    fig.add_trace(go.Scatter(
-        x=[0, max_spd], y=[0, max_spd],
-        mode="lines", line=dict(color="grey", dash="dash", width=1),
-        name="y=x", showlegend=False,
-    ), row=1, col=2)
-
-    fig.update_xaxes(title_text="Baseline (1-period)", row=1, col=1)
-    fig.update_yaxes(title_text="Spillover (2-period)", row=1, col=1)
-    fig.update_xaxes(title_text="Baseline speed (km/h)", row=1, col=2)
-    fig.update_yaxes(title_text="Spillover speed (km/h)", row=1, col=2)
-    fig.update_layout(
-        title="Per-Link State: Baseline vs Spillover",
-        height=450, template="plotly_white",
+        annotations=[
+            dict(text="← demand", x=0.15, y=1.08, xref="paper",
+                 yref="paper", showarrow=False, font=dict(color="#3F51B5")),
+            dict(text="drain →", x=0.85, y=1.08, xref="paper",
+                 yref="paper", showarrow=False, font=dict(color="#4CAF50")),
+        ],
     )
     figs.append(fig)
 
-    # Summary stats
-    bl_unserved = float(np.sum(s_bl.unserved_demand))
-    sp_unserved = float(np.sum(result_sp.unserved_vph))
-    spill_pct = sp_unserved / total_demand_1p * 100 if total_demand_1p > 0 else 0
-
+    n_drain = len(period_metrics) - n_demand
+    final_unserved = period_metrics[-1]["total_unserved_vph"]
     descriptions.append(
-        "<h2>Per-Link Comparison</h2>"
-        f"<p>{len(common)} common links compared. Points above y=x line "
-        "have higher flow/lower speed under spillover.</p>"
-        f"<p><b>Baseline unserved:</b> {bl_unserved:,.0f} veh/hr | "
-        f"<b>Spillover final unserved:</b> {sp_unserved:,.0f} veh/hr "
-        f"({spill_pct:.1f}% of per-period demand)</p>"
+        "<h2>Per-Period Progression</h2>"
+        f"<p>{n_demand_periods} demand periods (P1–P{n_demand_periods}, "
+        f"15 min each, {per_period_demand:,.0f} vph/period), "
+        f"followed by {n_drain} drain periods (no new demand). "
+        f"Blue shading = demand active, green shading = drain only.</p>"
+        f"<p>Final unserved after drain: "
+        f"<b>{final_unserved:,.0f} veh/hr</b></p>"
     )
 
-    # §4 — MFD for spillover final state
-    _add_mfd_section(figs, descriptions, result_sp.network_state, 1.0)
+    # §3 — MFD at peak
+    _add_mfd_section(figs, descriptions, result.network_state, 1.0)
 
-    # §5 — Summary table
-    figs.append(go.Figure())  # placeholder
+    # §4 — Summary table (no dummy figure)
+    peak = period_metrics[n_demand - 1]
+    final = period_metrics[-1]
     descriptions.append(
         "<h2>Summary</h2>"
         "<table style='border-collapse:collapse; margin:1em 0;'>"
         "<tr style='border-bottom:2px solid #333;'>"
         "<th style='padding:6px 16px; text-align:left;'>Metric</th>"
-        "<th style='padding:6px 16px; text-align:right;'>Baseline (1-period)</th>"
-        "<th style='padding:6px 16px; text-align:right;'>Spillover (2-period)</th></tr>"
-        f"<tr><td style='padding:4px 16px;'>Total demand</td>"
-        f"<td style='padding:4px 16px; text-align:right;'>{total_demand_1p:,.0f} vph</td>"
-        f"<td style='padding:4px 16px; text-align:right;'>{total_demand_2p:,.0f} vph (2×)</td></tr>"
-        f"<tr><td style='padding:4px 16px;'>Batches</td>"
-        f"<td style='padding:4px 16px; text-align:right;'>{result_bl.n_batches}</td>"
-        f"<td style='padding:4px 16px; text-align:right;'>{result_sp.n_batches}</td></tr>"
-        f"<tr><td style='padding:4px 16px;'>Runtime</td>"
-        f"<td style='padding:4px 16px; text-align:right;'>{result_bl.total_time_s:.1f}s</td>"
-        f"<td style='padding:4px 16px; text-align:right;'>{result_sp.total_time_s:.1f}s</td></tr>"
-        f"<tr><td style='padding:4px 16px;'>Final queue (veh/hr/lane)</td>"
+        "<th style='padding:6px 16px; text-align:right;'>Peak "
+        f"(P{n_demand_periods})</th>"
+        "<th style='padding:6px 16px; text-align:right;'>Post-Drain "
+        f"({final['label']})</th></tr>"
+        f"<tr><td style='padding:4px 16px;'>Total demand loaded</td>"
+        f"<td style='padding:4px 16px; text-align:right;' colspan=2>"
+        f"{per_period_demand * n_demand_periods:,.0f} vph "
+        f"({n_demand_periods} × {per_period_demand:,.0f})</td></tr>"
+        f"<tr><td style='padding:4px 16px;'>Queue (veh/hr/lane)</td>"
         f"<td style='padding:4px 16px; text-align:right;'>"
-        f"{result_bl.batch_log[-1].queue_vehicles:.0f}</td>"
+        f"{peak['queue_veh_hr_lane']:.0f}</td>"
         f"<td style='padding:4px 16px; text-align:right;'>"
-        f"{result_sp.batch_log[-1].queue_vehicles:.0f}</td></tr>"
-        f"<tr><td style='padding:4px 16px;'>Final unserved (veh/hr)</td>"
-        f"<td style='padding:4px 16px; text-align:right;'>{bl_unserved:,.0f}</td>"
-        f"<td style='padding:4px 16px; text-align:right;'>{sp_unserved:,.0f}</td></tr>"
+        f"{final['queue_veh_hr_lane']:.0f}</td></tr>"
+        f"<tr><td style='padding:4px 16px;'>Unserved (veh/hr)</td>"
+        f"<td style='padding:4px 16px; text-align:right;'>"
+        f"{peak['total_unserved_vph']:,.0f}</td>"
+        f"<td style='padding:4px 16px; text-align:right;'>"
+        f"{final['total_unserved_vph']:,.0f}</td></tr>"
         f"<tr><td style='padding:4px 16px;'>Mean speed (km/h)</td>"
         f"<td style='padding:4px 16px; text-align:right;'>"
-        f"{result_bl.batch_log[-1].mean_speed_kmh:.1f}</td>"
+        f"{peak['mean_speed_kmh']:.1f}</td>"
         f"<td style='padding:4px 16px; text-align:right;'>"
-        f"{result_sp.batch_log[-1].mean_speed_kmh:.1f}</td></tr>"
+        f"{final['mean_speed_kmh']:.1f}</td></tr>"
         f"<tr><td style='padding:4px 16px;'>Oversaturated links</td>"
         f"<td style='padding:4px 16px; text-align:right;'>"
-        f"{result_bl.batch_log[-1].n_oversaturated}</td>"
+        f"{peak['n_oversaturated']}</td>"
         f"<td style='padding:4px 16px; text-align:right;'>"
-        f"{result_sp.batch_log[-1].n_oversaturated}</td></tr>"
+        f"{final['n_oversaturated']}</td></tr>"
+        f"<tr><td style='padding:4px 16px;'>Runtime</td>"
+        f"<td style='padding:4px 16px; text-align:right;' colspan=2>"
+        f"{result.total_time_s:.1f}s</td></tr>"
         "</table>"
     )
 
@@ -563,10 +559,10 @@ def generate_chicago_spillover_report(
         title="Chicago Sketch — Multi-Period Spillover Validation",
         intro=(
             f"<p>Spillover validation on <b>Chicago Sketch</b>: "
-            f"2 × 30-min periods with equal demand "
-            f"({total_demand_1p:,.0f} vph each). "
-            f"Unserved demand from period 1 carries forward as starting "
-            f"flow in period 2. Baseline = single-period (no spillover).</p>"
+            f"{n_demand_periods} × 15-min demand periods "
+            f"({per_period_demand:,.0f} vph each), then drain periods "
+            f"until queue dissipates. Unserved demand from each period "
+            f"carries forward as starting flow in the next.</p>"
         ),
         figures=figs,
         descriptions=descriptions,
