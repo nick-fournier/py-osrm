@@ -153,7 +153,7 @@ class AssignmentResult:
             "phase": [r.phase for r in self.iteration_log],
             "relative_gap": [r.relative_gap for r in self.iteration_log],
             "tstt": [r.tstt for r in self.iteration_log],
-            "max_density_delta": [r.state_change_norm for r in self.iteration_log],
+            "max_flow_delta": [r.state_change_norm for r in self.iteration_log],
             "step_size": [r.alpha for r in self.iteration_log],
             "mean_speed_kmh": [r.mean_speed_kmh for r in self.iteration_log],
             "median_speed_kmh": [r.median_speed_kmh for r in self.iteration_log],
@@ -1149,6 +1149,7 @@ class AssignmentSolver:
                 max_rounds=max_rounds,
                 gap_threshold=gap_threshold,
                 method=method,
+                iter_offset=len(greedy_results),
             )
 
         total_time = time.monotonic() - started
@@ -1197,6 +1198,7 @@ class AssignmentSolver:
         max_rounds: int,
         gap_threshold: float,
         method: str = "msa",
+        iter_offset: int = 0,
     ) -> Tuple[object, List[IterationResult]]:
         """Run MSA/FW convergence after greedy loading (flow-based)."""
         results: List[IterationResult] = []
@@ -1238,6 +1240,7 @@ class AssignmentSolver:
             state.flow_vph = np.maximum(
                 (1.0 - alpha) * prev_volume + alpha * aon_volume, 0.0,
             )
+            max_flow_delta = float(np.max(np.abs(state.flow_vph - prev_volume)))
             prev_volume = state.flow_vph.copy()
 
             # Derive density/speed from blended flow
@@ -1270,13 +1273,13 @@ class AssignmentSolver:
             active_tt = link_time_s[active] if np.any(active) else link_time_s
 
             iter_result = IterationResult(
-                iteration=m,
+                iteration=iter_offset + m,
                 phase="convergence",
                 alpha=alpha,
                 tstt=link_tstt,
                 link_tstt=link_tstt,
                 relative_gap=relative_gap,
-                state_change_norm=0.0,
+                state_change_norm=max_flow_delta,
                 max_k_over_kj=float(np.max(
                     state.density_vpkm / np.maximum(state.jam_density, 1e-9)
                 )),

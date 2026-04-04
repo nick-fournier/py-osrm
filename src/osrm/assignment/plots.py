@@ -1161,7 +1161,8 @@ def convergence_report(
         congested corridors.</p>""")
 
         figs.append(observed_vs_mfd(
-            network_state.flow_vph, network_state.density_vpkm,
+            network_state.density_vpkm * network_state.speed_kmh,
+            network_state.density_vpkm,
             vdf=vdf,
         ))
         descriptions.append("""<h2>4. Assigned Points vs Theoretical MFD</h2>
@@ -1200,16 +1201,16 @@ def convergence(
         - "relative_gap": list[float]
         - "tstt": list[float]  (total system travel time)
         Optionally:
-        - "max_density_delta": list[float]
+        - "max_flow_delta": list[float]
     """
     iters = iteration_log["iteration"]
     gap = iteration_log["relative_gap"]
     tstt = iteration_log["tstt"]
 
-    n_rows = 3 if "max_density_delta" in iteration_log else 2
+    n_rows = 3 if "max_flow_delta" in iteration_log else 2
     titles = ["Relative Gap", "Total System Travel Time"]
     if n_rows == 3:
-        titles.append("Max Link Density Delta")
+        titles.append("Max Link Flow Delta")
 
     fig = make_subplots(rows=n_rows, cols=1, subplot_titles=titles,
                         vertical_spacing=0.08)
@@ -1230,10 +1231,10 @@ def convergence(
 
     if n_rows == 3:
         fig.add_trace(go.Scatter(
-            x=iters, y=iteration_log["max_density_delta"],
+            x=iters, y=iteration_log["max_flow_delta"],
             mode="lines+markers",
             line=dict(color="#FF9800", width=2),
-            marker=dict(size=6), name="Max Δk",
+            marker=dict(size=6), name="Max Δq",
         ), row=3, col=1)
 
     fig.update_layout(
@@ -1391,7 +1392,8 @@ def network_diagnostics(
         path=str(d / "speed_reduction.html"),
     )
     observed_vs_mfd(
-        network_state.flow_vph, network_state.density_vpkm,
+        network_state.density_vpkm * network_state.speed_kmh,
+        network_state.density_vpkm,
         path=str(d / "observed_vs_mfd.html"),
     )
 
@@ -2265,7 +2267,7 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
 
     k = state.density_vpkm
     v = state.speed_kmh
-    q = state.flow_vph
+    q = state.density_vpkm * state.speed_kmh  # physical throughput
     vf = state.freeflow_kmh
     kj = state.jam_density
     n_lanes = state.n_lanes
