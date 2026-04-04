@@ -936,7 +936,7 @@ class AssignmentSolver:
         self,
         trips: List[DemandTrip],
         *,
-        batch_size: int = 10_000,
+        batch_size: Optional[int] = None,
         state_patch=None,
         progress_callback=None,
     ) -> "StreamResult":
@@ -958,10 +958,15 @@ class AssignmentSolver:
             ``departure_time_s``, they are sorted and routed in
             chronological order.  For single-period demand, all
             departure times can be 0.
-        batch_size : int
+        batch_size : int or None
             Number of trips per loading step.  After each batch, the
             network state is updated and OSRM is re-customized.
             Smaller batches = more accurate but more customize overhead.
+            If ``None`` (default), auto-tuned from the first batch's
+            network size: ``batch_size = max(100, n_edges // 4)``.
+            On large networks trips are spatially distributed so coarse
+            batches suffice; on small networks finer batches avoid
+            route-dumping.
         state_patch : callable, optional
             Called with ``(NetworkState,)`` after discovery to patch
             lane counts or jam density.
@@ -977,10 +982,6 @@ class AssignmentSolver:
 
         t_start = time.monotonic()
         n_trips = len(trips)
-        logger.info(
-            "Stream assignment: %d trips, batch_size=%d, n_threads=%d",
-            n_trips, batch_size, self.config.n_threads,
-        )
 
         engine = self._create_engine()
 
@@ -992,6 +993,26 @@ class AssignmentSolver:
 
         # Re-wrap after snapping
         adapter = TripStreamAdapter(snapped_trips, sort_by_departure=False)
+
+        # Auto-tune batch_size from network discovery if not specified.
+        # Route a small sample to learn the network size, then set
+        # batch_size = max(100, n_edges // 4).  On large networks trips
+        # are spatially distributed so coarse batches suffice; on small
+        # networks finer batches prevent route-dumping.
+        if batch_size is None:
+            sample = snapped_trips[:min(500, n_trips)]
+            probe_state = self._discover_network(engine, sample)
+            n_edges_est = probe_state.n_edges
+            batch_size = max(100, n_edges_est // 4)
+            logger.info(
+                "Auto-tuned batch_size=%d (from %d discovered edges)",
+                batch_size, n_edges_est,
+            )
+
+        logger.info(
+            "Stream assignment: %d trips, batch_size=%d, n_threads=%d",
+            n_trips, batch_size, self.config.n_threads,
+        )
 
         # Network starts empty — edges discovered during routing
         state = NetworkState.empty()
