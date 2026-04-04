@@ -319,9 +319,7 @@ def generate_chicago_spillover_report(
 
     n_demand_periods = 4
     period_s = 900.0  # 15 min
-    max_drain_periods = 10
-    # Stop early if queue drops below 2% of peak unserved
-    drain_ratio = 0.02
+    max_drain_periods = 20
 
     # Build demand trips: 4 periods of equal demand
     spill_trips = _build_trips_multiperiod(
@@ -372,26 +370,35 @@ def generate_chicago_spillover_report(
             "tstt": blog["tstt"][end_idx],
         })
 
-    # Drain phase: run empty periods until queue dissipates.
-    # No routing needed — just iterate VDF on shrinking spillover.
+    # Drain phase: no new demand, queue discharges over time.
+    # Each period, links discharge at their throughput rate.
+    # queue_veh = unserved_rate × period_hr  (vehicles in queue)
+    # discharged = throughput × period_hr    (vehicles that leave)
+    # remaining  = max(0, queue_veh - discharged)
     state = result.network_state
     unserved = result.unserved_vph.copy()
 
-    from osrm.assignment.vdf import BiParabolicVDF
+    # Save peak state before mutating for MFD plot.
+    import copy
+    peak_state = copy.copy(state)
+    peak_state.flow_vph = state.flow_vph.copy()
+    peak_state.density_vpkm = state.density_vpkm.copy()
+    peak_state.speed_kmh = state.speed_kmh.copy()
 
+    from osrm.assignment.vdf import BiParabolicVDF
     vdf = BiParabolicVDF()
 
-    peak_unserved = float(np.sum(unserved))
+    period_hr = period_s / 3600.0
+    queue_veh = unserved * period_hr  # convert rate to vehicles
 
     for drain_p in range(max_drain_periods):
-        total_unserved = float(np.sum(unserved))
-        if total_unserved < peak_unserved * drain_ratio:
+        total_queue = float(np.sum(queue_veh))
+        if total_queue < 1.0:
             break
 
-        # Set flow to just the spillover
-        state.flow_vph = np.maximum(unserved, 0.0)
-
-        # VDF: flow → density → speed
+        # Compute throughput at current queue level
+        queue_rate = queue_veh / period_hr  # back to veh/hr for VDF
+        state.flow_vph = np.maximum(queue_rate, 0.0)
         state.density_vpkm = vdf.demand_to_density(
             state.flow_vph, state.freeflow_kmh, state.jam_density,
             kc_ratio=state.kc_ratio,
@@ -402,13 +409,16 @@ def generate_chicago_spillover_report(
         )
         state.speed_kmh = np.maximum(state.speed_kmh, 1.0)
 
-        # Compute new unserved for this drain period
-        unserved = state.unserved_demand.copy()
+        throughput = state.density_vpkm * state.speed_kmh  # veh/hr
+        discharged = throughput * period_hr  # vehicles that leave
+        queue_veh = np.maximum(queue_veh - discharged, 0.0)
 
-        oversat_mask = unserved > 0
-        unserved_per_lane = unserved / np.maximum(state.n_lanes, 1)
+        # Metrics for this drain period
+        queue_rate_remaining = queue_veh / period_hr
+        oversat_mask = queue_veh > 0
+        per_lane = queue_rate_remaining / np.maximum(state.n_lanes, 1)
         mean_q = (
-            float(np.mean(unserved_per_lane[oversat_mask]))
+            float(np.mean(per_lane[oversat_mask]))
             if np.any(oversat_mask) else 0.0
         )
         active = state.flow_vph > 0
@@ -421,7 +431,7 @@ def generate_chicago_spillover_report(
             "label": f"D{drain_p+1}",
             "has_demand": False,
             "queue_veh_hr_lane": mean_q,
-            "total_unserved_vph": float(np.sum(unserved)),
+            "total_unserved_vph": float(np.sum(queue_rate_remaining)),
             "mean_speed_kmh": float(np.mean(active_speeds)),
             "n_oversaturated": int(np.sum(oversat_mask)),
             "tstt": tstt,
@@ -454,7 +464,7 @@ def generate_chicago_spillover_report(
     keys = ["queue_veh_hr_lane", "mean_speed_kmh", "n_oversaturated",
             "total_unserved_vph"]
     y_titles = [
-        "veh/hr/lane", "km/h", "# links", "veh/hr",
+        "veh/hr/lane", "km/h", "links", "veh/hr",
     ]
     for idx, key in enumerate(keys):
         row, col = divmod(idx, 2)
@@ -487,30 +497,27 @@ def generate_chicago_spillover_report(
 
     fig.update_layout(
         title="Per-Period Metrics: Demand → Drain",
-        height=600, template="plotly_white",
-        annotations=[
-            dict(text="← demand", x=0.15, y=1.08, xref="paper",
-                 yref="paper", showarrow=False, font=dict(color="#3F51B5")),
-            dict(text="drain →", x=0.85, y=1.08, xref="paper",
-                 yref="paper", showarrow=False, font=dict(color="#4CAF50")),
-        ],
+        height=650, template="plotly_white",
     )
     figs.append(fig)
 
     n_drain = len(period_metrics) - n_demand
     final_unserved = period_metrics[-1]["total_unserved_vph"]
+    peak_unserved_rate = period_metrics[n_demand - 1]["total_unserved_vph"]
+    drain_pct = (1.0 - final_unserved / peak_unserved_rate) * 100 if peak_unserved_rate > 0 else 100
     descriptions.append(
         "<h2>Per-Period Progression</h2>"
         f"<p>{n_demand_periods} demand periods (P1–P{n_demand_periods}, "
-        f"15 min each, {per_period_demand:,.0f} vph/period), "
+        f"{int(period_s/60)} min each, {per_period_demand:,.0f} vph/period), "
         f"followed by {n_drain} drain periods (no new demand). "
         f"Blue shading = demand active, green shading = drain only.</p>"
-        f"<p>Final unserved after drain: "
-        f"<b>{final_unserved:,.0f} veh/hr</b></p>"
+        f"<p>Peak unserved: <b>{peak_unserved_rate:,.0f} veh/hr</b> → "
+        f"after {n_drain} drain periods: <b>{final_unserved:,.0f} veh/hr</b> "
+        f"({drain_pct:.1f}% reduction)</p>"
     )
 
-    # §3 — MFD at peak
-    _add_mfd_section(figs, descriptions, result.network_state, 1.0)
+    # §3 — MFD at peak (use saved peak state, not drain-mutated state)
+    _add_mfd_section(figs, descriptions, peak_state, 1.0)
 
     # §4 — Summary table (no dummy figure)
     peak = period_metrics[n_demand - 1]
