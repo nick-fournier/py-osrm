@@ -83,6 +83,10 @@ def _scene_chi_region_fw(*, max_iter=20, **_kw):
     from tests.assignment.test_chicago_regional import generate_regional_report
     return generate_regional_report(tempfile.mkdtemp(), method="fw", max_rounds=max_iter)
 
+def _scene_chi_region_stream(*, max_iter=20, **_kw):
+    from tests.assignment.test_chicago_regional import generate_regional_stream_report
+    return generate_regional_stream_report(tempfile.mkdtemp())
+
 
 # ── scene registry ────────────────────────────────────────────────────
 
@@ -111,6 +115,7 @@ SCENES = {
     "chi-region": {
         "msa": ("Chicago Regional MSA", _scene_chi_region_msa),
         "fw":  ("Chicago Regional FW", _scene_chi_region_fw),
+        "stream": ("Chicago Regional Stream", _scene_chi_region_stream),
     },
 }
 

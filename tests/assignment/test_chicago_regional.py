@@ -206,6 +206,138 @@ def generate_regional_report(
     )
 
 
+def generate_regional_stream_report(
+    tmp_path: str | Path,
+    output_path: str = "plots/chicago_regional_stream.html",
+    batch_size: int | None = None,
+) -> Path:
+    """Generate Chicago Regional streaming assignment report."""
+    import plotly.graph_objects as go
+    from osrm.assignment.plots import (
+        _add_congestion_map_section,
+        _add_correlation_section,
+        _add_mfd_section,
+        _write_combined_report,
+    )
+
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    base, meta = _prepare_regional_network(tmp_path)
+    run_base = _copy_clean_osrm(base, tmp_path / "stream_run")
+
+    trips = _build_trips(meta)
+    total_demand = sum(t.volume for t in trips)
+
+    config = AssignmentConfig(
+        smoothing=DensitySmoothingConfig(method="none"),
+        speed_csv_dir=str(Path(run_base).parent),
+    )
+    solver = AssignmentSolver(run_base, config)
+
+    def lane_patch(state):
+        patch_lanes(state, meta)
+
+    result = solver.assign_stream(trips, batch_size=batch_size, state_patch=lane_patch)
+    state = result.network_state
+
+    node_coords = meta["nodes"]
+    link_attrs = meta["link_attrs"]
+    ref = meta.get("ref_flows", {})
+
+    figs: list = []
+    descriptions: list[str] = []
+
+    # Congestion map
+    _add_congestion_map_section(
+        figs, descriptions, "Chicago Regional (Stream)",
+        node_coords, state, link_attrs, meta, 1.0,
+    )
+
+    # Stream progression: queue, speed, oversaturation
+    blog = result.log_as_dict()
+    labels = [f"Batch {b}" for b in blog["batch"]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=labels, y=blog["queue_vehicles"], name="Unserved demand (veh/hr)",
+        mode="lines+markers",
+        line=dict(color="#D32F2F", width=2.5),
+        marker=dict(size=5),
+    ))
+    fig.add_trace(go.Scatter(
+        x=labels, y=blog["mean_speed_kmh"], name="Mean speed (km/h)",
+        mode="lines+markers",
+        line=dict(color="#2E7D32", width=2.5),
+        marker=dict(size=5), yaxis="y2",
+    ))
+    fig.update_layout(
+        title="Stream Loading Progression",
+        xaxis_title="Loading Batch",
+        yaxis=dict(title="Unserved demand (veh/hr)"),
+        yaxis2=dict(title="Mean speed (km/h)", overlaying="y", side="right"),
+        template="plotly_white",
+    )
+    figs.append(fig)
+    descriptions.append(
+        "<h2>Stream Loading Progression</h2>"
+        f"<p>Incremental greedy loading of {total_demand:,.0f} vph "
+        f"across {result.n_batches} batches. Each batch routes trips "
+        f"against the current congested network, accumulates flow, "
+        f"and re-customizes OSRM.</p>"
+    )
+
+    # Runtime per batch
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=labels, y=blog["route_time_s"], name="Route time",
+        mode="lines+markers",
+        line=dict(color="#1565C0", width=2.0),
+        marker=dict(size=5),
+    ))
+    fig.add_trace(go.Scatter(
+        x=labels, y=blog["customize_time_s"], name="Customize time",
+        mode="lines+markers",
+        line=dict(color="#8E24AA", width=2.0),
+        marker=dict(size=5),
+    ))
+    fig.update_layout(
+        title="Runtime per Batch",
+        xaxis_title="Loading Batch",
+        yaxis_title="Time (s)",
+        template="plotly_white",
+    )
+    figs.append(fig)
+    descriptions.append(
+        "<h2>Runtime</h2>"
+        "<p>Per-batch routing and customize timings.</p>"
+    )
+
+    # MFD
+    _add_mfd_section(figs, descriptions, state, 1.0)
+
+    # Correlation with reference BPR flows
+    if ref:
+        _add_correlation_section(
+            figs, descriptions, state, ref, link_attrs, 1.0,
+        )
+
+    out = Path(output_path)
+    _write_combined_report(
+        title="Chicago Regional — Stream Assignment",
+        intro=(
+            f"<p>Streaming assignment on <b>Chicago Regional</b>: "
+            f"{len(trips):,} OD pairs, {total_demand:,.0f} vph total demand, "
+            f"{result.n_batches} loading batches. "
+            f"Total runtime: {result.total_time_s:.1f}s.</p>"
+        ),
+        figures=figs,
+        descriptions=descriptions,
+        path=out,
+    )
+    return out
+
+
 # ── pytest entry points ──────────────────────────────────────────────
 
 @pytest.mark.slow
