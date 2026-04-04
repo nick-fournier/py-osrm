@@ -1143,7 +1143,8 @@ def convergence_report(
     the step size (MSA weight) may be too aggressive.</p>""")
 
     if network_state is not None:
-        q_c = vdf.capacity_flow(network_state.freeflow_kmh, network_state.jam_density)
+        q_c = vdf.capacity_flow(network_state.freeflow_kmh, network_state.jam_density,
+                               kc_ratio=network_state.kc_ratio)
 
         figs.append(flow_vs_capacity(network_state.flow_vph, q_c))
         descriptions.append("""<h2>2. Flow vs Capacity</h2>

@@ -35,17 +35,20 @@ class BiParabolicVDF:
     def critical_density(
         self,
         k_j: np.ndarray,
+        kc_ratio: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """k_c = kc_ratio * k_j"""
-        return self.kc_ratio * k_j
+        r = kc_ratio if kc_ratio is not None else self.kc_ratio
+        return r * k_j
 
     def capacity_flow(
         self,
         v_f: np.ndarray,
         k_j: np.ndarray,
+        kc_ratio: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """q_c = v_f * k_c / 2"""
-        k_c = self.critical_density(k_j)
+        k_c = self.critical_density(k_j, kc_ratio)
         return v_f * k_c / 2.0
 
     def density_to_speed(
@@ -53,6 +56,7 @@ class BiParabolicVDF:
         k: np.ndarray,
         v_f: np.ndarray,
         k_j: np.ndarray,
+        kc_ratio: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """Evaluate VDF: density → speed for both branches.
 
@@ -67,6 +71,8 @@ class BiParabolicVDF:
             Free-flow speed (km/h).
         k_j : array-like
             Jam density (veh/km).
+        kc_ratio : array-like or float, optional
+            Per-link k_c/k_j ratio.  Falls back to ``self.kc_ratio``.
 
         Returns
         -------
@@ -77,7 +83,7 @@ class BiParabolicVDF:
         v_f = np.asarray(v_f, dtype=np.float64)
         k_j = np.asarray(k_j, dtype=np.float64)
 
-        k_c = self.critical_density(k_j)
+        k_c = self.critical_density(k_j, kc_ratio)
         q_c = v_f * k_c / 2.0
 
         # Uncongested branch: linear speed-density
@@ -96,6 +102,7 @@ class BiParabolicVDF:
         q: np.ndarray,
         v_f: np.ndarray,
         k_j: np.ndarray,
+        kc_ratio: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """Closed-form flow → density inversion (uncongested branch only).
 
@@ -113,6 +120,8 @@ class BiParabolicVDF:
             Free-flow speed (km/h).
         k_j : array-like
             Jam density (veh/km).
+        kc_ratio : array-like or float, optional
+            Per-link k_c/k_j ratio.
 
         Returns
         -------
@@ -123,8 +132,8 @@ class BiParabolicVDF:
         v_f = np.asarray(v_f, dtype=np.float64)
         k_j = np.asarray(k_j, dtype=np.float64)
 
-        k_c = self.critical_density(k_j)
-        q_c = self.capacity_flow(v_f, k_j)
+        k_c = self.critical_density(k_j, kc_ratio)
+        q_c = self.capacity_flow(v_f, k_j, kc_ratio)
 
         ratio = np.clip(q / np.where(q_c > 0, q_c, 1.0), 0.0, 1.0)
         return k_c * (1.0 - np.sqrt(1.0 - ratio))
@@ -134,16 +143,18 @@ class BiParabolicVDF:
         q: np.ndarray,
         v_f: np.ndarray,
         k_j: np.ndarray,
+        kc_ratio: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """Full pipeline: flow → density → speed. Single pass, no iteration."""
-        k = self.flow_to_density(q, v_f, k_j)
-        return self.density_to_speed(k, v_f, k_j)
+        k = self.flow_to_density(q, v_f, k_j, kc_ratio)
+        return self.density_to_speed(k, v_f, k_j, kc_ratio)
 
     def demand_to_density(
         self,
         q: np.ndarray,
         v_f: np.ndarray,
         k_j: np.ndarray,
+        kc_ratio: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """Extended q → k mapping for flow-based assignment.
 
@@ -164,8 +175,8 @@ class BiParabolicVDF:
         v_f = np.asarray(v_f, dtype=np.float64)
         k_j = np.asarray(k_j, dtype=np.float64)
 
-        k_c = self.critical_density(k_j)
-        q_c = self.capacity_flow(v_f, k_j)
+        k_c = self.critical_density(k_j, kc_ratio)
+        q_c = self.capacity_flow(v_f, k_j, kc_ratio)
 
         # Uncongested branch: exact inverse
         safe_qc = np.where(q_c > 0, q_c, 1.0)
@@ -183,16 +194,18 @@ class BiParabolicVDF:
         q: np.ndarray,
         v_f: np.ndarray,
         k_j: np.ndarray,
+        kc_ratio: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """Full pipeline: demand → density (extended) → speed."""
-        k = self.demand_to_density(q, v_f, k_j)
-        return self.density_to_speed(k, v_f, k_j)
+        k = self.demand_to_density(q, v_f, k_j, kc_ratio)
+        return self.density_to_speed(k, v_f, k_j, kc_ratio)
 
     def density_to_flow(
         self,
         k: np.ndarray,
         v_f: np.ndarray,
         k_j: np.ndarray,
+        kc_ratio: np.ndarray | float | None = None,
     ) -> np.ndarray:
         """Evaluate q(k) for both branches.
 
@@ -203,7 +216,7 @@ class BiParabolicVDF:
         v_f = np.asarray(v_f, dtype=np.float64)
         k_j = np.asarray(k_j, dtype=np.float64)
 
-        k_c = self.critical_density(k_j)
+        k_c = self.critical_density(k_j, kc_ratio)
         q_c = v_f * k_c / 2.0
 
         q_uncongested = q_c * k * (2.0 * k_c - k) / k_c**2

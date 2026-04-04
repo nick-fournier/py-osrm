@@ -301,10 +301,11 @@ def patch_lanes(
     meta: dict,
     jam_density_per_lane: float | None = None,
 ) -> None:
-    """Patch NetworkState with lane counts and jam density from metadata.
+    """Patch NetworkState with lane counts, jam density, and kc_ratio.
 
     Works for any network whose ``meta["lane_map"]`` maps
-    ``(from_node, to_node) -> n_lanes``.
+    ``(from_node, to_node) -> n_lanes``.  After patching lanes,
+    calibrates per-link kc_ratio from the graph topology.
     """
     kj_lane = jam_density_per_lane or meta.get("jam_density_per_lane", 150.0)
     lane_map = meta["lane_map"]
@@ -314,6 +315,7 @@ def patch_lanes(
             lanes = lane_map[key]
             state.n_lanes[i] = lanes
             state.jam_density[i] = kj_lane * lanes
+    state.calibrate_kc_ratio()
 
 
 def braess_network(

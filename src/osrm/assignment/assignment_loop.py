@@ -603,7 +603,8 @@ class AssignmentSolver:
         """
         # Extended mapping: flow → density (monotone for all q ≥ 0)
         state.density_vpkm = self.vdf.demand_to_density(
-            state.flow_vph, state.freeflow_kmh, state.jam_density
+            state.flow_vph, state.freeflow_kmh, state.jam_density,
+            kc_ratio=state.kc_ratio,
         )
 
         # Optional spatial smoothing (operates on density)
@@ -611,7 +612,8 @@ class AssignmentSolver:
 
         # Forward MFD: density → speed
         state.speed_kmh = self.vdf.density_to_speed(
-            smoothed, state.freeflow_kmh, state.jam_density
+            smoothed, state.freeflow_kmh, state.jam_density,
+            kc_ratio=state.kc_ratio,
         )
 
     def assign_matrix(
@@ -807,7 +809,7 @@ class AssignmentSolver:
             tstt = float(np.sum(state.flow_vph * link_time_s))
 
             # 5. Count oversaturated links
-            k_c = self.vdf.critical_density(state.jam_density)
+            k_c = self.vdf.critical_density(state.jam_density, kc_ratio=state.kc_ratio)
             n_oversat = int(np.sum(state.density_vpkm > k_c))
 
             # 6. Write CSV and re-customize
@@ -1140,7 +1142,7 @@ class AssignmentSolver:
                 mean_speed_kmh=float(np.mean(active_speeds)),
                 min_speed_kmh=float(np.min(active_speeds)),
                 n_oversaturated=int(np.sum(
-                    state.density_vpkm > self.vdf.critical_density(state.jam_density)
+                    state.density_vpkm > self.vdf.critical_density(state.jam_density, kc_ratio=state.kc_ratio)
                 )),
             )
             batch_log.append(batch_result)

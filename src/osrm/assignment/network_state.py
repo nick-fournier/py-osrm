@@ -84,6 +84,7 @@ class NetworkState:
     flow_vph: np.ndarray = field(init=False)
     density_vpkm: np.ndarray = field(init=False)
     speed_kmh: np.ndarray = field(init=False)
+    kc_ratio: np.ndarray = field(init=False)
     _edge_index: Dict[Tuple[int, int], int] = field(
         init=False, repr=False, default_factory=dict
     )
@@ -93,6 +94,7 @@ class NetworkState:
         self.flow_vph = np.zeros(n, dtype=np.float64)
         self.density_vpkm = np.zeros(n, dtype=np.float64)
         self.speed_kmh = self.freeflow_kmh.copy()
+        self.kc_ratio = np.full(n, 1.0 / 3.0, dtype=np.float64)
         self._build_index()
 
     def _build_index(self) -> None:
@@ -125,6 +127,68 @@ class NetworkState:
     def reset_flow(self) -> None:
         """Zero out flow for a new assignment iteration."""
         self.flow_vph[:] = 0.0
+
+    def calibrate_kc_ratio(self) -> None:
+        """Set per-link kc_ratio from graph topology.
+
+        A *true intersection* is a node with total degree > 2 (counting
+        both incoming and outgoing directed edges).  Degree-2 nodes are
+        pass-throughs (geometry nodes or simple road continuations).
+
+        For each edge, intersection_distance is the cumulative length
+        along the chain of degree-≤2 nodes it belongs to, from nearest
+        upstream intersection to nearest downstream intersection.
+
+        kc_ratio is calibrated via logistic:
+          short spacing (~100 m, urban grid)  → kc_ratio ≈ 0.20
+          mid spacing   (~500 m)              → kc_ratio ≈ 0.325
+          long spacing  (>2 km, highway)      → kc_ratio ≈ 0.45
+        """
+        from collections import defaultdict
+
+        n = self.n_edges
+        if n == 0:
+            return
+
+        # Build adjacency: total degree = in-degree + out-degree
+        degree: dict[int, int] = defaultdict(int)
+        # Forward graph: node → [(successor, edge_length, edge_index)]
+        outgoing: dict[int, list] = defaultdict(list)
+
+        for i in range(n):
+            u = int(self.edge_ids[i, 0])
+            v = int(self.edge_ids[i, 1])
+            degree[u] += 1
+            degree[v] += 1
+            outgoing[u].append((v, float(self.length_m[i]), i))
+
+        # For each edge, walk forward from its tail through degree-≤2 nodes
+        for i in range(n):
+            u = int(self.edge_ids[i, 0])
+            v = int(self.edge_ids[i, 1])
+            link_len = float(self.length_m[i])
+
+            # Walk forward from v through pass-through nodes
+            fwd_dist = 0.0
+            node = v
+            seen = {u}
+            while degree[node] <= 2:
+                successors = [
+                    (nxt, d) for nxt, d, _ in outgoing[node] if nxt not in seen
+                ]
+                if len(successors) != 1:
+                    break
+                seen.add(node)
+                nxt, d = successors[0]
+                fwd_dist += d
+                node = nxt
+
+            intersection_dist = link_len + fwd_dist
+
+            # Logistic calibration
+            self.kc_ratio[i] = 0.20 + 0.25 / (
+                1.0 + np.exp(-0.003 * (intersection_dist - 500.0))
+            )
 
     def accumulate_flow(
         self,
@@ -204,6 +268,7 @@ class NetworkState:
         self.flow_vph = np.append(self.flow_vph, 0.0)
         self.density_vpkm = np.append(self.density_vpkm, 0.0)
         self.speed_kmh = np.append(self.speed_kmh, max(freeflow_kmh, 1.0))
+        self.kc_ratio = np.append(self.kc_ratio, 1.0 / 3.0)
         self._edge_index[key] = idx
         return idx
 
