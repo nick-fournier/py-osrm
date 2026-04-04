@@ -51,7 +51,6 @@ def _run_network(
     state_patch_factory,
     tmp_path: Path,
     max_rounds: int,
-    load_rate: float = 0.10,
 ) -> _NetworkComparison:
     """Run both MSA and FW on a single network."""
     base, meta = prepare_fn(tmp_path)
@@ -61,9 +60,7 @@ def _run_network(
         copy_fn=copy_fn,
         trip_builder=trip_builder,
         demand_scale=1.0,
-        bin_width_s=3600.0,
         state_patch_factory=state_patch_factory,
-        load_rate=load_rate,
         max_rounds=max_rounds,
         gap_threshold=0.001,
     )

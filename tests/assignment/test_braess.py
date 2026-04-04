@@ -483,7 +483,6 @@ def generate_braess_report(
         run_dir=tmp_path / "hc_with_run",
         demand_scale=1.0,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        load_rate=0.10,
         max_rounds=10,
         gap_threshold=0.001,
     )
@@ -495,7 +494,6 @@ def generate_braess_report(
         run_dir=tmp_path / "hc_without_run",
         demand_scale=1.0,
         state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
-        load_rate=0.10,
         max_rounds=10,
         gap_threshold=0.001,
     )
@@ -829,7 +827,6 @@ def generate_braess_report(
             trip_builder=_hc_trip_builder,
             run_dir=tmp_path / f"sweep_w_{ns}",
             demand_scale=1.0,
-            load_rate=1.0 / ns,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         cwo = run_hillclimber_case(
@@ -838,7 +835,6 @@ def generate_braess_report(
             trip_builder=_hc_trip_builder,
             run_dir=tmp_path / f"sweep_wo_{ns}",
             demand_scale=1.0,
-            load_rate=1.0 / ns,
             state_patch_factory=lambda m: lambda s: patch_braess_lanes(s, m),
         )
         tw = sum(b.tstt for b in getattr(cw.result, "iteration_log", []))

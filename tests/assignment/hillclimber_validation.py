@@ -7,11 +7,10 @@ MSA-based validation reports.
 from __future__ import annotations
 
 import logging
-import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable
 
 import numpy as np
 import plotly.graph_objects as go
@@ -30,8 +29,6 @@ from osrm.assignment.plots import (
     _write_combined_report,
 )
 
-_DEFAULT_ASSUMED_SPEED_KMH = 30.0
-
 
 @dataclass
 class HillClimberValidationCase:
@@ -40,133 +37,8 @@ class HillClimberValidationCase:
     base_path: str
     meta: dict
     trips: list[DemandTrip]
-    sliced_trips: list[DemandTrip]
     result: object
     total_demand: float
-    load_steps: int
-
-
-def _median_link_speed_from_meta(meta: dict) -> float | None:
-    """Extract median freeflow speed from meta['link_attrs'] if available."""
-    link_attrs = meta.get("link_attrs")
-    if not link_attrs:
-        return None
-    speeds = [a["ff_speed_kmh"] for a in link_attrs.values() if "ff_speed_kmh" in a]
-    if not speeds:
-        return None
-    return float(np.median(speeds))
-
-
-def compute_volume_threshold(
-    *,
-    median_speed_kmh: float,
-    jam_density_per_lane: float = 150.0,
-    n_lanes: int = 1,
-    n_slices: int,
-    bin_width_hr: float = 1.0,
-) -> float:
-    """Per-card volume threshold: each card contributes ≤ kj/n_slices density.
-
-    ``threshold = (kj / n_slices) * speed * bin_width``
-
-    A single OD pair routed at this volume adds at most ``kj / n_slices``
-    density to every link on its path, preventing any one card from
-    oversaturating the network.
-    """
-    kj = jam_density_per_lane * n_lanes
-    return (kj / n_slices) * median_speed_kmh * bin_width_hr
-
-
-def slice_trips_by_departure(
-    trips: Sequence[DemandTrip],
-    *,
-    n_slices: int,
-    bin_width_s: float,
-    volume_threshold: float,
-    seed: int = 42,
-) -> list[DemandTrip]:
-    """Replicate-shuffle-deal OD trips into departure-time slices.
-
-    Dual-axis slicing separates spatial OD sampling from volumetric
-    demand splitting:
-
-    1. **Replicate** – OD pairs with ``volume > volume_threshold`` are
-       split into ``ceil(volume / volume_threshold)`` cards, each
-       carrying an equal share of the original volume.  Low-volume
-       pairs produce one card at full volume.
-    2. **Shuffle** – The full deck is randomly permuted (seeded for
-       reproducibility) so each slice gets a spatially diverse mix.
-    3. **Deal** – The shuffled deck is divided into *n_slices* contiguous
-       blocks, each assigned a successive departure time.
-
-    On large spread networks (e.g. Chicago Regional) most OD pairs have
-    sub-threshold volume, so the deck ≈ n_od_pairs and spatial sampling
-    dominates.  On small concentrated networks (e.g. Braess) the single
-    high-volume pair is replicated into many cards and volumetric
-    splitting dominates.
-    """
-    if n_slices <= 0:
-        raise ValueError("n_slices must be positive")
-    if bin_width_s <= 0:
-        raise ValueError("bin_width_s must be positive")
-    if volume_threshold <= 0:
-        raise ValueError("volume_threshold must be positive")
-
-    positive_trips = [t for t in trips if t.volume > 0]
-    n_ods = len(positive_trips)
-    if n_ods == 0:
-        return []
-
-    # Per-OD minimum cards so every slice gets at least one card
-    spatial_floor = max(1, math.ceil(n_slices / n_ods))
-
-    # Step 1: Replicate high-volume pairs
-    origins: list = []
-    destinations: list = []
-    volumes: list[float] = []
-    for trip in positive_trips:
-        n_cards = max(spatial_floor, math.ceil(trip.volume / volume_threshold))
-        per_card = trip.volume / n_cards
-        for _ in range(n_cards):
-            origins.append(trip.origin)
-            destinations.append(trip.destination)
-            volumes.append(per_card)
-
-    n = len(origins)
-
-    # Step 2: Shuffle
-    rng = np.random.default_rng(seed)
-    perm = rng.permutation(n)
-
-    # Step 3: Deal into slices
-    sliced: list[DemandTrip] = []
-    for rank, idx in enumerate(perm):
-        slice_idx = min(rank * n_slices // n, n_slices - 1)
-        sliced.append(DemandTrip(
-            origin=origins[idx],
-            destination=destinations[idx],
-            volume=volumes[idx],
-            departure_time_s=slice_idx * bin_width_s,
-        ))
-    return sliced
-
-
-def _load_steps_from_rate(load_rate: float) -> int:
-    """Derive greedy load-step count from load_rate.
-
-    ``load_rate`` is the fraction of demand per greedy slice and must be
-    the reciprocal of an integer step count:
-    100% -> 1 step, 50% -> 2, 25% -> 4, 10% -> 10, etc.
-    """
-    if not (0.0 < load_rate <= 1.0):
-        raise ValueError("load_rate must be in (0, 1]")
-    load_steps = max(1, int(round(1.0 / load_rate)))
-    if not math.isclose(load_rate * load_steps, 1.0, rel_tol=1e-9, abs_tol=1e-9):
-        raise ValueError(
-            "load_rate must be the reciprocal of an integer "
-            "load-step count (for example 1.0, 0.5, 0.25, 0.2, 0.1, 0.05)"
-        )
-    return load_steps
 
 
 def run_hillclimber_case(
@@ -177,99 +49,44 @@ def run_hillclimber_case(
     trip_builder: Callable[[dict, float], list[DemandTrip]],
     run_dir: Path,
     demand_scale: float = 1.0,
-    bin_width_s: float = 3600.0,
-    max_batch_size: int | None = None,
     state_patch_factory: Callable[[dict], Callable] | None = None,
-    load_rate: float = 0.10,
-    max_od: int = 100_000,
     max_rounds: int = 0,
     gap_threshold: float = 0.001,
-    assumed_speed_kmh: float | None = None,
     method: str = "msa",
 ):
     """Run one shared assignment validation case from scenario metadata."""
     logger = logging.getLogger(__name__)
-    if load_rate <= 0.0:
-        raise ValueError("load_rate must be positive")
-    load_steps = _load_steps_from_rate(load_rate)
 
     logger.info("Building trips (demand_scale=%.2f)...", demand_scale)
     t0 = time.monotonic()
     trips = trip_builder(meta, demand_scale)
     logger.info("Built %d OD pairs in %.1fs", len(trips), time.monotonic() - t0)
 
-    # Determine median network speed for volume threshold
-    if assumed_speed_kmh is not None:
-        median_speed = assumed_speed_kmh
-    else:
-        median_speed = _median_link_speed_from_meta(meta)
-        if median_speed is None:
-            median_speed = _DEFAULT_ASSUMED_SPEED_KMH
-            logger.info(
-                "No link_attrs in meta; using default assumed speed %.0f km/h",
-                median_speed,
-            )
-
-    vol_threshold = compute_volume_threshold(
-        median_speed_kmh=median_speed,
-        n_slices=load_steps,
-        bin_width_hr=bin_width_s / 3600.0,
-    )
-    n_above = sum(1 for t in trips if t.volume > vol_threshold)
-    logger.info(
-        "Volume threshold %.0f veh/hr (median speed %.1f km/h, %d slices); "
-        "%d/%d OD pairs will be replicated",
-        vol_threshold, median_speed, load_steps, n_above, len(trips),
-    )
-
-    logger.info("Replicate-shuffle-deal into %d load slices...", load_steps)
-    t0 = time.monotonic()
-    sliced_trips = slice_trips_by_departure(
-        trips,
-        n_slices=load_steps,
-        bin_width_s=bin_width_s,
-        volume_threshold=vol_threshold,
-    )
-    logger.info(
-        "Dealt %d cards from %d OD pairs into %d slices in %.1fs",
-        len(sliced_trips), len(trips), load_steps, time.monotonic() - t0,
-    )
     run_base = copy_fn(base_path, run_dir)
     config = AssignmentConfig(
         method=method,
-        max_iterations=max_rounds,
+        max_iterations=max_rounds if max_rounds > 0 else 20,
         convergence_gap=gap_threshold,
-        bin_width_s=bin_width_s,
         smoothing=DensitySmoothingConfig(method="none"),
         speed_csv_dir=str(Path(run_base).parent),
     )
     solver = AssignmentSolver(run_base, config)
     state_patch = state_patch_factory(meta) if state_patch_factory else None
-    result = solver.run_stream(
-        sliced_trips,
-        max_batch_size=max_batch_size,
-        state_patch=state_patch,
-        max_od=max_od,
-        max_rounds=max_rounds,
-        gap_threshold=gap_threshold,
-        method=method,
-    )
+    result = solver.assign_matrix(trips, state_patch=state_patch)
     return HillClimberValidationCase(
         base_path=run_base,
         meta=meta,
         trips=trips,
-        sliced_trips=sliced_trips,
         result=result,
         total_demand=sum(t.volume for t in trips),
-        load_steps=load_steps,
     )
 
 
 def hillclimber_final_gap(result: object) -> float | None:
     """Return the final convergence gap, if available."""
-    msa_results = getattr(result, "msa_results", []) or []
-    if msa_results:
-        return msa_results[-1].relative_gap
+    gap = getattr(result, "final_gap", None)
+    if gap is not None:
+        return float(gap)
     iteration_log = getattr(result, "iteration_log", []) or []
     if iteration_log:
         return iteration_log[-1].relative_gap
@@ -594,15 +411,10 @@ def generate_hillclimber_validation_report(
     tmp_path: str | Path,
     output_path: str,
     detail_scale: float,
-    bin_width_s: float = 3600.0,
-    max_batch_size: int | None = None,
     state_patch_factory: Callable[[dict], Callable] | None = None,
     intro_html: str = "",
-    load_rate: float = 0.10,
-    max_od: int = 100_000,
     max_rounds: int = 0,
     gap_threshold: float = 0.001,
-    assumed_speed_kmh: float | None = None,
     method: str = "msa",
 ) -> Path:
     """Generate a shared assignment validation report for one scenario."""
@@ -617,14 +429,9 @@ def generate_hillclimber_validation_report(
         trip_builder=trip_builder,
         run_dir=tmp_path / "hc_detail",
         demand_scale=detail_scale,
-        bin_width_s=bin_width_s,
-        max_batch_size=max_batch_size,
         state_patch_factory=state_patch_factory,
-        load_rate=load_rate,
-        max_od=max_od,
         max_rounds=max_rounds,
         gap_threshold=gap_threshold,
-        assumed_speed_kmh=assumed_speed_kmh,
         method=method,
     )
 
@@ -670,34 +477,22 @@ def generate_hillclimber_validation_report(
         speed_desc = ", ".join(str(s) for s in speed_set)
     else:
         speed_desc = f"{speed_set[0]}&ndash;{speed_set[-1]} ({len(speed_set)} unique)"
-    converge = max_rounds > 0
-    refinement_intro = ""
-    if converge:
-        refinement_intro = (
-            f" Greedy loading uses {case.load_steps} load step(s) "
-            f"(load_rate={load_rate:.0%}). "
-            f"{method.upper()} convergence then runs "
-            f"for up to {max_rounds} round(s) (max_od={max_od:,})."
-        )
-    else:
-        refinement_intro = (
-            f" Greedy loading uses {case.load_steps} load step(s) "
-            f"(load_rate={load_rate:.0%})."
-        )
 
-    load_distribution = (
-        f"loaded via replicate-shuffle-deal into {case.load_steps} greedy load step(s). "
-        f"Trips: {len(case.trips):,} OD pairs dealt into "
-        f"{len(case.sliced_trips):,} cards. "
-    )
+    converge_msg = ""
+    if max_rounds > 0:
+        converge_msg = (
+            f" {method.upper()} convergence runs "
+            f"for up to {max_rounds} round(s)."
+        )
 
     intro = (
-        f"<p>Validation of the <b>greedy + MSA assignment</b> on "
+        f"<p>Validation of the <b>{method.upper()} assignment</b> on "
         f"<b>{network_name}</b>. Final loaded demand: {case.total_demand:,.0f} vph "
-        f"({detail_scale:.0%} of the scenario demand basis), {load_distribution}"
+        f"({detail_scale:.0%} of the scenario demand basis). "
+        f"Trips: {len(case.trips):,} OD pairs. "
         f"Lanes: {min(lane_counts)}&ndash;{max(lane_counts)}. "
         f"Freeflow speeds: {speed_desc} km/h. "
-        f"Total runtime: {case.result.total_time_s:.2f}s.{refinement_intro}</p>"
+        f"Total runtime: {case.result.total_time_s:.2f}s.{converge_msg}</p>"
     )
     if intro_html:
         intro += intro_html

@@ -221,7 +221,6 @@ class TestSiouxFalls:
             run_dir=tmp_path / "hc_run",
             demand_scale=0.30,
             state_patch_factory=lambda m: lambda s: patch_sioux_falls_lanes(s, m),
-            load_rate=0.10,
             max_rounds=10,
         )
         state = case.result.network_state
@@ -255,14 +254,11 @@ def generate_sioux_falls_report(
         tmp_path=tmp_path,
         output_path=output_path,
         detail_scale=0.30,
-        bin_width_s=3600.0,
         state_patch_factory=lambda meta: lambda state: patch_sioux_falls_lanes(state, meta),
-        load_rate=0.10,
         max_rounds=max_rounds,
         method=method,
         intro_html=(
-            f"<p>{method.upper()} validation at <b>30% Sioux Falls demand</b> "
-            f"with 10 greedy load steps.</p>"
+            f"<p>{method.upper()} validation at <b>30% Sioux Falls demand</b>.</p>"
         ),
     )
 
