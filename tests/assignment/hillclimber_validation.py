@@ -98,77 +98,32 @@ def hillclimber_final_tstt(
     *,
     min_speed_kmh: float = 1.08,
 ) -> float:
-    """Return final TSTT from iteration log, MSA, or greedy loading."""
+    """Return final TSTT from iteration log."""
     iteration_log = getattr(result, "iteration_log", []) or []
     if iteration_log:
         return float(iteration_log[-1].tstt)
-
-    msa_results = getattr(result, "msa_results", []) or []
-    if msa_results:
-        return float(msa_results[-1].link_tstt)
-
-    batch_results = getattr(result, "batch_results", []) or []
-    if batch_results:
-        return float(batch_results[-1].tstt)
     return 0.0
 
 
-def _load_step_label(batch_index: int) -> str:
-    return f"Load {batch_index + 1}"
-
-
-def _msa_step_label(iteration: int) -> str:
-    return f"MSA {iteration}"
-
-
-def _convergence_series(result: object) -> dict:
-    """Return plotting arrays for convergence, if present."""
-    msa_results = getattr(result, "msa_results", []) or []
-    if msa_results:
-        return {
-            "kind": "msa",
-            "labels": [
-                _msa_step_label(r.iteration) for r in msa_results
-            ],
-            "network_tstt": [r.link_tstt for r in msa_results],
-            "state_change_norm": [r.state_change_norm for r in msa_results],
-            "speeds": [r.mean_speed_kmh for r in msa_results],
-            "max_k": [r.max_k_over_kj for r in msa_results],
-            "median_k": [r.median_k_over_kj for r in msa_results],
-            "route_times": [r.route_time_s for r in msa_results],
-            "customize_times": [r.customize_time_s for r in msa_results],
-            "engine_times": [r.engine_time_s for r in msa_results],
-            "gaps": [r.relative_gap for r in msa_results],
-        }
+def iteration_series(result: object) -> dict:
+    """Extract plotting arrays from an AssignmentResult's iteration_log."""
     iteration_log = getattr(result, "iteration_log", []) or []
-    if iteration_log:
+    if not iteration_log:
         return {
-            "kind": "msa",
-            "labels": [
-                _msa_step_label(r.iteration) for r in iteration_log
-            ],
-            "network_tstt": [r.tstt for r in iteration_log],
-            "state_change_norm": [r.state_change_norm for r in iteration_log],
-            "speeds": [r.mean_speed_kmh for r in iteration_log],
-            "max_k": [getattr(r, "max_k_over_kj", 0.0) for r in iteration_log],
-            "median_k": [getattr(r, "median_k_over_kj", 0.0) for r in iteration_log],
-            "route_times": [r.route_time_s for r in iteration_log],
-            "customize_times": [r.customize_time_s for r in iteration_log],
-            "engine_times": [r.engine_time_s for r in iteration_log],
-            "gaps": [r.relative_gap for r in iteration_log],
+            "network_tstt": [], "state_change_norm": [], "speeds": [],
+            "max_k": [], "median_k": [], "route_times": [],
+            "customize_times": [], "engine_times": [], "gaps": [],
         }
     return {
-        "kind": None,
-        "labels": [],
-        "network_tstt": [],
-        "state_change_norm": [],
-        "speeds": [],
-        "max_k": [],
-        "median_k": [],
-        "route_times": [],
-        "customize_times": [],
-        "engine_times": [],
-        "gaps": [],
+        "network_tstt": [r.tstt for r in iteration_log],
+        "state_change_norm": [r.state_change_norm for r in iteration_log],
+        "speeds": [r.mean_speed_kmh for r in iteration_log],
+        "max_k": [getattr(r, "max_k_over_kj", 0.0) for r in iteration_log],
+        "median_k": [getattr(r, "median_k_over_kj", 0.0) for r in iteration_log],
+        "route_times": [r.route_time_s for r in iteration_log],
+        "customize_times": [r.customize_time_s for r in iteration_log],
+        "engine_times": [r.engine_time_s for r in iteration_log],
+        "gaps": [r.relative_gap for r in iteration_log],
     }
 
 
@@ -179,73 +134,52 @@ def _add_batch_sections(
     *,
     detail_scale: float,
 ) -> None:
-    """Add load-step evolution plots."""
+    """Add convergence, state evolution, and runtime plots."""
     result = case.result
-    batch_results = getattr(result, "batch_results", []) or []
-    greedy_labels = [_load_step_label(b.iteration) for b in batch_results]
-    greedy_tstt = [b.tstt for b in batch_results]
-    refinement = _convergence_series(result)
+    iteration_log = getattr(result, "iteration_log", []) or []
+    if not iteration_log:
+        return
 
-    convergence_labels = greedy_labels + refinement["labels"]
-    convergence_tstt = list(greedy_tstt)
-    if refinement["network_tstt"] and all(v is not None for v in refinement["network_tstt"]):
-        convergence_tstt.extend(refinement["network_tstt"])
+    labels = [f"Iter {r.iteration}" for r in iteration_log]
+    tstt_vals = [r.tstt for r in iteration_log]
+    gap_vals = [r.relative_gap for r in iteration_log]
+    delta_vals = [r.state_change_norm for r in iteration_log]
+    speeds = [r.mean_speed_kmh for r in iteration_log]
+    max_k = [getattr(r, "max_k_over_kj", 0.0) for r in iteration_log]
+    median_k = [getattr(r, "median_k_over_kj", 0.0) for r in iteration_log]
 
-    gap_values = [None] * len(greedy_labels) + refinement["gaps"]
-
+    # --- Convergence: TSTT + Gap + Δq ---
     fig = go.Figure()
-    # TSTT across both greedy and MSA phases
     fig.add_trace(go.Scatter(
-        x=convergence_labels,
-        y=convergence_tstt,
-        name="TSTT",
+        x=labels, y=tstt_vals, name="TSTT",
         mode="lines+markers",
         line=dict(color="#D32F2F", width=2.5),
         marker=dict(size=7),
     ))
-    if refinement["state_change_norm"]:
+    if any(d != 0.0 for d in delta_vals):
         fig.add_trace(go.Scatter(
-            x=refinement["labels"],
-            y=refinement["state_change_norm"],
-            name="\u0394k norm",
+            x=labels, y=delta_vals, name="\u0394q norm",
             mode="lines+markers",
             line=dict(color="#8E24AA", width=2.5, dash="dot"),
-            marker=dict(size=7),
-            yaxis="y3",
+            marker=dict(size=7), yaxis="y3",
         ))
     fig.add_trace(go.Scatter(
-        x=convergence_labels,
-        y=gap_values,
-        name="Gap",
-        yaxis="y2",
+        x=labels, y=gap_vals, name="Gap", yaxis="y2",
         mode="lines+markers",
         line=dict(color="#1976D2", width=2.5),
-        marker=dict(size=7),
-        connectgaps=False,
+        marker=dict(size=7), connectgaps=False,
     ))
-    if refinement["kind"] is not None:
-        fig.add_vline(
-            x=len(greedy_labels) - 0.5,
-            line_dash="dot",
-            line_color="#666",
-            line_width=1.5,
-        )
     fig.update_layout(
         title="Convergence",
-        xaxis_title="Step",
+        xaxis_title="Iteration",
         yaxis=dict(title="Network TSTT (veh-seconds)"),
         yaxis2=dict(
-            title="Gap",
-            overlaying="y",
-            side="right",
-            type="log" if any(gap is not None for gap in gap_values) else "linear",
+            title="Gap", overlaying="y", side="right",
+            type="log" if any(g is not None for g in gap_vals) else "linear",
         ),
         yaxis3=dict(
-            title="\u0394k norm",
-            anchor="free",
-            overlaying="y",
-            side="right",
-            position=0.92,
+            title="\u0394q norm", anchor="free",
+            overlaying="y", side="right", position=0.92,
         ),
         template="plotly_white",
     )
@@ -255,150 +189,76 @@ def _add_batch_sections(
     final_tstt = hillclimber_final_tstt(result)
     descriptions.append(
         "<h2>Convergence</h2>"
-        "<p>Network TSTT is shown across greedy loading and MSA convergence. "
-        "Post-greedy MSA iterations blend all-or-nothing auxiliary loadings "
+        "<p>MSA iterations blend all-or-nothing auxiliary loadings "
         "with diminishing step sizes (\u03b1 = 1/(m+1)) to converge toward "
         "user equilibrium. "
         f"Final TSTT = {final_tstt:,.0f} veh-seconds; final gap = {gap_str}.</p>"
     )
 
-    # --- State Evolution: unified load / refinement timeline ---
+    # --- State Evolution: speed + k/kj ---
     fig = go.Figure()
-
-    # Build unified x-axis labels and y-values
-    greedy_speeds = [b.mean_speed_kmh for b in batch_results]
-    greedy_max_k = [b.max_k_over_kj for b in batch_results]
-    greedy_median_k = [b.median_k_over_kj for b in batch_results]
-    all_labels = greedy_labels + refinement["labels"]
-    all_speeds = greedy_speeds + refinement["speeds"]
-    all_max_k = greedy_max_k + refinement["max_k"]
-    all_median_k = greedy_median_k + refinement["median_k"]
-
-    # Mean speed trace (continuous)
     fig.add_trace(go.Scatter(
-        x=all_labels,
-        y=all_speeds,
-        mode="lines+markers",
+        x=labels, y=speeds, mode="lines+markers",
         line=dict(color="#2E7D32", width=2.5),
-        marker=dict(size=7),
-        name="Mean speed",
+        marker=dict(size=7), name="Mean speed",
     ))
-    # Max k/kj trace
     fig.add_trace(go.Scatter(
-        x=all_labels,
-        y=all_max_k,
-        mode="lines+markers",
+        x=labels, y=max_k, mode="lines+markers",
         line=dict(color="#FF9800", width=2.0),
-        marker=dict(size=6),
-        name="Max k/kj",
-        yaxis="y2",
+        marker=dict(size=6), name="Max k/kj", yaxis="y2",
     ))
-    # Median k/kj trace (loaded links only)
     fig.add_trace(go.Scatter(
-        x=all_labels,
-        y=all_median_k,
-        mode="lines+markers",
+        x=labels, y=median_k, mode="lines+markers",
         line=dict(color="#FF9800", width=1.5, dash="dash"),
-        marker=dict(size=5),
-        name="Median k/kj (loaded)",
-        yaxis="y2",
+        marker=dict(size=5), name="Median k/kj (loaded)", yaxis="y2",
     ))
-
-    # Vertical separator between greedy and post-greedy refinement phases
-    if refinement["kind"] is not None:
-        fig.add_vline(
-            x=len(greedy_labels) - 0.5,
-            line_dash="dot", line_color="#666", line_width=1.5,
-        )
-
     fig.update_layout(
         title="State Evolution",
-        xaxis_title="Step",
+        xaxis_title="Iteration",
         yaxis=dict(title="Mean speed (km/h)"),
         yaxis2=dict(title="k / k_jam", overlaying="y", side="right"),
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     figs.append(fig)
-    refinement_note = ""
-    if refinement["kind"] == "msa":
-        n_refinement = len(refinement["labels"])
-        final_gap = hillclimber_final_gap(result)
-        gap_str = (
-            f" Final gap={final_gap:.6f}."
-            if final_gap is not None else ""
-        )
-        refinement_note = (
-            f" After greedy loading, {n_refinement} iteration(s) "
-            f"converged link densities toward user equilibrium."
-            f"{gap_str}"
-        )
-    elif refinement["kind"] is None:
-        pass
+    n_iter = len(iteration_log)
     descriptions.append(
         f"<h2>State Evolution</h2>"
-        f"<p>Final loaded demand is {case.total_demand:,.0f} "
-        f"vph. Greedy loading ran across {case.load_steps} load step(s)."
-        f"{refinement_note}</p>"
+        f"<p>Final loaded demand is {case.total_demand:,.0f} vph. "
+        f"MSA ran {n_iter} iteration(s)."
+        f" Final gap={gap_str}.</p>"
     )
 
-    # --- Runtime: unified per-step timing ---
-    rt_labels = [_load_step_label(b.iteration) for b in batch_results]
-    rt_route = [b.route_time_s for b in batch_results]
-    rt_cust = [b.customize_time_s for b in batch_results]
-    rt_engine = [b.engine_time_s for b in batch_results]
-    rt_labels.extend(refinement["labels"])
-    rt_route.extend(refinement["route_times"])
-    rt_cust.extend(refinement["customize_times"])
-    rt_engine.extend(refinement["engine_times"])
-
+    # --- Runtime: per-iteration timings ---
+    rt_route = [r.route_time_s for r in iteration_log]
+    rt_cust = [r.customize_time_s for r in iteration_log]
+    rt_engine = [r.engine_time_s for r in iteration_log]
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=rt_labels, y=rt_route,
-        mode="lines+markers",
+        x=labels, y=rt_route, mode="lines+markers",
         line=dict(color="#1565C0", width=2.0),
-        marker=dict(size=5),
-        name="Route time",
+        marker=dict(size=5), name="Route time",
     ))
     fig.add_trace(go.Scatter(
-        x=rt_labels, y=rt_cust,
-        mode="lines+markers",
+        x=labels, y=rt_cust, mode="lines+markers",
         line=dict(color="#8E24AA", width=2.0),
-        marker=dict(size=5),
-        name="Customize time",
+        marker=dict(size=5), name="Customize time",
     ))
     fig.add_trace(go.Scatter(
-        x=rt_labels, y=rt_engine,
-        mode="lines+markers",
+        x=labels, y=rt_engine, mode="lines+markers",
         line=dict(color="#6D4C41", width=2.0),
-        marker=dict(size=5),
-        name="Engine reload time",
+        marker=dict(size=5), name="Engine reload time",
     ))
-
-    # Vertical separator between greedy and refinement
-    n_greedy = len(batch_results)
-    if refinement["kind"] is not None:
-        fig.add_vline(
-            x=n_greedy - 0.5,
-            line_dash="dot", line_color="#666", line_width=1.5,
-        )
-
     fig.update_layout(
         title="Runtime",
-        xaxis_title="Load / refinement step",
+        xaxis_title="Iteration",
         yaxis_title="Time (s)",
         template="plotly_white",
     )
     figs.append(fig)
-    runtime_note = (
-        "Per-step routing, customize, and engine reload timings across greedy loading "
-        "and MSA convergence iterations."
-        if refinement["kind"] == "msa" else
-        "Per-step routing, customize, and engine reload timings across greedy loading."
-    )
     descriptions.append(
         "<h2>Runtime</h2>"
-        f"<p>{runtime_note}</p>"
+        "<p>Per-iteration routing, customize, and engine reload timings.</p>"
     )
 
 

@@ -22,7 +22,7 @@ from osrm.assignment.plots import (
 
 from .hillclimber_validation import (
     HillClimberValidationCase,
-    _convergence_series,
+    iteration_series,
     run_hillclimber_case,
 )
 
@@ -133,34 +133,17 @@ def _add_convergence_comparison(
     descriptions: list,
     comp: _NetworkComparison,
 ):
-    """Convergence overlay: TSTT, gap, Δk for MSA vs FW on one network."""
+    """Convergence overlay: TSTT, gap, Δq for MSA vs FW on one network."""
 
-    msa_batches = getattr(comp.msa_case.result, "batch_results", []) or []
-    fw_batches = getattr(comp.fw_case.result, "batch_results", []) or []
-    msa_ref = _convergence_series(comp.msa_case.result)
-    fw_ref = _convergence_series(comp.fw_case.result)
+    msa_ref = iteration_series(comp.msa_case.result)
+    fw_ref = iteration_series(comp.fw_case.result)
 
     # ── TSTT ──
     fig_tstt = go.Figure()
 
-    # Greedy phase (shared — same for both since same demand/load_rate)
-    greedy_labels = [f"Load {i+1}" for i in range(len(msa_batches))]
-    greedy_tstt = [b.network_tstt for b in msa_batches]
-    n_greedy = len(greedy_labels)
-
-    if greedy_tstt:
-        fig_tstt.add_trace(go.Scatter(
-            x=list(range(n_greedy)),
-            y=greedy_tstt,
-            mode="lines+markers",
-            name="Greedy",
-            line=dict(color="#888", width=2),
-            marker=dict(size=4),
-        ))
-
-    # MSA refinement
+    # MSA
     if msa_ref["network_tstt"]:
-        xs = list(range(n_greedy, n_greedy + len(msa_ref["network_tstt"])))
+        xs = list(range(1, len(msa_ref["network_tstt"]) + 1))
         fig_tstt.add_trace(go.Scatter(
             x=xs, y=msa_ref["network_tstt"],
             mode="lines+markers", name="MSA",
@@ -168,9 +151,9 @@ def _add_convergence_comparison(
             marker=dict(size=5),
         ))
 
-    # FW refinement
+    # FW
     if fw_ref["network_tstt"]:
-        xs = list(range(n_greedy, n_greedy + len(fw_ref["network_tstt"])))
+        xs = list(range(1, len(fw_ref["network_tstt"]) + 1))
         fig_tstt.add_trace(go.Scatter(
             x=xs, y=fw_ref["network_tstt"],
             mode="lines+markers", name="FW",
@@ -178,12 +161,9 @@ def _add_convergence_comparison(
             marker=dict(size=5),
         ))
 
-    if n_greedy:
-        fig_tstt.add_vline(x=n_greedy - 0.5, line_dash="dot", line_color="#666")
-
     fig_tstt.update_layout(
         title=f"{comp.name} — TSTT Convergence",
-        xaxis_title="Step", yaxis_title="Network TSTT (veh·s)",
+        xaxis_title="Iteration", yaxis_title="Network TSTT (veh·s)",
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
@@ -257,15 +237,15 @@ def _add_convergence_comparison(
             marker=dict(size=5),
         ))
     fig_dk.update_layout(
-        title=f"{comp.name} — State Change Norm (Δk)",
-        xaxis_title="Convergence Iteration", yaxis_title="‖Δk‖ / ‖k‖",
+        title=f"{comp.name} — State Change Norm (Δq)",
+        xaxis_title="Iteration", yaxis_title="max |Δq|",
         yaxis_type="log", template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     figs.append(fig_dk)
     descriptions.append(
         f"<h3>{comp.name} — State Change Norm</h3>"
-        "<p>Relative change in link density vector per iteration. "
+        "<p>Max absolute change in link flow vector per iteration. "
         "Monotonically decreasing by construction for MSA (&alpha;=1/n shrinks). "
         "FW step size is adaptive and may not shrink monotonically.</p>"
     )
@@ -385,7 +365,7 @@ def generate_method_comparison_report(
         descriptions.append(
             f"<h2>{comp.name}</h2>"
             f"<p>MSA vs Frank-Wolfe convergence comparison on {comp.name} "
-            f"({max_rounds} max iterations, 10 greedy load steps, 100% demand).</p>"
+            f"({max_rounds} max iterations, 100% demand).</p>"
         )
         _add_convergence_comparison(figs, descriptions, comp)
         _add_final_state_comparison(figs, descriptions, comp)
@@ -396,7 +376,7 @@ def generate_method_comparison_report(
             "<p>Side-by-side convergence and final-state comparison of MSA "
             "(α=1/n fixed schedule) and Frank-Wolfe (Beckmann line search) "
             "on two TNTP benchmark networks.</p>"
-            f"<p>Both methods use identical greedy loading as warm start, then "
+            f"<p>Both methods use incremental warm-up, then "
             f"run up to <b>{max_rounds}</b> convergence iterations.</p>"
         ),
         figures=figs,
