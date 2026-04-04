@@ -319,7 +319,7 @@ def generate_chicago_spillover_report(
 
     n_demand_periods = 4
     period_s = 900.0  # 15 min
-    max_drain_periods = 20
+    max_drain_periods = 100  # safety cap; loop exits when queue < 1 veh
 
     # Build demand trips: 4 periods of equal demand
     spill_trips = _build_trips_multiperiod(
@@ -357,11 +357,18 @@ def generate_chicago_spillover_report(
             period_end_indices.append(i - 1)
     period_end_indices.append(n_batches - 1)  # final period
 
+    def _time_label(period_idx: int, drain: bool = False) -> str:
+        """Format period end-time as 'h:mm' or 'h:mm*' for drain."""
+        total_min = int((period_idx + 1) * period_s / 60)
+        h, m = divmod(total_min, 60)
+        suffix = "*" if drain else ""
+        return f"{h}:{m:02d}{suffix}"
+
     period_metrics = []
     for p, end_idx in enumerate(period_end_indices):
         period_metrics.append({
             "period": p + 1,
-            "label": f"P{p+1}",
+            "label": _time_label(p),
             "has_demand": True,
             "queue_veh_hr_lane": blog["queue_vehicles"][end_idx],
             "total_unserved_vph": blog["total_unserved_vph"][end_idx],
@@ -428,7 +435,7 @@ def generate_chicago_spillover_report(
 
         period_metrics.append({
             "period": n_demand_periods + drain_p + 1,
-            "label": f"D{drain_p+1}",
+            "label": _time_label(n_demand_periods + drain_p, drain=True),
             "has_demand": False,
             "queue_veh_hr_lane": mean_q,
             "total_unserved_vph": float(np.sum(queue_rate_remaining)),
@@ -479,7 +486,7 @@ def generate_chicago_spillover_report(
             showlegend=False,
         ), row=row, col=col)
 
-        fig.update_xaxes(title_text="Period", row=row, col=col)
+        fig.update_xaxes(title_text="Time (* = drain)", row=row, col=col)
         fig.update_yaxes(title_text=y_titles[idx], row=row, col=col)
 
         # Shade demand vs drain regions
@@ -505,14 +512,16 @@ def generate_chicago_spillover_report(
     final_unserved = period_metrics[-1]["total_unserved_vph"]
     peak_unserved_rate = period_metrics[n_demand - 1]["total_unserved_vph"]
     drain_pct = (1.0 - final_unserved / peak_unserved_rate) * 100 if peak_unserved_rate > 0 else 100
+    demand_min = int(n_demand_periods * period_s / 60)
+    drain_min = int(n_drain * period_s / 60)
     descriptions.append(
         "<h2>Per-Period Progression</h2>"
-        f"<p>{n_demand_periods} demand periods (P1–P{n_demand_periods}, "
+        f"<p>{n_demand_periods} demand periods ({demand_min} min, "
         f"{int(period_s/60)} min each, {per_period_demand:,.0f} vph/period), "
-        f"followed by {n_drain} drain periods (no new demand). "
+        f"followed by {n_drain} drain periods ({drain_min} min, marked with *). "
         f"Blue shading = demand active, green shading = drain only.</p>"
         f"<p>Peak unserved: <b>{peak_unserved_rate:,.0f} veh/hr</b> → "
-        f"after {n_drain} drain periods: <b>{final_unserved:,.0f} veh/hr</b> "
+        f"after drain: <b>{final_unserved:,.0f} veh/hr</b> "
         f"({drain_pct:.1f}% reduction)</p>"
     )
 
