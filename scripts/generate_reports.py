@@ -132,7 +132,7 @@ def main() -> None:
              f"Available: {', '.join(SCENES)}",
     )
     parser.add_argument(
-        "--method", default="msa", choices=["msa", "fw", "all"],
+        "--method", default="msa", choices=["msa", "fw", "stream", "all"],
         help="Assignment method (default: msa)",
     )
     parser.add_argument(
@@ -147,7 +147,7 @@ def main() -> None:
                 f"Unknown scene: {scene!r}. Choose from: {', '.join(SCENES)}"
             )
 
-    methods = ["msa", "fw"] if args.method == "all" else [args.method]
+    methods = ["msa", "fw", "stream"] if args.method == "all" else [args.method]
 
     logging.basicConfig(
         level=logging.INFO,
