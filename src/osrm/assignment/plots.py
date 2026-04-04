@@ -1750,15 +1750,19 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
         u, v = int(state.edge_ids[i, 0]), int(state.edge_ids[i, 1])
         edge_map[(u, v)] = i
 
+    large_network = len(link_attrs) > 2000
+
     # Group links by color bucket for efficient rendering
     color_buckets = {
         "#4CAF50": {"label": "k/kj < 0.33", "xs": [], "ys": []},
         "#FF9800": {"label": "0.33 ≤ k/kj < 0.66", "xs": [], "ys": []},
         "#F44336": {"label": "0.66 ≤ k/kj < 0.90", "xs": [], "ys": []},
         "#B71C1C": {"label": "k/kj ≥ 0.90", "xs": [], "ys": []},
-        "#BDBDBD": {"label": "No demand", "xs": [], "ys": []},
     }
-    mid_x, mid_y, mid_color, mid_hover = [], [], [], []
+    if not large_network:
+        color_buckets["#BDBDBD"] = {"label": "No demand", "xs": [], "ys": []}
+    mid_x, mid_y, mid_hover = [], [], []
+    n_unloaded = 0
 
     for (u, v), attrs in link_attrs.items():
         if u not in nodes or v not in nodes:
@@ -1772,11 +1776,15 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
             kj = state.jam_density[idx]
             k = state.density_vpkm[idx]
             k_ratio = k / kj if kj > 0 else 0
-            vf = state.freeflow_kmh[idx]
-            v_cong = state.speed_kmh[idx]
             flow = state.flow_vph[idx]
 
-            if k_ratio < 0.33:
+            if flow == 0:
+                # Unloaded link in state — treat like no demand
+                if large_network:
+                    n_unloaded += 1
+                    continue
+                color = "#BDBDBD"
+            elif k_ratio < 0.33:
                 color = "#4CAF50"
             elif k_ratio < 0.66:
                 color = "#FF9800"
@@ -1785,38 +1793,33 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
             else:
                 color = "#B71C1C"
 
-            hover = (
-                f"{u}→{v}<br>"
-                f"Lanes: {lanes}<br>"
-                f"Freeflow: {vf:.1f} km/h<br>"
-                f"Speed: {v_cong:.1f} km/h<br>"
-                f"Density: {k:.1f} veh/km (k/kj={k_ratio:.2f})<br>"
-                f"Flow: {flow:.0f} veh/hr"
-            )
+            if color != "#BDBDBD":
+                vf = state.freeflow_kmh[idx]
+                v_cong = state.speed_kmh[idx]
+                mid_x.append(round((x0 + x1) / 2, 5))
+                mid_y.append(round((y0 + y1) / 2, 5))
+                mid_hover.append(
+                    f"{u}→{v} ({lanes}L) "
+                    f"v={v_cong:.0f}/{vf:.0f} "
+                    f"k/kj={k_ratio:.2f} "
+                    f"q={flow:.0f}"
+                )
         else:
+            if large_network:
+                n_unloaded += 1
+                continue
             color = "#BDBDBD"
-            hover = (
-                f"{u}→{v}<br>"
-                f"Lanes: {lanes}<br>"
-                f"Freeflow: {attrs['ff_speed_kmh']:.0f} km/h<br>"
-                f"(no demand routed)"
-            )
 
-        # Append line segment with None separator for batching
-        bucket = color_buckets[color]
-        bucket["xs"].extend([x0, x1, None])
-        bucket["ys"].extend([y0, y1, None])
+        bucket = color_buckets.get(color)
+        if bucket is not None:
+            bucket["xs"].extend([round(x0, 5), round(x1, 5), None])
+            bucket["ys"].extend([round(y0, 5), round(y1, 5), None])
 
-        mid_x.append((x0 + x1) / 2)
-        mid_y.append((y0 + y1) / 2)
-        mid_color.append(color)
-        mid_hover.append(hover)
-
-    # One trace per color bucket instead of one per link
+    # One trace per color bucket
     for color, bucket in color_buckets.items():
         if not bucket["xs"]:
             continue
-        fig.add_trace(go.Scatter(
+        fig.add_trace(go.Scattergl(
             x=bucket["xs"], y=bucket["ys"], mode="lines",
             line=dict(color=color, width=1),
             hoverinfo="skip",
@@ -1824,29 +1827,31 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
             name=bucket["label"],
         ))
 
-    # Single invisible midpoint marker trace for hover
-    fig.add_trace(go.Scatter(
-        x=mid_x, y=mid_y, mode="markers",
-        marker=dict(size=8, color=mid_color, opacity=0),
-        hovertext=mid_hover, hoverinfo="text",
-        showlegend=False,
-    ))
+    # Single invisible midpoint marker trace for hover (loaded links only)
+    if mid_x:
+        fig.add_trace(go.Scattergl(
+            x=mid_x, y=mid_y, mode="markers",
+            marker=dict(size=8, opacity=0),
+            hovertext=mid_hover, hoverinfo="text",
+            showlegend=False,
+        ))
 
-    # Node markers
-    xs = [nodes[n][0] for n in sorted(nodes)]
-    ys = [nodes[n][1] for n in sorted(nodes)]
-    fig.add_trace(go.Scatter(
-        x=xs, y=ys,
-        mode="markers",
-        marker=dict(
-            size=5,
-            color="white",
-            line=dict(width=1, color="#333"),
-        ),
-        hovertext=[f"Node {n}" for n in sorted(nodes)],
-        hoverinfo="text",
-        showlegend=False,
-    ))
+    # Node markers (skip on large networks — too many, overlays links)
+    if not large_network:
+        xs = [nodes[n][0] for n in sorted(nodes)]
+        ys = [nodes[n][1] for n in sorted(nodes)]
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode="markers",
+            marker=dict(
+                size=5,
+                color="white",
+                line=dict(width=1, color="#333"),
+            ),
+            hovertext=[f"Node {n}" for n in sorted(nodes)],
+            hoverinfo="text",
+            showlegend=False,
+        ))
 
     # Zone centroids (trip origins/destinations)
     centroids = meta.get("zone_centroids", {})
@@ -1900,10 +1905,10 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
         f'<span style="color:#4CAF50"><b>green</b></span> (&lt; 0.33), '
         f'<span style="color:#FF9800"><b>yellow</b></span> (0.33–0.66), '
         f'<span style="color:#F44336"><b>red</b></span> (0.66–0.90), '
-        f'<span style="color:#B71C1C"><b>dark red</b></span> (&ge; 0.90), '
-        f'<span style="color:#BDBDBD"><b>grey</b></span> (no demand). '
+        f'<span style="color:#B71C1C"><b>dark red</b></span> (&ge; 0.90). '
         f"{n_crit} links above k<sub>c</sub>, {n_jam} near jam, "
-        f"{n_unused} unused. Hover over links for details.</p>"
+        f"{n_unused + n_unloaded} unloaded (hidden on large networks). "
+        f"Hover over links for details.</p>"
     )
 
 
@@ -2278,6 +2283,10 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     q_per_lane = q / np.maximum(n_lanes, 1)
     kj_per_lane = kj / np.maximum(n_lanes, 1)
 
+    # Filter to loaded links only (flow > 0) for scatter efficiency
+    loaded = q > 0
+    n_loaded = int(np.sum(loaded))
+
     # --- Single VDF curve normalized per lane ---
     med_vf = float(np.median(vf))
     med_kj_lane = float(np.median(kj_per_lane))
@@ -2288,21 +2297,19 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     q_pts = vdf.density_to_flow(k_pts, vf_arr, kj_arr)
     curve_label = f"VDF (v_f={med_vf:.0f}, k_j={med_kj_lane:.0f}/lane)"
 
-    # --- Combined Speed–Density and Flow–Density (per lane) ---
-    hover_labels = [
-        f"{int(state.edge_ids[i,0])}→{int(state.edge_ids[i,1])} "
-        f"({int(n_lanes[i])}L)"
-        for i in range(state.n_edges)
-    ]
+    # Use Scattergl + hovertemplate for large networks
+    ScatterType = go.Scattergl if state.n_edges > 2000 else go.Scatter
     fig_mfd = make_subplots(
         rows=1, cols=3,
         subplot_titles=["Speed–Density", "Flow–Density", "Unserved Demand"],
     )
-    # Left: speed–density scatter
-    fig_mfd.add_trace(go.Scatter(
-        x=k_per_lane.tolist(), y=v.tolist(), mode="markers",
+    # Left: speed–density scatter (loaded links only)
+    fig_mfd.add_trace(ScatterType(
+        x=np.round(k_per_lane[loaded], 2).tolist(),
+        y=np.round(v[loaded], 1).tolist(),
+        mode="markers",
         marker=dict(size=4, color="#1565C0", opacity=0.5),
-        hovertext=hover_labels, hoverinfo="text",
+        hovertemplate="k/lane=%{x:.1f} v=%{y:.1f}<extra></extra>",
         showlegend=False,
     ), row=1, col=1)
     fig_mfd.add_trace(go.Scatter(
@@ -2310,11 +2317,13 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
         line=dict(color="#999", dash="dash", width=1),
         name=curve_label, showlegend=True,
     ), row=1, col=1)
-    # Right: flow–density scatter
-    fig_mfd.add_trace(go.Scatter(
-        x=k_per_lane.tolist(), y=q_per_lane.tolist(), mode="markers",
+    # Centre: flow–density scatter (loaded links only)
+    fig_mfd.add_trace(ScatterType(
+        x=np.round(k_per_lane[loaded], 2).tolist(),
+        y=np.round(q_per_lane[loaded], 1).tolist(),
+        mode="markers",
         marker=dict(size=4, color="#D32F2F", opacity=0.5),
-        hovertext=hover_labels, hoverinfo="text",
+        hovertemplate="k/lane=%{x:.1f} q/lane=%{y:.0f}<extra></extra>",
         showlegend=False,
     ), row=1, col=2)
     fig_mfd.add_trace(go.Scatter(
@@ -2325,10 +2334,13 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     # Right: unserved demand (queue buildup rate) vs density
     q_unserved = state.unserved_demand
     q_unserved_per_lane = q_unserved / np.maximum(n_lanes, 1)
-    fig_mfd.add_trace(go.Scatter(
-        x=k_per_lane.tolist(), y=q_unserved_per_lane.tolist(), mode="markers",
+    has_unserved = q_unserved > 0
+    fig_mfd.add_trace(ScatterType(
+        x=np.round(k_per_lane[has_unserved], 2).tolist(),
+        y=np.round(q_unserved_per_lane[has_unserved], 1).tolist(),
+        mode="markers",
         marker=dict(size=4, color="#FF6F00", opacity=0.5),
-        hovertext=hover_labels, hoverinfo="text",
+        hovertemplate="k/lane=%{x:.1f} unserved=%{y:.0f}<extra></extra>",
         showlegend=False,
     ), row=1, col=3)
     fig_mfd.update_xaxes(title_text="Density per lane (veh/km/lane)", rangemode="tozero")
@@ -2346,9 +2358,9 @@ def _add_mfd_section(figs, descriptions, state, detail_scale):
     total_unserved = float(np.sum(q_unserved))
     descriptions.append(
         "<h2>Macroscopic Fundamental Diagram (MFD)</h2>"
-        "<p>Each point is one link, normalized to per-lane density so links "
-        "with different lane counts are comparable. Dashed curve: theoretical "
-        f"VDF using median v<sub>f</sub>={med_vf:.0f} km/h, "
+        f"<p>{n_loaded}/{state.n_edges} loaded links shown, normalized to per-lane "
+        "density so links with different lane counts are comparable. Dashed curve: "
+        f"theoretical VDF using median v<sub>f</sub>={med_vf:.0f} km/h, "
         f"k<sub>j</sub>={med_kj_lane:.0f} veh/km/lane. "
         "Left: speed–density. Centre: flow–density (inverted-U fundamental diagram). "
         f"Right: unserved demand = demand − physical throughput. "
@@ -2401,6 +2413,7 @@ def _add_correlation_section(figs, descriptions, state, ref, link_attrs,
     tt_max = max(max(tt_bpr_f, default=1), max(tt_mfd_f, default=1)) * 1.1
 
     # Combined correlation figure
+    ScatterType = go.Scattergl if len(mfd_flows) > 2000 else go.Scatter
     fig_corr = make_subplots(
         rows=1, cols=2,
         subplot_titles=[
@@ -2409,10 +2422,12 @@ def _add_correlation_section(figs, descriptions, state, ref, link_attrs,
         ],
     )
     # Left: flow scatter
-    fig_corr.add_trace(go.Scatter(
-        x=bpr_flows, y=mfd_flows, mode="markers",
+    fig_corr.add_trace(ScatterType(
+        x=[round(v, 1) for v in bpr_flows],
+        y=[round(v, 1) for v in mfd_flows],
+        mode="markers",
         marker=dict(size=6, color="#1565C0", opacity=0.7),
-        hovertext=link_labels, hoverinfo="text",
+        hovertemplate="BPR=%{x:.0f} MFD=%{y:.0f}<extra></extra>",
         showlegend=False,
     ), row=1, col=1)
     fig_corr.add_shape(
@@ -2421,10 +2436,12 @@ def _add_correlation_section(figs, descriptions, state, ref, link_attrs,
         row=1, col=1,
     )
     # Right: TT scatter
-    fig_corr.add_trace(go.Scatter(
-        x=tt_bpr_f, y=tt_mfd_f, mode="markers",
+    fig_corr.add_trace(ScatterType(
+        x=[round(v, 2) for v in tt_bpr_f],
+        y=[round(v, 2) for v in tt_mfd_f],
+        mode="markers",
         marker=dict(size=6, color="#D32F2F", opacity=0.7),
-        hovertext=tt_labels_f, hoverinfo="text",
+        hovertemplate="BPR=%{x:.2f} MFD=%{y:.2f}<extra></extra>",
         showlegend=False,
     ), row=1, col=2)
     if tt_bpr_f and tt_mfd_f:

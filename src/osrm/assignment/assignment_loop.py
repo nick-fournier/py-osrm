@@ -995,10 +995,10 @@ class AssignmentSolver:
         # Re-wrap after snapping
         adapter = TripStreamAdapter(snapped_trips, sort_by_departure=False)
 
-        # Auto-tune batch_size so each batch adds ~5 vehicles per link.
+        # Auto-tune batch_size so each batch adds ~10 vehicles per link.
         # Route a probe sample to measure avg edges per route, then:
         #   trips_per_veh_per_link = n_edges / avg_edges_per_route
-        #   batch_size = 5 × trips_per_veh_per_link
+        #   batch_size = 10 × trips_per_veh_per_link
         if batch_size is None:
             sample_n = min(5000, n_trips)
             sample = snapped_trips[:sample_n]
@@ -1027,7 +1027,7 @@ class AssignmentSolver:
                 n_edges_est = n_edges_probe
 
             trips_per_1vpl = n_edges_est / max(avg_edges_per_route, 1.0)
-            batch_size = max(100, int(5 * trips_per_1vpl))
+            batch_size = max(100, int(10 * trips_per_1vpl))
 
             logger.info(
                 "Auto-tuned batch_size=%d (~%d batches): "
