@@ -427,7 +427,8 @@ def generate_chicago_spillover_report(
         discharged = serve_rate * period_hr  # vehicles that leave
         queue_veh = np.maximum(queue_veh - discharged, 0.0)
 
-        # Metrics for this drain period
+        # Metrics for this drain period — use network-wide speed
+        # (cleared links at freeflow) so mean reflects recovery.
         queue_rate_remaining = queue_veh / period_hr
         oversat_mask = queue_rate_remaining > q_c
         per_lane = queue_rate_remaining / np.maximum(state.n_lanes, 1)
@@ -435,9 +436,10 @@ def generate_chicago_spillover_report(
             float(np.mean(per_lane[oversat_mask]))
             if np.any(oversat_mask) else 0.0
         )
-        active = state.flow_vph > 0
-        active_speeds = state.speed_kmh[active] if np.any(active) else state.speed_kmh
-        link_time_s = state.length_m * 3.6 / np.maximum(state.speed_kmh, 1.0)
+        net_speed = np.where(
+            state.flow_vph > 0, state.speed_kmh, state.freeflow_kmh,
+        )
+        link_time_s = state.length_m * 3.6 / np.maximum(net_speed, 1.0)
         tstt = float(np.sum(state.flow_vph * link_time_s))
 
         period_metrics.append({
@@ -446,7 +448,7 @@ def generate_chicago_spillover_report(
             "has_demand": False,
             "queue_veh_hr_lane": mean_q,
             "total_unserved_vph": float(np.sum(queue_rate_remaining)),
-            "mean_speed_kmh": float(np.mean(active_speeds)),
+            "mean_speed_kmh": float(np.mean(net_speed)),
             "n_oversaturated": int(np.sum(oversat_mask)),
             "tstt": tstt,
         })
