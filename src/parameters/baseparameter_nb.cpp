@@ -4,6 +4,7 @@
 #include "utility/param_utility.h"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -51,6 +52,9 @@ void init_BaseParameters(nb::module_& m) {
         .def_rw("generate_hints", &BaseParameters::generate_hints)
         .def_rw("skip_waypoints", &BaseParameters::skip_waypoints)
         .def_rw("snapping", &BaseParameters::snapping)
+        .def_rw("departure_period", &BaseParameters::departure_period)
+        .def_rw("period_duration", &BaseParameters::period_duration)
+        .def_rw("departure_time_offset", &BaseParameters::departure_time_offset)
         .def("IsValid", &BaseParameters::IsValid);
 
     nb::enum_<BaseParameters::SnappingType>(m, "SnappingType", "Snapping behavior when matching input coordinates to road network")
