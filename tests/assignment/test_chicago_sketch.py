@@ -267,17 +267,32 @@ def generate_chicago_stream_report(
 
 
 def _build_trips_multiperiod(meta: dict, n_periods: int = 4,
-                              period_duration_s: float = 900.0) -> list:
-    """Build trips with even demand across multiple periods.
+                              period_duration_s: float = 900.0,
+                              weights: list[float] | None = None) -> list:
+    """Build trips with demand distributed across multiple periods.
 
-    Each period gets the full OD matrix (same demand rate).  Trips in
+    Each period gets the full OD matrix scaled by its weight.  Trips in
     period *k* have ``departure_time_s = k * period_duration_s``.
+    If *weights* is None, demand is split evenly.
     """
     centroids = meta["zone_centroids"]
     od = meta["od_matrix"]
+    if weights is None:
+        weights = [1.0] * n_periods
+    assert len(weights) == n_periods
     trips = []
     for k in range(n_periods):
+        w = weights[k]
         dep = k * period_duration_s
+        if w <= 0:
+            # Sentinel trip so period transition fires in assign_stream
+            if centroids:
+                first = next(iter(centroids.values()))
+                trips.append(DemandTrip(
+                    origin=first, destination=first,
+                    volume=0.0, departure_time_s=dep,
+                ))
+            continue
         for i in range(od.shape[0]):
             for j in range(od.shape[1]):
                 if od[i, j] > 0 and i != j:
@@ -286,7 +301,7 @@ def _build_trips_multiperiod(meta: dict, n_periods: int = 4,
                         trips.append(DemandTrip(
                             origin=centroids[o_zone],
                             destination=centroids[d_zone],
-                            volume=od[i, j],
+                            volume=od[i, j] * w,
                             departure_time_s=dep,
                         ))
     return trips
@@ -299,9 +314,9 @@ def generate_chicago_spillover_report(
 ) -> Path:
     """Generate Chicago Sketch multi-period spillover validation report.
 
-    Runs 4 × 15-min demand periods, then continues with empty drain
-    periods (no new trips, only spillover) until the queue dissipates.
-    Plots end-of-period metrics with period number on X axis.
+    Runs demand periods with trapezoidal loading (0.125, 0.25, 0.25,
+    0.125) followed by unloaded periods (zero demand) where spillover
+    discharges through the normal assignment loop.
     """
     import numpy as np
     import plotly.graph_objects as go
@@ -318,14 +333,19 @@ def generate_chicago_spillover_report(
     base, meta = _prepare_chicago_network(tmp_path)
 
     n_demand_periods = 4
+    n_unloaded_periods = 8
     period_s = 900.0  # 15 min
-    max_drain_periods = 100  # safety cap; loop exits when queue < 1 veh
+    demand_weights = [1/6, 1/3, 1/3, 1/6]  # trapezoidal, sums to 1.0
+    demand_scale = 3.0  # scale base OD to produce meaningful congestion
+    n_total_periods = n_demand_periods + n_unloaded_periods
 
-    # Build demand trips: 4 periods of equal demand
+    # Build demand trips: trapezoidal demand + empty unloaded periods
+    all_weights = [w * demand_scale for w in demand_weights] + [0.0] * n_unloaded_periods
     spill_trips = _build_trips_multiperiod(
-        meta, n_periods=n_demand_periods, period_duration_s=period_s,
+        meta, n_periods=n_total_periods, period_duration_s=period_s,
+        weights=all_weights,
     )
-    per_period_demand = sum(t.volume for t in _build_trips(meta))
+    base_demand = sum(t.volume for t in _build_trips(meta))
 
     # Run with spillover
     spill_base = _copy_clean_osrm(base, tmp_path / "spillover_run")
@@ -342,34 +362,43 @@ def generate_chicago_spillover_report(
     )
 
     # Extract end-of-period metrics from batch log.
-    # Detect period boundaries: when total_unserved_vph drops between
-    # consecutive batches, that's a period reset (carryforward).
+    # Compute period boundaries from the trip list: group by period
+    # and count how many batches each period occupies.
     blog = result.log_as_dict()
     n_batches = len(blog["batch"])
-    unserved_series = blog["total_unserved_vph"]
+    batch_size_used = blog["n_trips"][0] if blog["n_trips"] else 1
 
-    # Detect period boundaries: when total_unserved_vph drops between
-    # consecutive batches, that's a period reset (carryforward).  During
-    # demand loading, unserved only grows — any drop means period reset.
+    # Count trips per period to compute batches per period.
+    import math
+    trips_per_period: list[int] = [0] * n_total_periods
+    for t in spill_trips:
+        p_idx = int(t.departure_time_s / period_s)
+        p_idx = min(p_idx, n_total_periods - 1)
+        trips_per_period[p_idx] += 1
+
+    batches_per_period = [
+        max(1, math.ceil(n / batch_size_used)) if n > 0 else 1
+        for n in trips_per_period
+    ]
+    # Build period end indices (cumulative sum - 1)
     period_end_indices = []
-    for i in range(1, n_batches):
-        if unserved_series[i] < unserved_series[i - 1] * 0.7:
-            period_end_indices.append(i - 1)
-    period_end_indices.append(n_batches - 1)  # final period
+    cum = 0
+    for bp in batches_per_period:
+        cum += bp
+        period_end_indices.append(min(cum - 1, n_batches - 1))
 
-    def _time_label(period_idx: int, drain: bool = False) -> str:
-        """Format period end-time as 'h:mm' or 'h:mm*' for drain."""
+    def _time_label(period_idx: int) -> str:
+        """Format period end-time as 'h:mm'."""
         total_min = int((period_idx + 1) * period_s / 60)
         h, m = divmod(total_min, 60)
-        suffix = "*" if drain else ""
-        return f"{h}:{m:02d}{suffix}"
+        return f"{h}:{m:02d}"
 
     period_metrics = []
     for p, end_idx in enumerate(period_end_indices):
         period_metrics.append({
             "period": p + 1,
             "label": _time_label(p),
-            "has_demand": True,
+            "has_demand": p < n_demand_periods,
             "queue_veh_hr_lane": blog["queue_vehicles"][end_idx],
             "total_unserved_vph": blog["total_unserved_vph"][end_idx],
             "mean_speed_kmh": blog["mean_speed_kmh"][end_idx],
@@ -377,81 +406,7 @@ def generate_chicago_spillover_report(
             "tstt": blog["tstt"][end_idx],
         })
 
-    # Drain phase: no new demand, queue discharges over time.
-    # Each period, links discharge at their throughput rate.
-    # queue_veh = unserved_rate × period_hr  (vehicles in queue)
-    # discharged = throughput × period_hr    (vehicles that leave)
-    # remaining  = max(0, queue_veh - discharged)
     state = result.network_state
-    unserved = result.unserved_vph.copy()
-
-    # Save peak state before mutating for MFD plot.
-    import copy
-    peak_state = copy.copy(state)
-    peak_state.flow_vph = state.flow_vph.copy()
-    peak_state.density_vpkm = state.density_vpkm.copy()
-    peak_state.speed_kmh = state.speed_kmh.copy()
-
-    from osrm.assignment.vdf import BiParabolicVDF
-    vdf = BiParabolicVDF()
-
-    period_hr = period_s / 3600.0
-    queue_veh = unserved * period_hr  # convert rate to vehicles
-
-    for drain_p in range(max_drain_periods):
-        total_queue = float(np.sum(queue_veh))
-        if total_queue < 1.0:
-            break
-
-        # Uncongested-branch drain: the queue is virtual (vehicles
-        # waiting at the entrance), so the link itself discharges at
-        # up to capacity.  flow_to_density clamps at q_c → k_c,
-        # keeping us on the uncongested branch for speed/throughput.
-        queue_rate = queue_veh / period_hr  # veh/hr
-        q_c = vdf.capacity_flow(
-            state.freeflow_kmh, state.jam_density,
-            kc_ratio=state.kc_ratio,
-        )
-        serve_rate = np.minimum(queue_rate, q_c)  # cap at capacity
-
-        state.flow_vph = serve_rate
-        state.density_vpkm = vdf.flow_to_density(
-            serve_rate, state.freeflow_kmh, state.jam_density,
-            kc_ratio=state.kc_ratio,
-        )
-        state.speed_kmh = vdf.density_to_speed(
-            state.density_vpkm, state.freeflow_kmh, state.jam_density,
-            kc_ratio=state.kc_ratio,
-        )
-
-        discharged = serve_rate * period_hr  # vehicles that leave
-        queue_veh = np.maximum(queue_veh - discharged, 0.0)
-
-        # Metrics for this drain period — use network-wide speed
-        # (cleared links at freeflow) so mean reflects recovery.
-        queue_rate_remaining = queue_veh / period_hr
-        oversat_mask = queue_rate_remaining > q_c
-        per_lane = queue_rate_remaining / np.maximum(state.n_lanes, 1)
-        mean_q = (
-            float(np.mean(per_lane[oversat_mask]))
-            if np.any(oversat_mask) else 0.0
-        )
-        net_speed = np.where(
-            state.flow_vph > 0, state.speed_kmh, state.freeflow_kmh,
-        )
-        link_time_s = state.length_m * 3.6 / np.maximum(net_speed, 1.0)
-        tstt = float(np.sum(state.flow_vph * link_time_s))
-
-        period_metrics.append({
-            "period": n_demand_periods + drain_p + 1,
-            "label": _time_label(n_demand_periods + drain_p, drain=True),
-            "has_demand": False,
-            "queue_veh_hr_lane": mean_q,
-            "total_unserved_vph": float(np.sum(queue_rate_remaining)),
-            "mean_speed_kmh": float(np.mean(net_speed)),
-            "n_oversaturated": int(np.sum(oversat_mask)),
-            "tstt": tstt,
-        })
 
     # ── Build report ──────────────────────────────────────────────
     node_coords = meta["nodes"]
@@ -459,17 +414,16 @@ def generate_chicago_spillover_report(
     figs: list = []
     descriptions: list[str] = []
 
-    # §1 — Congestion map: peak period final state
+    # §1 — Congestion map: final state
     _add_congestion_map_section(
         figs, descriptions,
-        f"Chicago Sketch — End of Demand (Period {n_demand_periods})",
+        f"Chicago Sketch — End of Period {n_demand_periods}",
         node_coords, result.network_state, link_attrs, meta, 1.0,
     )
 
-    # §2 — Period-level metrics (the key chart)
+    # §2 — Period-level metrics
     x_labels = [m["label"] for m in period_metrics]
-    demand_mask = [m["has_demand"] for m in period_metrics]
-    n_demand = sum(demand_mask)
+    n_demand = sum(1 for m in period_metrics if m["has_demand"])
 
     fig = make_subplots(rows=2, cols=2, subplot_titles=[
         "Queue (veh/hr/lane)", "Mean Speed (km/h)",
@@ -495,16 +449,16 @@ def generate_chicago_spillover_report(
             showlegend=False,
         ), row=row, col=col)
 
-        fig.update_xaxes(title_text="Time (* = drain)", row=row, col=col)
+        fig.update_xaxes(title_text="Time", row=row, col=col)
         fig.update_yaxes(title_text=y_titles[idx], row=row, col=col)
 
-        # Shade demand vs drain regions
-        fig.add_vrect(
-            x0=-0.5, x1=n_demand - 0.5,
-            fillcolor="rgba(200,200,255,0.15)", line_width=0,
-            row=row, col=col,
-        )
-        if len(period_metrics) > n_demand:
+        # Shade demand vs unloaded regions
+        if n_demand < len(period_metrics):
+            fig.add_vrect(
+                x0=-0.5, x1=n_demand - 0.5,
+                fillcolor="rgba(200,200,255,0.15)", line_width=0,
+                row=row, col=col,
+            )
             fig.add_vrect(
                 x0=n_demand - 0.5, x1=len(period_metrics) - 0.5,
                 fillcolor="rgba(200,255,200,0.15)", line_width=0,
@@ -512,47 +466,43 @@ def generate_chicago_spillover_report(
             )
 
     fig.update_layout(
-        title="Per-Period Metrics: Demand → Drain",
+        title="Per-Period Metrics",
         height=650, template="plotly_white",
     )
     figs.append(fig)
 
-    n_drain = len(period_metrics) - n_demand
-    final_unserved = period_metrics[-1]["total_unserved_vph"]
-    peak_unserved_rate = period_metrics[n_demand - 1]["total_unserved_vph"]
-    drain_pct = (1.0 - final_unserved / peak_unserved_rate) * 100 if peak_unserved_rate > 0 else 100
-    demand_min = int(n_demand_periods * period_s / 60)
-    drain_min = int(n_drain * period_s / 60)
+    weight_str = ", ".join(f"{w:.2f}" for w in demand_weights)
+    final = period_metrics[-1]
+    n_unloaded = len(period_metrics) - n_demand
     descriptions.append(
         "<h2>Per-Period Progression</h2>"
-        f"<p>{n_demand_periods} demand periods ({demand_min} min, "
-        f"{int(period_s/60)} min each, {per_period_demand:,.0f} vph/period), "
-        f"followed by {n_drain} drain periods ({drain_min} min, marked with *). "
-        f"Blue shading = demand active, green shading = drain only.</p>"
-        f"<p>Peak unserved: <b>{peak_unserved_rate:,.0f} veh/hr</b> → "
-        f"after drain: <b>{final_unserved:,.0f} veh/hr</b> "
-        f"({drain_pct:.1f}% reduction)</p>"
+        f"<p>{n_demand_periods} demand periods ({int(period_s/60)} min each, "
+        f"trapezoidal [{weight_str}] × {demand_scale:.0f}× base demand) "
+        f"+ {n_unloaded} unloaded periods. "
+        f"Unserved demand carries forward as starting flow in the next period. "
+        f"Blue = demand, green = unloaded.</p>"
+        f"<p>Final unserved: <b>{final['total_unserved_vph']:,.0f} veh/hr</b></p>"
     )
 
-    # §3 — MFD at peak (use saved peak state, not drain-mutated state)
-    _add_mfd_section(figs, descriptions, peak_state, 1.0)
+    # §3 — MFD at final state
+    _add_mfd_section(figs, descriptions, state, 1.0)
 
-    # §4 — Summary table (no dummy figure)
-    peak = period_metrics[n_demand - 1]
-    final = period_metrics[-1]
+    # §4 — Summary table
+    total_demand = sum(w * demand_scale * base_demand for w in demand_weights)
+    peak_idx = max(range(n_demand), key=lambda i: period_metrics[i]["total_unserved_vph"])
+    peak = period_metrics[peak_idx]
     descriptions.append(
         "<h2>Summary</h2>"
         "<table style='border-collapse:collapse; margin:1em 0;'>"
         "<tr style='border-bottom:2px solid #333;'>"
         "<th style='padding:6px 16px; text-align:left;'>Metric</th>"
         "<th style='padding:6px 16px; text-align:right;'>Peak "
-        f"(P{n_demand_periods})</th>"
-        "<th style='padding:6px 16px; text-align:right;'>Post-Drain "
+        f"({peak['label']})</th>"
+        "<th style='padding:6px 16px; text-align:right;'>Final "
         f"({final['label']})</th></tr>"
         f"<tr><td style='padding:4px 16px;'>Total demand loaded</td>"
         f"<td style='padding:4px 16px; text-align:right;' colspan=2>"
-        f"{per_period_demand * n_demand_periods:,.0f} vph "
-        f"({n_demand_periods} × {per_period_demand:,.0f})</td></tr>"
+        f"{total_demand:,.0f} vph (weights [{weight_str}])</td></tr>"
         f"<tr><td style='padding:4px 16px;'>Queue (veh/hr/lane)</td>"
         f"<td style='padding:4px 16px; text-align:right;'>"
         f"{peak['queue_veh_hr_lane']:.0f}</td>"
@@ -584,9 +534,9 @@ def generate_chicago_spillover_report(
         title="Chicago Sketch — Multi-Period Spillover Validation",
         intro=(
             f"<p>Spillover validation on <b>Chicago Sketch</b>: "
-            f"{n_demand_periods} × 15-min demand periods "
-            f"({per_period_demand:,.0f} vph each), then drain periods "
-            f"until queue dissipates. Unserved demand from each period "
+            f"{n_demand_periods} × {int(period_s/60)}-min demand periods "
+            f"(trapezoidal [{weight_str}], {demand_scale:.0f}× base) "
+            f"+ {n_unloaded_periods} unloaded periods. Unserved demand "
             f"carries forward as starting flow in the next.</p>"
         ),
         figures=figs,

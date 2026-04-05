@@ -1982,11 +1982,11 @@ def _add_congestion_map_section(figs, descriptions, name, nodes, state,
         fig.add_trace(go.Scatter(
             x=zx, y=zy, mode="markers",
             marker=dict(
-                size=8, color=zvol, opacity=0.8,
+                size=4, color=zvol, opacity=0.5,
                 colorscale="Viridis",
                 colorbar=dict(title="OD Volume (vph)"),
                 symbol="circle",
-                line=dict(width=1, color="white"),
+                line=dict(width=0.5, color="white"),
             ),
             hovertext=zhover, hoverinfo="text",
             name="Zone centroids",
