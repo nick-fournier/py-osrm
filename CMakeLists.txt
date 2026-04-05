@@ -83,8 +83,8 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(FetchContent)
 FetchContent_Declare(
   libosrm
-  GIT_REPOSITORY https://github.com/Project-OSRM/osrm-backend
-  GIT_TAG v6.0.0
+  GIT_REPOSITORY https://github.com/nick-fournier/osrm-backend
+  GIT_TAG feature/multi-period
 )
 
 

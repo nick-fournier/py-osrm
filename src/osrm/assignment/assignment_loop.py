@@ -410,11 +410,20 @@ class AssignmentSolver:
         state: NetworkState,
         *,
         return_routes: bool = False,
+        departure_period: int = -1,
+        period_duration: float = 0.0,
     ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
         """Route all trips, accumulate link volume.
 
         Uses C++ accumulation when available — route results never cross
         the C++/Python boundary, eliminating the Python per-segment loop.
+
+        Parameters
+        ----------
+        departure_period : int
+            Period index for this batch (-1 = disabled).
+        period_duration : float
+            Duration of each period in seconds (0 = disabled).
 
         Returns
         -------
@@ -427,7 +436,10 @@ class AssignmentSolver:
         """
         try:
             return self._route_and_accumulate_cpp(
-                engine, trips, state, return_routes=return_routes,
+                engine, trips, state,
+                return_routes=return_routes,
+                departure_period=departure_period,
+                period_duration=period_duration,
             )
         except Exception:
             logger.debug("C++ accumulation unavailable, using Python fallback")
@@ -441,6 +453,8 @@ class AssignmentSolver:
         state: NetworkState,
         *,
         return_routes: bool = False,
+        departure_period: int = -1,
+        period_duration: float = 0.0,
     ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
         """C++ fast path: route + accumulate in one native call."""
         from osrm.osrm_ext import batch_route_accumulate
@@ -455,6 +469,15 @@ class AssignmentSolver:
             coords[i, 3] = t.destination[1]
             volumes[i] = t.volume
 
+        # Build per-trip departure offsets (seconds into the period)
+        departure_offsets = np.empty(0, dtype=np.float64)
+        if departure_period >= 0 and period_duration > 0:
+            period_start = departure_period * period_duration
+            departure_offsets = np.array(
+                [max(t.departure_time_s - period_start, 0.0) for t in trips],
+                dtype=np.float64,
+            )
+
         default_jam = (self.config.default_jam_density_per_lane
                        * self.config.default_n_lanes)
 
@@ -465,6 +488,9 @@ class AssignmentSolver:
             state.edge_ids.astype(np.uint64),
             self.config.n_threads,
             return_routes,
+            departure_period=departure_period,
+            period_duration=period_duration,
+            departure_offsets=departure_offsets,
         )
 
         # Register any newly discovered edges
@@ -1139,6 +1165,10 @@ class AssignmentSolver:
             aon_volume, aon_tstt, batch_polylines = self._route_and_accumulate(
                 engine, batch.trips, state,
                 return_routes=return_routes,
+                departure_period=(batch.departure_bin
+                                  if batch.departure_bin is not None else -1),
+                period_duration=(period_duration_s
+                                 if period_duration_s is not None else 0.0),
             )
             route_time = time.monotonic() - t_route
 

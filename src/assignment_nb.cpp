@@ -74,7 +74,10 @@ void init_Assignment(nb::module_& m) {
            nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> volumes,
            nb::ndarray<uint64_t, nb::ndim<2>, nb::c_contig, nb::device::cpu> edge_ids,
            int    n_threads,
-           bool   return_routes)
+           bool   return_routes,
+           int    departure_period,
+           double period_duration,
+           nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> departure_offsets)
     {
 
         // Optionally cap TBB parallelism
@@ -89,6 +92,8 @@ void init_Assignment(nb::module_& m) {
         const size_t n_edges0 = edge_ids.shape(0);
         const double* c_ptr   = coords.data();
         const double* vol_ptr = volumes.data();
+        const bool has_period = (departure_period >= 0 && period_duration > 0);
+        const double* offset_ptr = has_period ? departure_offsets.data() : nullptr;
 
         // ── 1. build RouteParameters in C++ ──────────────────────
         std::vector<RouteParameters> params(n_trips);
@@ -114,6 +119,14 @@ void init_Assignment(nb::module_& m) {
                     Coordinate{FloatLongitude{c_ptr[i*4]}, FloatLatitude{c_ptr[i*4+1]}});
                 rp.coordinates.push_back(
                     Coordinate{FloatLongitude{c_ptr[i*4+2]}, FloatLatitude{c_ptr[i*4+3]}});
+
+                // Multi-period: set departure context per trip
+                if (has_period) {
+                    rp.departure_period = static_cast<std::size_t>(departure_period);
+                    rp.period_duration = period_duration;
+                    if (offset_ptr)
+                        rp.departure_time_offset = offset_ptr[i];
+                }
             }
         }
 
@@ -241,12 +254,18 @@ void init_Assignment(nb::module_& m) {
     nb::arg("edge_ids"),
     nb::arg("n_threads") = 0,
     nb::arg("return_routes") = false,
+    nb::arg("departure_period") = -1,
+    nb::arg("period_duration") = 0.0,
+    nb::arg("departure_offsets") = nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu>(),
     "Route OD pairs and accumulate link volume in C++.\n\n"
     "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
     "builds RouteParameters internally — no Python param construction.\n"
     "Uses JSON route results (correct uint64 OSM node IDs at any scale).\n\n"
     "n_threads: 0 = use all cores, >0 = cap TBB parallelism.\n"
-    "return_routes: if True, also returns per-trip encoded polyline6 strings.\n\n"
+    "return_routes: if True, also returns per-trip encoded polyline6 strings.\n"
+    "departure_period: period index for multi-period routing (-1 = disabled).\n"
+    "period_duration: seconds per period (e.g. 900 for 15-min).\n"
+    "departure_offsets: per-trip seconds into departure period.\n\n"
     "Returns (volume, tstt, new_edges, route_geometries).\n"
     "route_geometries is a list of polyline6 strings when return_routes=True,\n"
     "otherwise None."

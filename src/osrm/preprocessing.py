@@ -9,7 +9,7 @@ This module provides Python bindings for OSRM's data preprocessing pipeline:
 """
 
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, List, Tuple
 
 from . import osrm_ext
 
@@ -347,3 +347,44 @@ def customize(
     else:
         osrm_ext.customize(config, verbosity)
         return {"success": True}
+
+
+def customize_multi_period(
+    input_path: str,
+    period_speed_files: List[Tuple[int, str]],
+    threads: Optional[int] = None,
+    verbosity: str = "INFO",
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Customize with multi-period cell metrics.
+
+    Loads partition/cells once, customizes each period with its speed CSV,
+    writes all period metrics to one .osrm.cell_metrics file.
+
+    Args:
+        input_path: Base path to .osrm files
+        period_speed_files: List of (period_index, speed_csv_path) tuples.
+            Periods not in the list are sparse (fall back to period 0 at runtime).
+        threads: Number of threads. None = all cores.
+        verbosity: Log level
+        **kwargs: Additional CustomizationConfig parameters
+
+    Returns:
+        Dict with success key
+    """
+    config = osrm_ext.CustomizationConfig()
+    config.UseDefaultOutputNames(Path(input_path))
+
+    if threads is not None:
+        config.requested_num_threads = threads
+    else:
+        import os
+        config.requested_num_threads = os.cpu_count() or 1
+
+    for key, value in kwargs.items():
+        if hasattr(config, key):
+            setattr(config, key, value)
+
+    osrm_ext.customize_multi_period(config, period_speed_files, verbosity)
+    return {"success": True}

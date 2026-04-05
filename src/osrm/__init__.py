@@ -76,6 +76,7 @@ from .preprocessing import (
     contract,
     partition,
     customize,
+    customize_multi_period,
 )
 
 # Bulk processing functions
@@ -422,6 +423,7 @@ __all__ = [
     "contract",
     "partition",
     "customize",
+    "customize_multi_period",
     
     # Preprocessing config classes
     "ExtractorConfig",

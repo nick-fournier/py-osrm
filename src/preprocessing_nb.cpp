@@ -13,6 +13,8 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
 #include <nanobind/stl/function.h>
+#include <nanobind/stl/vector.h>
+#include <nanobind/stl/pair.h>
 
 #include <sstream>
 #include <chrono>
@@ -360,6 +362,18 @@ void customize_simple(
     osrm::customize(config);
 }
 
+// Multi-period customize: takes list of (period_index, speed_csv_path) pairs
+void customize_multi_period(
+    const osrm::customizer::CustomizationConfig& config,
+    const std::vector<std::pair<std::size_t, std::string>>& period_speed_files,
+    const std::string& verbosity
+) {
+    set_log_level(verbosity);
+
+    nb::gil_scoped_release release;
+    osrm::customize(config, period_speed_files);
+}
+
 void init_Preprocessing(nb::module_& m) {
     // Config classes
     init_ExtractorConfig(m);
@@ -387,6 +401,13 @@ void init_Preprocessing(nb::module_& m) {
           nb::arg("config"),
           nb::arg("verbosity") = "INFO",
           "Customize partitioned graph for MLD (output to stdout/stderr)");
+
+    m.def("customize_multi_period", &customize_multi_period,
+          nb::arg("config"),
+          nb::arg("period_speed_files"),
+          nb::arg("verbosity") = "INFO",
+          "Customize with multi-period metrics. period_speed_files is a list of "
+          "(period_index, speed_csv_path) tuples.");
     
     // Preprocessing functions with output capture
     m.def("extract_with_capture", &extract_with_capture,
