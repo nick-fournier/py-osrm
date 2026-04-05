@@ -20,6 +20,7 @@ To disable automatic datastore:
     pytest tests/ --no-cov           # (no special flag needed, it's automatic)
 """
 import subprocess
+import sys
 import time
 import pytest
 import osrm
@@ -51,7 +52,7 @@ def osrm_datastore():
     print(f"\n→ Starting osrm-datastore with {data_path}")
     try:
         process = subprocess.Popen(
-            ["python3", "-m", "osrm", "datastore", str(data_path)],
+            [sys.executable, "-m", "osrm", "datastore", str(data_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True
