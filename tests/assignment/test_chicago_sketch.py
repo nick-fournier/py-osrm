@@ -347,7 +347,25 @@ def generate_chicago_spillover_report(
     )
     base_demand = sum(t.volume for t in _build_trips(meta))
 
-    # Run with spillover
+    # Run demand-only for peak state (congestion map + MFD)
+    demand_only_trips = _build_trips_multiperiod(
+        meta, n_periods=n_demand_periods, period_duration_s=period_s,
+        weights=[w * demand_scale for w in demand_weights],
+    )
+    peak_base = _copy_clean_osrm(base, tmp_path / "peak_run")
+    peak_config = AssignmentConfig(
+        smoothing=DensitySmoothingConfig(method="none"),
+        speed_csv_dir=str(Path(peak_base).parent),
+    )
+    peak_solver = AssignmentSolver(peak_base, peak_config)
+    peak_result = peak_solver.assign_stream(
+        demand_only_trips, batch_size=batch_size,
+        period_duration_s=period_s,
+        state_patch=lambda s: patch_lanes(s, meta),
+    )
+    peak_state = peak_result.network_state
+
+    # Run full (demand + unloaded) for period metrics
     spill_base = _copy_clean_osrm(base, tmp_path / "spillover_run")
     config = AssignmentConfig(
         smoothing=DensitySmoothingConfig(method="none"),
@@ -414,11 +432,11 @@ def generate_chicago_spillover_report(
     figs: list = []
     descriptions: list[str] = []
 
-    # §1 — Congestion map: final state
+    # §1 — Congestion map: peak demand state
     _add_congestion_map_section(
         figs, descriptions,
-        f"Chicago Sketch — End of Period {n_demand_periods}",
-        node_coords, result.network_state, link_attrs, meta, 1.0,
+        f"Chicago Sketch — Peak Demand (Period {n_demand_periods})",
+        node_coords, peak_state, link_attrs, meta, 1.0,
     )
 
     # §2 — Period-level metrics
@@ -484,8 +502,8 @@ def generate_chicago_spillover_report(
         f"<p>Final unserved: <b>{final['total_unserved_vph']:,.0f} veh/hr</b></p>"
     )
 
-    # §3 — MFD at final state
-    _add_mfd_section(figs, descriptions, state, 1.0)
+    # §3 — MFD at peak demand state
+    _add_mfd_section(figs, descriptions, peak_state, 1.0)
 
     # §4 — Summary table
     total_demand = sum(w * demand_scale * base_demand for w in demand_weights)
