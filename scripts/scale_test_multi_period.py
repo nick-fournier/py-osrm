@@ -307,7 +307,7 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
     logger.info("  TT/FFTT range: [%.2f, %.2f]",
                 tt_ratio_by_period.min(), tt_ratio_by_period.max())
 
-    # ── spotlight periods for throughput + spillover ─────────────────
+    # ── spotlight periods for throughput benchmarks ────────────────────
     test_periods = [
         ("off-peak (3am)", 12),
         ("AM peak (8am)", 32),
@@ -315,19 +315,17 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
         ("PM peak (5pm)", 68),
     ]
 
-    spillover_data = {}  # departure_label → per-period volume totals
-
     for label, dep_period in test_periods:
         offsets = rng.uniform(0, period_duration_s, size=valid).astype(np.float64)
 
         t0 = time.monotonic()
-        vol2d, tstt, new_edges, _, durations = batch_route_accumulate(
+        _, tstt, new_edges, _, durations = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=0, return_routes=False,
             departure_period=dep_period,
             period_duration=period_duration_s,
             departure_offsets=offsets,
-            n_periods=N_PERIODS,
+            n_periods=0,
         )
         elapsed = time.monotonic() - t0
 
@@ -344,19 +342,60 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
             "mean_duration_s": mean_dur,
         }
 
-        # Per-period total volume for spillover visualization
-        v2d = np.asarray(vol2d)
-        spillover_data[label] = {
-            "dep_period": dep_period,
-            "period_volumes": np.sum(v2d, axis=1),  # shape (N_PERIODS,)
-        }
-
         logger.info(
             "  %s (p=%d): %d/%d routed in %.2fs (%.0f routes/s), "
-            "mean_dur=%.1fs, spill_periods=%d",
+            "mean_dur=%.1fs",
             label, dep_period, routed, valid, elapsed, throughput, mean_dur,
-            np.sum(np.any(v2d > 0, axis=1)),
         )
+
+    # ── realistic 24h loading with spillover ────────────────────────
+    # Distribute trips across the day following a demand profile
+    # (AM/PM peaks matching the congestion shape)
+    logger.info("  Routing 24h demand profile with 2D attribution...")
+    hours_profile = np.arange(N_PERIODS) * 0.25
+    demand_weight = (
+        0.50 * np.exp(-0.5 * ((hours_profile - 8.0) / 1.2) ** 2) +
+        0.40 * np.exp(-0.5 * ((hours_profile - 17.5) / 1.5) ** 2) +
+        0.10  # baseline
+    )
+    demand_weight /= demand_weight.sum()
+
+    # Assign each trip a departure period from the demand profile
+    trip_periods = rng.choice(N_PERIODS, size=valid, p=demand_weight)
+    dep_offsets_24h = (
+        trip_periods * period_duration_s +
+        rng.uniform(0, period_duration_s, size=valid)
+    ).astype(np.float64)
+
+    # Count departures per period
+    departures_per_period = np.bincount(trip_periods, minlength=N_PERIODS).astype(float)
+
+    t0 = time.monotonic()
+    vol2d_24h, _, _, _, durs_24h = batch_route_accumulate(
+        engine._engine, coords, volumes, edge_ids,
+        n_threads=0, return_routes=False,
+        departure_period=0,
+        period_duration=period_duration_s,
+        departure_offsets=dep_offsets_24h,
+        n_periods=N_PERIODS,
+    )
+    elapsed_24h = time.monotonic() - t0
+
+    v2d = np.asarray(vol2d_24h)
+    volume_per_period = np.sum(v2d, axis=1)  # total link-volume per period
+
+    spillover_data = {
+        "departures_per_period": departures_per_period,
+        "volume_per_period": volume_per_period,
+    }
+
+    durs_24h = np.asarray(durs_24h)
+    routed_24h = np.sum(durs_24h > 0)
+    spill_periods = np.sum(volume_per_period > 0)
+    logger.info(
+        "  24h loading: %d/%d routed in %.2fs, %d/%d periods have flow",
+        routed_24h, valid, elapsed_24h, spill_periods, N_PERIODS,
+    )
 
     return results, tt_ratio_by_period, spillover_data
 
@@ -499,73 +538,69 @@ def generate_report(
         "duration varies with congestion level.</p>"
     )
 
-    # ── 5. Cross-period spillover stacked bar ─────────────────────
+    # ── 5. Actual 24h network loading with spillover ────────────────
+    departures = spillover_data["departures_per_period"]
+    vol_per_p = spillover_data["volume_per_period"]
+
+    # Normalize departures to same scale as volume for visual comparison
+    # Scale departures so its peak matches volume peak (makes shape comparison easy)
+    dep_scale = vol_per_p.max() / max(departures.max(), 1) if departures.max() > 0 else 1
+    dep_scaled = departures * dep_scale
+
     fig_spill = go.Figure()
-    colors = ["#1565C0", "#43A047", "#FF8F00", "#E65100"]
-    for idx, (label, sd) in enumerate(spillover_data.items()):
-        pvol = sd["period_volumes"]
-        dep_p = sd["dep_period"]
-        # Show periods around the departure with nonzero volume
-        nonzero = np.where(pvol > 0)[0]
-        if len(nonzero) == 0:
-            continue
-        p_lo, p_hi = max(0, nonzero[0]), min(N_PERIODS - 1, nonzero[-1])
-        # Include 1 period padding each side for context
-        p_lo = max(0, p_lo - 1)
-        p_hi = min(N_PERIODS - 1, p_hi + 1)
-        ps = np.arange(p_lo, p_hi + 1)
-        ph = ps * 0.25  # convert to hours
 
-        # Split into: departure period volume vs spillover volume
-        dep_vol = np.where(ps == dep_p, pvol[ps], 0.0)
-        spill_vol = np.where(ps != dep_p, pvol[ps], 0.0)
+    # Actual volume per period (from 2D attribution)
+    fig_spill.add_trace(go.Bar(
+        name="Network volume (actual)",
+        x=hours.tolist(),
+        y=vol_per_p.tolist(),
+        marker_color="#1565C0",
+        opacity=0.7,
+        hovertemplate="Hour %{x:.1f}: vol=%{y:,.0f}<extra>actual</extra>",
+    ))
 
-        fig_spill.add_trace(go.Bar(
-            name=f"{label} — departure",
-            x=ph.tolist(), y=dep_vol.tolist(),
-            marker_color=colors[idx % len(colors)],
-            opacity=0.9,
-            legendgroup=label,
-            hovertemplate="p=%{x:.1f}h vol=%{y:.0f}<extra>departure</extra>",
-        ))
-        fig_spill.add_trace(go.Bar(
-            name=f"{label} — spillover",
-            x=ph.tolist(), y=spill_vol.tolist(),
-            marker_color=colors[idx % len(colors)],
-            opacity=0.4,
-            marker_line=dict(width=1, color=colors[idx % len(colors)]),
-            legendgroup=label,
-            hovertemplate="p=%{x:.1f}h vol=%{y:.0f}<extra>spillover</extra>",
-        ))
+    # Departures overlay (scaled to same peak)
+    fig_spill.add_trace(go.Scatter(
+        name="Trip departures (scaled)",
+        x=hours.tolist(),
+        y=dep_scaled.tolist(),
+        mode="lines",
+        line=dict(color="#E65100", width=2.5, dash="dash"),
+        hovertemplate="Hour %{x:.1f}: departures=%{customdata}<extra>demand</extra>",
+        customdata=departures.astype(int).tolist(),
+    ))
 
     fig_spill.update_layout(
-        template="plotly_white", height=450,
-        barmode="stack",
+        template="plotly_white", height=400,
         xaxis_title="Hour of day",
         yaxis_title="Total link-volume (veh·links)",
-        xaxis=dict(dtick=1, range=[0, 24]),
+        xaxis=dict(dtick=2, range=[0, 24]),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     figs.append(fig_spill)
 
-    # Compute spillover fractions for description
-    spill_fracs = {}
-    for label, sd in spillover_data.items():
-        pvol = sd["period_volumes"]
-        dep_p = sd["dep_period"]
-        total = pvol.sum()
-        if total > 0:
-            spill_fracs[label] = 1.0 - pvol[dep_p] / total
-        else:
-            spill_fracs[label] = 0.0
-    spill_desc = ", ".join(f"{k}: {v:.0%}" for k, v in spill_fracs.items())
+    # Quantify spillover: periods where volume > 0 but departures == 0
+    pure_spill = np.sum((vol_per_p > 0) & (departures == 0))
+    # Volume-weighted lag: how much later volume appears vs departures
+    vol_total = vol_per_p.sum()
+    dep_total = departures.sum()
+    if vol_total > 0 and dep_total > 0:
+        vol_centroid = np.average(np.arange(N_PERIODS), weights=vol_per_p)
+        dep_centroid = np.average(np.arange(N_PERIODS), weights=departures)
+        lag_min = (vol_centroid - dep_centroid) * (PERIOD_DURATION_S / 60)
+    else:
+        lag_min = 0
     descriptions.append(
-        "<h2>Cross-Period Flow Spillover</h2>"
-        "<p>When 20k trips depart in a single period, their routes may "
-        "traverse links in subsequent periods (spillover). Solid bars show "
-        "volume attributed to the departure period; translucent bars show "
-        "volume spilling into neighboring periods. "
-        f"Spillover fractions: {spill_desc}.</p>"
+        "<h2>Network Loading vs. Trip Departures</h2>"
+        "<p>Blue bars show actual link-volume per period from routing 20k "
+        "trips distributed across 24h with a realistic demand profile "
+        "(AM/PM peaks). The dashed orange line shows when trips depart "
+        "(scaled to the same peak). The gap between the two reveals "
+        "<b>spillover</b>: volume shifts rightward because trips that "
+        "depart in one period are still traveling in the next.</p>"
+        f"<p>Volume centroid lags departures by <b>{lag_min:.1f} min</b>. "
+        f"<b>{pure_spill}</b> periods have volume but zero departures "
+        f"(pure spillover).</p>"
     )
 
     # ── 6. Summary table ──────────────────────────────────────────
