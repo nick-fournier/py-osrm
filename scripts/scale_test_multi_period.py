@@ -208,7 +208,8 @@ def run_assignment(
     # Copy clean OSRM files so assign_stream can re-customize freely
     src = Path(base).parent
     for f in src.iterdir():
-        shutil.copy2(f, run_dir / f.name)
+        if f.is_file():
+            shutil.copy2(f, run_dir / f.name)
     run_base = str(run_dir / Path(base).name)
 
     config = AssignmentConfig(
