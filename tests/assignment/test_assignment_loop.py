@@ -256,3 +256,134 @@ class TestODMatrixAdapter:
         assert adapter.total_demand == pytest.approx(1000.0)
         # Diagonal should be zero (no self-trips)
         assert np.all(np.diag(adapter.matrix) == 0)
+
+
+class TestCrossPeriodFlowAttribution:
+    """Verify 2D period-attributed volume from batch_route_accumulate."""
+
+    def test_volume_conservation(self):
+        """2D per-period volume must sum to the same total as 1D."""
+        from osrm.osrm_ext import batch_route_accumulate
+
+        base = "tests/data/mld/monaco.osrm"
+        engine = osrm.OSRM(
+            storage_config=base, algorithm="MLD", use_shared_memory=False,
+        )
+
+        coords = np.array([
+            [7.4131, 43.7278, 7.4272, 43.7395],
+            [7.4200, 43.7310, 7.4230, 43.7340],
+            [7.4131, 43.7278, 7.4272, 43.7395],
+        ], dtype=np.float64)
+        volumes = np.array([10.0, 5.0, 8.0], dtype=np.float64)
+        edge_ids = np.zeros((0, 2), dtype=np.uint64)
+        empty_offsets = np.empty(0, dtype=np.float64)
+
+        # 1D baseline
+        vol1d, _, _, _ = batch_route_accumulate(
+            engine._engine, coords, volumes, edge_ids,
+            n_threads=1, return_routes=False,
+            departure_period=-1, period_duration=0.0,
+            departure_offsets=empty_offsets, n_periods=0,
+        )
+        total_1d = float(np.sum(np.asarray(vol1d)))
+
+        # 2D with 900s periods
+        offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        vol2d, _, _, _ = batch_route_accumulate(
+            engine._engine, coords, volumes, edge_ids,
+            n_threads=1, return_routes=False,
+            departure_period=0, period_duration=900.0,
+            departure_offsets=offsets, n_periods=4,
+        )
+        v2d = np.asarray(vol2d)
+        total_2d = float(np.sum(v2d))
+
+        assert v2d.shape[0] == 4
+        assert total_2d == pytest.approx(total_1d, rel=1e-9)
+
+    def test_late_departure_spills_to_next_period(self):
+        """A trip departing late in a period should spill flow into the next."""
+        from osrm.osrm_ext import batch_route_accumulate
+
+        base = "tests/data/mld/monaco.osrm"
+        engine = osrm.OSRM(
+            storage_config=base, algorithm="MLD", use_shared_memory=False,
+        )
+
+        # Single long-ish route across Monaco
+        coords = np.array([
+            [7.4131, 43.7278, 7.4272, 43.7395],
+        ], dtype=np.float64)
+        volumes = np.array([1.0], dtype=np.float64)
+        edge_ids = np.zeros((0, 2), dtype=np.uint64)
+
+        # Depart 800s into a 900s period — 100s left before period boundary
+        offsets = np.array([800.0], dtype=np.float64)
+        vol2d, _, _, _ = batch_route_accumulate(
+            engine._engine, coords, volumes, edge_ids,
+            n_threads=1, return_routes=False,
+            departure_period=0, period_duration=900.0,
+            departure_offsets=offsets, n_periods=4,
+        )
+        v2d = np.asarray(vol2d)
+
+        p0_flow = float(np.sum(v2d[0]))
+        p1_flow = float(np.sum(v2d[1]))
+
+        # Both periods should have some flow (trip straddles boundary)
+        assert p0_flow > 0, "Period 0 should have flow (early segments)"
+        assert p1_flow > 0, "Period 1 should have flow (spill from late departure)"
+        # Total should equal trip volume × number of segments
+        assert float(np.sum(v2d)) == pytest.approx(p0_flow + p1_flow)
+
+    def test_2d_shape_matches_n_periods(self):
+        """Returned array should have shape (n_periods, n_edges)."""
+        from osrm.osrm_ext import batch_route_accumulate
+
+        base = "tests/data/mld/monaco.osrm"
+        engine = osrm.OSRM(
+            storage_config=base, algorithm="MLD", use_shared_memory=False,
+        )
+
+        coords = np.array([
+            [7.4200, 43.7310, 7.4230, 43.7340],
+        ], dtype=np.float64)
+        volumes = np.array([1.0], dtype=np.float64)
+        edge_ids = np.zeros((0, 2), dtype=np.uint64)
+        offsets = np.array([0.0], dtype=np.float64)
+
+        for n_per in [2, 8, 96]:
+            vol, _, _, _ = batch_route_accumulate(
+                engine._engine, coords, volumes, edge_ids,
+                n_threads=1, return_routes=False,
+                departure_period=0, period_duration=900.0,
+                departure_offsets=offsets, n_periods=n_per,
+            )
+            v = np.asarray(vol)
+            assert v.ndim == 2
+            assert v.shape[0] == n_per
+
+    def test_n_periods_zero_returns_1d(self):
+        """When n_periods=0, should return 1D array (legacy behavior)."""
+        from osrm.osrm_ext import batch_route_accumulate
+
+        base = "tests/data/mld/monaco.osrm"
+        engine = osrm.OSRM(
+            storage_config=base, algorithm="MLD", use_shared_memory=False,
+        )
+
+        coords = np.array([
+            [7.4200, 43.7310, 7.4230, 43.7340],
+        ], dtype=np.float64)
+        volumes = np.array([1.0], dtype=np.float64)
+        edge_ids = np.zeros((0, 2), dtype=np.uint64)
+
+        vol, _, _, _ = batch_route_accumulate(
+            engine._engine, coords, volumes, edge_ids,
+            n_threads=1, return_routes=False,
+            departure_period=-1, period_duration=0.0,
+            departure_offsets=np.empty(0, dtype=np.float64),
+            n_periods=0,
+        )
+        assert np.asarray(vol).ndim == 1
