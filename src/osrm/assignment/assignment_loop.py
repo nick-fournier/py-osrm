@@ -202,6 +202,8 @@ class StreamResult:
     total_time_s: float
     unserved_vph: np.ndarray  # per-link unserved demand at end of last period
     routes: Optional[Dict[str, AggregatedRoute]] = None  # polyline6 → route info
+    period_csvs: Optional[List[str]] = None  # per-period speed CSV paths
+    period_flows: Optional[np.ndarray] = None  # (n_periods, n_edges) 2D flow
 
     def log_as_dict(self) -> Dict:
         """Convert batch log to dict for plotting."""
@@ -412,6 +414,7 @@ class AssignmentSolver:
         return_routes: bool = False,
         departure_period: int = -1,
         period_duration: float = 0.0,
+        n_periods: int = 0,
     ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
         """Route all trips, accumulate link volume.
 
@@ -424,11 +427,16 @@ class AssignmentSolver:
             Period index for this batch (-1 = disabled).
         period_duration : float
             Duration of each period in seconds (0 = disabled).
+        n_periods : int
+            Total number of periods for 2D attribution. When > 0, volume
+            is returned as (n_periods, n_edges) with flow attributed to
+            the period each segment falls in based on cumulative travel
+            time.  When 0, returns 1D (n_edges,) as before.
 
         Returns
         -------
-        aon_volume : np.ndarray
-            All-or-nothing demand volume (vehicles) per link.
+        volume : np.ndarray
+            2D (n_periods, n_edges) when n_periods > 0, else 1D (n_edges,).
         aon_tstt : float
             AON total system travel time (vehicle-seconds).
         polylines : list of str or None
@@ -440,6 +448,7 @@ class AssignmentSolver:
                 return_routes=return_routes,
                 departure_period=departure_period,
                 period_duration=period_duration,
+                n_periods=n_periods,
             )
         except Exception:
             logger.debug("C++ accumulation unavailable, using Python fallback")
@@ -455,6 +464,7 @@ class AssignmentSolver:
         return_routes: bool = False,
         departure_period: int = -1,
         period_duration: float = 0.0,
+        n_periods: int = 0,
     ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
         """C++ fast path: route + accumulate in one native call."""
         from osrm.osrm_ext import batch_route_accumulate
@@ -491,6 +501,7 @@ class AssignmentSolver:
             departure_period=departure_period,
             period_duration=period_duration,
             departure_offsets=departure_offsets,
+            n_periods=n_periods,
         )
 
         # Register any newly discovered edges
@@ -501,9 +512,16 @@ class AssignmentSolver:
             )
 
         volume = np.asarray(volume, dtype=np.float64)
-        if len(volume) < state.n_edges:
-            volume = np.append(volume,
-                               np.zeros(state.n_edges - len(volume)))
+
+        # Pad to match state.n_edges (new edges registered above)
+        if volume.ndim == 2:
+            if volume.shape[1] < state.n_edges:
+                pad = state.n_edges - volume.shape[1]
+                volume = np.pad(volume, ((0, 0), (0, pad)))
+        else:
+            if len(volume) < state.n_edges:
+                volume = np.append(volume,
+                                   np.zeros(state.n_edges - len(volume)))
 
         return volume, float(tstt), route_geoms
 
@@ -1095,8 +1113,22 @@ class AssignmentSolver:
         if state_patch:
             state_patch(state)
 
-        # Queue carryforward: unserved demand from the previous period
-        # becomes starting flow for the next period.
+        # Determine total periods for cross-period flow attribution
+        n_periods = 0
+        if period_duration_s is not None:
+            max_dep = max(
+                (t.departure_time_s for t in snapped_trips), default=0.0
+            )
+            n_periods = int(max_dep / period_duration_s) + 1
+            # Buffer for trips that spill beyond their departure period
+            n_periods += 3
+
+        # 2D period flow tracking: flow[period, edge]
+        # Initialized lazily after first batch discovers edges
+        period_flows: Optional[np.ndarray] = None
+        period_csvs: List[str] = []
+
+        # Legacy 1D tracking (single-period or no period_duration_s)
         queue_carryforward = np.zeros(state.n_edges, dtype=np.float64)
 
         batch_log: List[StreamBatchResult] = []
@@ -1118,7 +1150,7 @@ class AssignmentSolver:
         n_batches = len(all_batches)
         logger.info("Split into %d loading batches", n_batches)
 
-        # Cumulative flow within the current period
+        # Cumulative flow within the current period (1D legacy path)
         cumulative_volume = queue_carryforward.copy()
         current_period_bin = all_batches[0].departure_bin if all_batches else None
 
@@ -1126,30 +1158,64 @@ class AssignmentSolver:
             t_batch = time.monotonic()
             bi = batch.batch_index
 
-            # Period transition: carry unserved demand forward
+            # Period transition: finalize previous period, carry forward
             if (
                 period_duration_s is not None
                 and batch.departure_bin != current_period_bin
             ):
-                unserved = state.unserved_demand
-                n_spill = int(np.sum(unserved > 0))
-                total_spill = float(np.sum(unserved))
-                if n_spill > 0:
-                    logger.info(
-                        "Period %s→%s: carrying %.0f veh/hr unserved "
-                        "from %d links",
-                        current_period_bin, batch.departure_bin,
-                        total_spill, n_spill,
+                old_period = current_period_bin
+
+                if n_periods > 0 and period_flows is not None:
+                    # Save per-period CSV for the completing period
+                    p_idx = old_period if old_period is not None else 0
+                    csv_path = self.writer.write_from_state(
+                        state, suffix=f"_period{p_idx}", only_changed=True,
                     )
-                # Reset cumulative flow; start with carryforward
-                queue_carryforward = unserved.copy()
-                cumulative_volume = queue_carryforward.copy()
+                    # Ensure period_csvs list is long enough
+                    while len(period_csvs) <= p_idx:
+                        period_csvs.append("")
+                    period_csvs[p_idx] = str(csv_path)
+
+                    # Compute unserved demand from the completing period
+                    unserved = state.unserved_demand
+                    n_spill = int(np.sum(unserved > 0))
+                    total_spill = float(np.sum(unserved))
+                    if n_spill > 0:
+                        logger.info(
+                            "Period %s→%s: carrying %.0f veh/hr unserved "
+                            "from %d links",
+                            old_period, batch.departure_bin,
+                            total_spill, n_spill,
+                        )
+
+                    # Add unserved demand to next period's flow
+                    new_period = batch.departure_bin
+                    if new_period is not None and new_period < n_periods:
+                        period_flows[new_period, :] += unserved
+
+                    # Set state to new period's accumulated flow for VDF
+                    state.flow_vph = np.maximum(
+                        period_flows[new_period, :], 0.0
+                    )
+                else:
+                    # Legacy 1D path
+                    unserved = state.unserved_demand
+                    n_spill = int(np.sum(unserved > 0))
+                    total_spill = float(np.sum(unserved))
+                    if n_spill > 0:
+                        logger.info(
+                            "Period %s→%s: carrying %.0f veh/hr unserved "
+                            "from %d links",
+                            old_period, batch.departure_bin,
+                            total_spill, n_spill,
+                        )
+                    queue_carryforward = unserved.copy()
+                    cumulative_volume = queue_carryforward.copy()
+                    state.flow_vph = np.maximum(cumulative_volume, 0.0)
+
                 current_period_bin = batch.departure_bin
 
-                # Update state to reflect spillover-only flow and
-                # re-customize OSRM so the next batch routes against
-                # the (mostly freeflow) reality, not stale period-i weights.
-                state.flow_vph = np.maximum(cumulative_volume, 0.0)
+                # Re-customize and reload for new period's starting state
                 self._update_state(state)
                 csv_path = self.writer.write_from_state(state, only_changed=True)
                 osrm_module.customize(
@@ -1169,6 +1235,7 @@ class AssignmentSolver:
                                   if batch.departure_bin is not None else -1),
                 period_duration=(period_duration_s
                                  if period_duration_s is not None else 0.0),
+                n_periods=n_periods,
             )
             route_time = time.monotonic() - t_route
 
@@ -1185,23 +1252,57 @@ class AssignmentSolver:
                     if trip.trip_id is not None:
                         rec.trip_ids.append(trip.trip_id)
 
-            # Grow arrays if new edges were discovered
-            if len(cumulative_volume) < state.n_edges:
-                pad = state.n_edges - len(cumulative_volume)
-                cumulative_volume = np.append(cumulative_volume, np.zeros(pad))
-                queue_carryforward = np.append(
-                    queue_carryforward,
-                    np.zeros(state.n_edges - len(queue_carryforward)),
-                )
-                if state_patch:
-                    state_patch(state)
-                self.smoother.build_adjacency(state.edge_ids, state.length_m)
+            # 2. Accumulate flow
+            if n_periods > 0 and aon_volume.ndim == 2:
+                # 2D path: period-attributed flow
+                # Initialize period_flows lazily on first batch
+                if period_flows is None:
+                    period_flows = np.zeros(
+                        (n_periods, state.n_edges), dtype=np.float64
+                    )
 
-            # 2. Accumulate: add this batch's demand to cumulative flow.
-            #    aon_volume is in the same units as DemandTrip.volume
-            #    (veh/hr for TNTP, vehicles for ABM with volume=1).
-            cumulative_volume += aon_volume
-            state.flow_vph = np.maximum(cumulative_volume, 0.0)
+                # Grow period_flows if new edges were discovered
+                if period_flows.shape[1] < state.n_edges:
+                    pad = state.n_edges - period_flows.shape[1]
+                    period_flows = np.pad(period_flows, ((0, 0), (0, pad)))
+                    if state_patch:
+                        state_patch(state)
+                    self.smoother.build_adjacency(state.edge_ids, state.length_m)
+
+                # Pad aon_volume to match if needed
+                if aon_volume.shape[1] < period_flows.shape[1]:
+                    pad = period_flows.shape[1] - aon_volume.shape[1]
+                    aon_volume = np.pad(aon_volume, ((0, 0), (0, pad)))
+
+                # Add this batch's per-period flow
+                period_flows += aon_volume
+
+                # Current period's total flow for VDF
+                cp = current_period_bin if current_period_bin is not None else 0
+                if cp < n_periods:
+                    state.flow_vph = np.maximum(period_flows[cp, :], 0.0)
+                else:
+                    state.flow_vph = np.maximum(
+                        np.sum(aon_volume, axis=0), 0.0
+                    )
+            else:
+                # Legacy 1D path
+                # Grow arrays if new edges were discovered
+                if len(cumulative_volume) < state.n_edges:
+                    pad = state.n_edges - len(cumulative_volume)
+                    cumulative_volume = np.append(
+                        cumulative_volume, np.zeros(pad)
+                    )
+                    queue_carryforward = np.append(
+                        queue_carryforward,
+                        np.zeros(state.n_edges - len(queue_carryforward)),
+                    )
+                    if state_patch:
+                        state_patch(state)
+                    self.smoother.build_adjacency(state.edge_ids, state.length_m)
+
+                cumulative_volume += aon_volume
+                state.flow_vph = np.maximum(cumulative_volume, 0.0)
 
             # 3. VDF: flow → density → speed
             self._update_state(state)
@@ -1274,7 +1375,20 @@ class AssignmentSolver:
 
         total_time = time.monotonic() - t_start
         del engine
-        self.writer.cleanup()
+
+        # Save final period's CSV if in multi-period mode
+        if n_periods > 0 and period_flows is not None and current_period_bin is not None:
+            p_idx = current_period_bin
+            csv_path = self.writer.write_from_state(
+                state, suffix=f"_period{p_idx}", only_changed=True,
+            )
+            while len(period_csvs) <= p_idx:
+                period_csvs.append("")
+            period_csvs[p_idx] = str(csv_path)
+
+        # Don't clean up period CSVs — they're needed for Phase 2
+        if not period_csvs:
+            self.writer.cleanup()
 
         # Final unserved demand for reporting
         final_unserved = state.unserved_demand if state.n_edges > 0 else np.array([])
@@ -1286,6 +1400,14 @@ class AssignmentSolver:
             batch_log[-1].queue_vehicles if batch_log else 0,
             batch_log[-1].total_unserved_vph if batch_log else 0,
         )
+
+        if n_periods > 0 and period_csvs:
+            non_empty = [p for p in period_csvs if p]
+            logger.info(
+                "Saved %d per-period speed CSVs for Phase 2 multi-period "
+                "customize",
+                len(non_empty),
+            )
 
         if return_routes and route_demands:
             logger.info(
@@ -1301,4 +1423,6 @@ class AssignmentSolver:
             total_time_s=total_time,
             unserved_vph=final_unserved,
             routes=route_demands,
+            period_csvs=period_csvs if period_csvs else None,
+            period_flows=period_flows,
         )

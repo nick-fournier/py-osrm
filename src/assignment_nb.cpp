@@ -77,7 +77,8 @@ void init_Assignment(nb::module_& m) {
            bool   return_routes,
            int    departure_period,
            double period_duration,
-           nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> departure_offsets)
+           nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> departure_offsets,
+           int    n_periods)
     {
 
         // Optionally cap TBB parallelism
@@ -94,6 +95,9 @@ void init_Assignment(nb::module_& m) {
         const double* vol_ptr = volumes.data();
         const bool has_period = (departure_period >= 0 && period_duration > 0);
         const double* offset_ptr = has_period ? departure_offsets.data() : nullptr;
+
+        // Period-attributed 2D accumulation when n_periods > 0
+        const bool use_2d = (has_period && n_periods > 0);
 
         // ── 1. build RouteParameters in C++ ──────────────────────
         std::vector<RouteParameters> params(n_trips);
@@ -154,9 +158,18 @@ void init_Assignment(nb::module_& m) {
         }
 
         // ── 4. accumulate volume (sequential, in C++) ───────────
-        std::vector<double> volume(n_edges0, 0.0);
-        double tstt = 0.0;
+        // 2D mode: period_vol[p][edge] tracks flow per period
+        // 1D mode: volume[edge] (legacy, no period attribution)
+        std::vector<std::vector<double>> period_vol;
+        std::vector<double> volume;
+        if (use_2d) {
+            period_vol.resize(static_cast<size_t>(n_periods),
+                              std::vector<double>(n_edges0, 0.0));
+        } else {
+            volume.resize(n_edges0, 0.0);
+        }
 
+        double tstt = 0.0;
         std::vector<NewEdge> new_edges;
         std::vector<std::string> route_geoms;
         if (return_routes) route_geoms.resize(n_trips);
@@ -175,13 +188,17 @@ void init_Assignment(nb::module_& m) {
             double trip_vol  = vol_ptr[ti];
             tstt += trip_vol * route_dur;
 
-            // Capture route geometry if requested
             if (return_routes) {
                 auto geom_it = route.values.find("geometry");
                 if (geom_it != route.values.end()) {
                     route_geoms[ti] = as_string(geom_it->second);
                 }
             }
+
+            // Per-trip departure offset for period computation
+            double trip_dep_offset = (has_period && offset_ptr)
+                ? offset_ptr[ti] : 0.0;
+            double cumulative_time_s = 0.0;
 
             const auto& legs_arr = as_array(route.values.at("legs"));
 
@@ -199,54 +216,103 @@ void init_Assignment(nb::module_& m) {
                     uint64_t to_id   = static_cast<uint64_t>(
                         as_number(nodes_arr.values[si + 1]));
 
+                    // Segment travel time from distance/speed annotations
+                    double seg_dist_m = (si < dist_arr.values.size())
+                        ? as_number(dist_arr.values[si]) : 0.0;
+                    double seg_speed_mps = (si < speed_arr.values.size())
+                        ? as_number(speed_arr.values[si]) : 0.01;
+                    if (seg_speed_mps < 0.01) seg_speed_mps = 0.01;
+                    double seg_time_s = seg_dist_m / seg_speed_mps;
+
                     auto it = emap.find({from_id, to_id});
                     int idx;
 
                     if (it != emap.end()) {
                         idx = it->second;
                     } else {
-                        idx = static_cast<int>(volume.size());
+                        // New edge: grow all volume vectors in lockstep
+                        if (use_2d) {
+                            idx = static_cast<int>(period_vol[0].size());
+                            for (auto& pv : period_vol) pv.push_back(0.0);
+                        } else {
+                            idx = static_cast<int>(volume.size());
+                            volume.push_back(0.0);
+                        }
                         emap[{from_id, to_id}] = idx;
-                        volume.push_back(0.0);
 
-                        double dist = (si < dist_arr.values.size())
-                            ? as_number(dist_arr.values[si]) : 0.0;
-                        double spd  = (si < speed_arr.values.size())
-                            ? as_number(speed_arr.values[si]) * 3.6 : 1.0;
-                        new_edges.push_back({from_id, to_id, dist, spd});
+                        double spd_kmh = seg_speed_mps * 3.6;
+                        if (spd_kmh < 1.0) spd_kmh = 1.0;
+                        new_edges.push_back({from_id, to_id, seg_dist_m, spd_kmh});
                     }
 
-                    volume[idx] += trip_vol;
+                    // Attribute volume to the correct period
+                    if (use_2d) {
+                        // Use segment midpoint time for period attribution
+                        double mid_time = cumulative_time_s + seg_time_s * 0.5;
+                        double total_time = trip_dep_offset + mid_time;
+                        int seg_period = departure_period
+                            + static_cast<int>(total_time / period_duration);
+                        if (seg_period < 0) seg_period = 0;
+                        if (seg_period >= n_periods) seg_period = n_periods - 1;
+                        period_vol[static_cast<size_t>(seg_period)][idx] += trip_vol;
+                    } else {
+                        volume[idx] += trip_vol;
+                    }
+
+                    cumulative_time_s += seg_time_s;
                 }
             }
         }
 
         // ── 5. pack results into numpy / Python objects ─────────
-        size_t n_total = volume.size();
-
-        double* v_buf = new double[n_total];
-        std::memcpy(v_buf, volume.data(),  n_total * sizeof(double));
-
-        nb::capsule v_owner(v_buf, [](void* p) noexcept { delete[] static_cast<double*>(p); });
-
-        size_t shape[1] = {n_total};
-        auto py_volume  = nb::ndarray<nb::numpy, double, nb::ndim<1>>(
-            v_buf, 1, shape, v_owner);
-
         nb::list py_new_edges;
         for (const auto& ne : new_edges) {
             py_new_edges.append(nb::make_tuple(
                 ne.from_id, ne.to_id, ne.length_m, ne.speed_kmh));
         }
 
+        nb::object py_geoms_obj = nb::none();
         if (return_routes) {
             nb::list py_geoms;
             for (const auto& g : route_geoms) {
                 py_geoms.append(g);
             }
-            return nb::make_tuple(py_volume, tstt, py_new_edges, py_geoms);
+            py_geoms_obj = py_geoms;
         }
-        return nb::make_tuple(py_volume, tstt, py_new_edges, nb::none());
+
+        if (use_2d) {
+            // Return 2D volume: (n_periods, n_total_edges)
+            size_t n_total = period_vol[0].size();
+            size_t n_per = period_vol.size();
+            double* v2d = new double[n_per * n_total];
+            for (size_t p = 0; p < n_per; ++p)
+                std::memcpy(v2d + p * n_total,
+                            period_vol[p].data(),
+                            n_total * sizeof(double));
+
+            nb::capsule owner(v2d, [](void* p) noexcept {
+                delete[] static_cast<double*>(p);
+            });
+            size_t shape[2] = {n_per, n_total};
+            auto py_vol = nb::ndarray<nb::numpy, double, nb::ndim<2>>(
+                v2d, 2, shape, owner);
+
+            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj);
+        } else {
+            // Return 1D volume: (n_total_edges,)
+            size_t n_total = volume.size();
+            double* v_buf = new double[n_total];
+            std::memcpy(v_buf, volume.data(), n_total * sizeof(double));
+
+            nb::capsule owner(v_buf, [](void* p) noexcept {
+                delete[] static_cast<double*>(p);
+            });
+            size_t shape[1] = {n_total};
+            auto py_vol = nb::ndarray<nb::numpy, double, nb::ndim<1>>(
+                v_buf, 1, shape, owner);
+
+            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj);
+        }
     },
     nb::arg("engine"),
     nb::arg("coords"),
@@ -257,6 +323,7 @@ void init_Assignment(nb::module_& m) {
     nb::arg("departure_period") = -1,
     nb::arg("period_duration") = 0.0,
     nb::arg("departure_offsets") = nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu>(),
+    nb::arg("n_periods") = 0,
     "Route OD pairs and accumulate link volume in C++.\n\n"
     "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
     "builds RouteParameters internally — no Python param construction.\n"
@@ -265,8 +332,10 @@ void init_Assignment(nb::module_& m) {
     "return_routes: if True, also returns per-trip encoded polyline6 strings.\n"
     "departure_period: period index for multi-period routing (-1 = disabled).\n"
     "period_duration: seconds per period (e.g. 900 for 15-min).\n"
-    "departure_offsets: per-trip seconds into departure period.\n\n"
+    "departure_offsets: per-trip seconds into departure period.\n"
+    "n_periods: total number of periods for 2D attribution (0 = 1D legacy).\n\n"
     "Returns (volume, tstt, new_edges, route_geometries).\n"
+    "volume is 2D (n_periods, n_edges) when n_periods > 0, else 1D (n_edges,).\n"
     "route_geometries is a list of polyline6 strings when return_routes=True,\n"
     "otherwise None."
     );
