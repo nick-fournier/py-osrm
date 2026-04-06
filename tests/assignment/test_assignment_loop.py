@@ -280,7 +280,7 @@ class TestCrossPeriodFlowAttribution:
         empty_offsets = np.empty(0, dtype=np.float64)
 
         # 1D baseline
-        vol1d, _, _, _ = batch_route_accumulate(
+        vol1d, _, _, _, _ = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=1, return_routes=False,
             departure_period=-1, period_duration=0.0,
@@ -290,7 +290,7 @@ class TestCrossPeriodFlowAttribution:
 
         # 2D with 900s periods
         offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        vol2d, _, _, _ = batch_route_accumulate(
+        vol2d, _, _, _, _ = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=1, return_routes=False,
             departure_period=0, period_duration=900.0,
@@ -320,7 +320,7 @@ class TestCrossPeriodFlowAttribution:
 
         # Depart 800s into a 900s period — 100s left before period boundary
         offsets = np.array([800.0], dtype=np.float64)
-        vol2d, _, _, _ = batch_route_accumulate(
+        vol2d, _, _, _, _ = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=1, return_routes=False,
             departure_period=0, period_duration=900.0,
@@ -354,7 +354,7 @@ class TestCrossPeriodFlowAttribution:
         offsets = np.array([0.0], dtype=np.float64)
 
         for n_per in [2, 8, 96]:
-            vol, _, _, _ = batch_route_accumulate(
+            vol, _, _, _, _ = batch_route_accumulate(
                 engine._engine, coords, volumes, edge_ids,
                 n_threads=1, return_routes=False,
                 departure_period=0, period_duration=900.0,
@@ -379,7 +379,7 @@ class TestCrossPeriodFlowAttribution:
         volumes = np.array([1.0], dtype=np.float64)
         edge_ids = np.zeros((0, 2), dtype=np.uint64)
 
-        vol, _, _, _ = batch_route_accumulate(
+        vol, _, _, _, _ = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=1, return_routes=False,
             departure_period=-1, period_duration=0.0,

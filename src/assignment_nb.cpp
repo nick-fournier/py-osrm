@@ -172,6 +172,7 @@ void init_Assignment(nb::module_& m) {
         double tstt = 0.0;
         std::vector<NewEdge> new_edges;
         std::vector<std::string> route_geoms;
+        std::vector<double> trip_durations(n_trips, 0.0);
         if (return_routes) route_geoms.resize(n_trips);
 
         for (size_t ti = 0; ti < n_trips; ++ti) {
@@ -187,6 +188,7 @@ void init_Assignment(nb::module_& m) {
             double route_dur = as_number(route.values.at("duration"));
             double trip_vol  = vol_ptr[ti];
             tstt += trip_vol * route_dur;
+            trip_durations[ti] = route_dur;
 
             if (return_routes) {
                 auto geom_it = route.values.find("geometry");
@@ -280,6 +282,16 @@ void init_Assignment(nb::module_& m) {
             py_geoms_obj = py_geoms;
         }
 
+        // Per-trip durations array
+        double* dur_buf = new double[n_trips];
+        std::memcpy(dur_buf, trip_durations.data(), n_trips * sizeof(double));
+        nb::capsule dur_owner(dur_buf, [](void* p) noexcept {
+            delete[] static_cast<double*>(p);
+        });
+        size_t dur_shape[1] = {n_trips};
+        auto py_durations = nb::ndarray<nb::numpy, double, nb::ndim<1>>(
+            dur_buf, 1, dur_shape, dur_owner);
+
         if (use_2d) {
             // Return 2D volume: (n_periods, n_total_edges)
             size_t n_total = period_vol[0].size();
@@ -297,7 +309,7 @@ void init_Assignment(nb::module_& m) {
             auto py_vol = nb::ndarray<nb::numpy, double, nb::ndim<2>>(
                 v2d, 2, shape, owner);
 
-            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj);
+            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj, py_durations);
         } else {
             // Return 1D volume: (n_total_edges,)
             size_t n_total = volume.size();
@@ -311,7 +323,7 @@ void init_Assignment(nb::module_& m) {
             auto py_vol = nb::ndarray<nb::numpy, double, nb::ndim<1>>(
                 v_buf, 1, shape, owner);
 
-            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj);
+            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj, py_durations);
         }
     },
     nb::arg("engine"),
@@ -334,9 +346,10 @@ void init_Assignment(nb::module_& m) {
     "period_duration: seconds per period (e.g. 900 for 15-min).\n"
     "departure_offsets: per-trip seconds into departure period.\n"
     "n_periods: total number of periods for 2D attribution (0 = 1D legacy).\n\n"
-    "Returns (volume, tstt, new_edges, route_geometries).\n"
+    "Returns (volume, tstt, new_edges, route_geometries, trip_durations).\n"
     "volume is 2D (n_periods, n_edges) when n_periods > 0, else 1D (n_edges,).\n"
     "route_geometries is a list of polyline6 strings when return_routes=True,\n"
-    "otherwise None."
+    "otherwise None.\n"
+    "trip_durations is a 1D array of per-trip travel times in seconds."
     );
 }

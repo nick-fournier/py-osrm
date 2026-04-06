@@ -204,6 +204,8 @@ class StreamResult:
     routes: Optional[Dict[str, AggregatedRoute]] = None  # polyline6 → route info
     period_csvs: Optional[List[str]] = None  # per-period speed CSV paths
     period_flows: Optional[np.ndarray] = None  # (n_periods, n_edges) 2D flow
+    experienced_times: Optional[np.ndarray] = None  # per-trip travel time (s)
+    phase2_tstt: Optional[float] = None  # TSTT from Phase 2 re-route
 
     def log_as_dict(self) -> Dict:
         """Convert batch log to dict for plotting."""
@@ -491,7 +493,7 @@ class AssignmentSolver:
         default_jam = (self.config.default_jam_density_per_lane
                        * self.config.default_n_lanes)
 
-        volume, tstt, new_edges, route_geoms = batch_route_accumulate(
+        volume, tstt, new_edges, route_geoms, trip_durations = batch_route_accumulate(
             engine._engine,
             coords,
             volumes,
@@ -1426,3 +1428,135 @@ class AssignmentSolver:
             period_csvs=period_csvs if period_csvs else None,
             period_flows=period_flows,
         )
+
+    def reroute_time_dependent(
+        self,
+        trips: List[DemandTrip],
+        phase1_result: "StreamResult",
+        period_duration_s: float,
+    ) -> "StreamResult":
+        """Phase 2: re-route all trips with multi-period time-dependent weights.
+
+        Takes per-period speed CSVs from a Phase 1 ``assign_stream`` run,
+        builds a single OSRM engine with all period weights via
+        ``customize_multi_period``, then re-routes every trip with
+        ``departure_period`` and ``departure_offset`` so OSRM switches
+        cell metrics and boundary weights mid-route as accumulated travel
+        time crosses period boundaries.
+
+        Parameters
+        ----------
+        trips : list of DemandTrip
+            Same trips used in Phase 1 (with departure_time_s set).
+        phase1_result : StreamResult
+            Result from ``assign_stream`` with ``period_csvs`` populated.
+        period_duration_s : float
+            Duration of each period in seconds (must match Phase 1).
+
+        Returns
+        -------
+        StreamResult
+            Updated result with ``experienced_times`` (per-trip travel
+            time in seconds) and ``phase2_tstt`` populated.
+        """
+        from osrm.preprocessing import customize_multi_period
+
+        if not phase1_result.period_csvs:
+            raise ValueError(
+                "Phase 1 result has no period_csvs — run assign_stream "
+                "with period_duration_s to generate per-period speed CSVs."
+            )
+
+        t_start = time.monotonic()
+
+        # Build (period_index, csv_path) tuples, skipping empty entries
+        period_speed_files = []
+        for p_idx, csv_path in enumerate(phase1_result.period_csvs):
+            if csv_path:
+                period_speed_files.append((p_idx, csv_path))
+
+        if not period_speed_files:
+            raise ValueError("No non-empty period CSVs found in Phase 1 result.")
+
+        logger.info(
+            "Phase 2: customize_multi_period with %d period CSVs",
+            len(period_speed_files),
+        )
+
+        # Multi-period customize: builds one engine with all period weights
+        t_cust = time.monotonic()
+        customize_multi_period(
+            self.base_path,
+            period_speed_files=period_speed_files,
+            threads=self.config.n_threads or None,
+            verbosity="ERROR",
+        )
+        cust_time = time.monotonic() - t_cust
+        logger.info("Phase 2: customize took %.1fs", cust_time)
+
+        # Load time-dependent engine
+        t_eng = time.monotonic()
+        engine = self._create_engine(quiet=True)
+        eng_time = time.monotonic() - t_eng
+        logger.info("Phase 2: engine load took %.1fs", eng_time)
+
+        # Route all trips with time-dependent period params via C++ batch.
+        from osrm.assignment.trip_stream import TripStreamAdapter
+        adapter = TripStreamAdapter(trips, sort_by_departure=True)
+        sorted_trips = adapter.trips()
+        n_trips = len(sorted_trips)
+
+        # Snap coordinates
+        snapped = self._snap_trips(engine, sorted_trips)
+
+        # Build coordinate, volume, and offset arrays for all trips
+        coords = np.empty((n_trips, 4), dtype=np.float64)
+        volumes = np.empty(n_trips, dtype=np.float64)
+        offsets = np.empty(n_trips, dtype=np.float64)
+
+        for i, t in enumerate(snapped):
+            coords[i, 0] = t.origin[0]
+            coords[i, 1] = t.origin[1]
+            coords[i, 2] = t.destination[0]
+            coords[i, 3] = t.destination[1]
+            volumes[i] = t.volume
+            offsets[i] = t.departure_time_s  # absolute offset from time 0
+
+        # Use period 0 as base; offsets are absolute seconds from time 0,
+        # and OSRM's GetPeriodForWeight computes the correct period from
+        # departure_offset / period_duration.
+        base_period = 0
+
+        from osrm.osrm_ext import batch_route_accumulate
+
+        logger.info("Phase 2: routing %d trips with time-dependent weights", n_trips)
+        t_route = time.monotonic()
+
+        vol, total_tstt, new_edges, _, trip_durations = batch_route_accumulate(
+            engine._engine,
+            coords,
+            volumes,
+            phase1_result.network_state.edge_ids.astype(np.uint64),
+            self.config.n_threads,
+            False,  # return_routes
+            departure_period=base_period,
+            period_duration=period_duration_s,
+            departure_offsets=offsets,
+            n_periods=0,  # 1D volume — we only need per-trip durations
+        )
+
+        experienced_times = np.asarray(trip_durations, dtype=np.float64)
+        route_time = time.monotonic() - t_route
+        total_time = time.monotonic() - t_start
+        del engine
+
+        logger.info(
+            "Phase 2 complete: %d trips, tstt=%.0f, "
+            "route=%.1fs, total=%.1fs",
+            n_trips, total_tstt, route_time, total_time,
+        )
+
+        # Update the Phase 1 result with Phase 2 data
+        phase1_result.experienced_times = experienced_times
+        phase1_result.phase2_tstt = total_tstt
+        return phase1_result
