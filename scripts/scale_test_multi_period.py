@@ -116,9 +116,9 @@ def generate_period_csvs(base: str, meta: dict, work: Path):
     centroids = meta["zone_centroids"]
     zone_ids = sorted(centroids.keys())
 
-    # Sample some routes to discover edges
+    # Sample routes to discover edges — use many probes for good coverage
     rng = np.random.default_rng(42)
-    sample_zones = rng.choice(zone_ids, size=min(200, len(zone_ids)), replace=False)
+    sample_zones = rng.choice(zone_ids, size=min(800, len(zone_ids)), replace=False)
 
     from osrm.assignment.network_state import NetworkState
     state = NetworkState.empty()
@@ -269,13 +269,18 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
 
     results = {}
 
-    # ── freeflow baseline (period 0 with no congestion) ─────────────
-    logger.info("  Routing freeflow baseline (period 0)...")
+    # ── freeflow baseline (period 0 — overnight, near zero congestion) ──
+    # Use a 1k subsample for the sweep profile; 20k for spotlight periods
+    n_sweep = min(1000, valid)
+    sweep_coords = coords[:n_sweep]
+    sweep_vols = volumes[:n_sweep]
+
+    logger.info("  Routing freeflow baseline (period 0, %d trips)...", n_sweep)
     _, _, _, _, ff_durations = batch_route_accumulate(
-        engine._engine, coords, volumes, edge_ids,
+        engine._engine, sweep_coords, sweep_vols, edge_ids,
         n_threads=0, return_routes=False,
         departure_period=0, period_duration=period_duration_s,
-        departure_offsets=np.zeros(valid, dtype=np.float64),
+        departure_offsets=np.zeros(n_sweep, dtype=np.float64),
         n_periods=0,
     )
     ff_durs = np.asarray(ff_durations)
@@ -283,14 +288,15 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
     ff_mean = np.mean(ff_durs[ff_routed]) if np.any(ff_routed) else 1.0
 
     # ── sweep all periods for TT/FFTT profile ───────────────────────
-    logger.info("  Sweeping all %d periods for TT/FFTT profile...", N_PERIODS)
+    logger.info("  Sweeping all %d periods for TT/FFTT profile (%d trips)...",
+                N_PERIODS, n_sweep)
     tt_ratio_by_period = np.ones(N_PERIODS)
     for p in range(N_PERIODS):
         _, _, _, _, durs_p = batch_route_accumulate(
-            engine._engine, coords, volumes, edge_ids,
+            engine._engine, sweep_coords, sweep_vols, edge_ids,
             n_threads=0, return_routes=False,
             departure_period=p, period_duration=period_duration_s,
-            departure_offsets=np.zeros(valid, dtype=np.float64),
+            departure_offsets=np.zeros(n_sweep, dtype=np.float64),
             n_periods=0,
         )
         durs_p = np.asarray(durs_p)
