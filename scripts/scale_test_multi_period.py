@@ -113,12 +113,18 @@ def demand_profile(n_periods: int) -> np.ndarray:
 def build_demand(
     meta: dict,
     demand_scale: float = 1.0,
+    min_volume: float = 1.0,
 ) -> list[DemandTrip]:
     """Build trip list from OD matrix distributed across 24h.
 
     The TNTP demand (1.36M) represents peak-hour equilibrium demand.
     We normalize the demand profile so the peak hour's 4 periods sum to
     the TNTP demand × demand_scale, then scale off-peak proportionally.
+
+    Args:
+        min_volume: Minimum vehicles per period to include an OD pair.
+            Default 1.0 (sub-vehicle flows aren't physically meaningful
+            and the full matrix at 96 periods produces ~68M trips).
     """
     centroids = meta["zone_centroids"]
     od = meta["od_matrix"]
@@ -142,31 +148,48 @@ def build_demand(
                 period_scale.min(), period_scale.max(),
                 period_scale.sum())
 
-    trips = []
-    for p in range(N_PERIODS):
-        if period_scale[p] < 1e-6:
-            continue
-        dep_base_s = p * PERIOD_DURATION_S
-        for i in range(od.shape[0]):
-            for j in range(od.shape[1]):
-                if od[i, j] > 0 and i != j:
-                    o_zone, d_zone = i + 1, j + 1
-                    if o_zone in centroids and d_zone in centroids:
-                        vol = od[i, j] * period_scale[p]
-                        if vol < 0.01:
-                            continue
-                        trips.append(DemandTrip(
-                            origin=centroids[o_zone],
-                            destination=centroids[d_zone],
-                            volume=vol,
-                            departure_time_s=dep_base_s + rng.uniform(0, PERIOD_DURATION_S),
-                        ))
+    # Extract non-zero OD pairs once (vectorized)
+    t0 = time.monotonic()
+    ii, jj = np.where((od > 0) & ~np.eye(od.shape[0], dtype=bool))
+    zone_o, zone_d = ii + 1, jj + 1  # TNTP zones are 1-indexed
+    valid = np.array([z in centroids for z in zone_o]) & \
+            np.array([z in centroids for z in zone_d])
+    ii, jj = ii[valid], jj[valid]
+    base_vols = od[ii, jj]
+    origins = [centroids[z] for z in (ii + 1)]
+    dests = [centroids[z] for z in (jj + 1)]
+    n_pairs = len(ii)
+    logger.info("OD pairs with demand: %d (%.1fs)", n_pairs, time.monotonic() - t0)
 
-    total_demand = sum(t.volume for t in trips)
-    n_od_pairs = len(set((t.origin, t.destination) for t in trips))
-    logger.info("Built %d trips (%.0f total demand) from %d OD pairs across %d periods",
-                len(trips), total_demand, n_od_pairs,
-                len(set(int(t.departure_time_s // PERIOD_DURATION_S) for t in trips)))
+    # Build trips: vectorized per-period filtering with min_volume threshold
+    t0 = time.monotonic()
+    active_periods = [(p, period_scale[p]) for p in range(N_PERIODS)
+                      if period_scale[p] >= 1e-6]
+
+    trips = []
+    total_demand_full = 0.0
+    total_demand_kept = 0.0
+    for p, ps in active_periods:
+        vols = base_vols * ps
+        total_demand_full += vols.sum()
+        mask = vols >= min_volume
+        n_keep = int(mask.sum())
+        if n_keep == 0:
+            continue
+        kept_vols = vols[mask]
+        total_demand_kept += kept_vols.sum()
+        dep_times = p * PERIOD_DURATION_S + rng.uniform(0, PERIOD_DURATION_S, size=n_keep)
+        kept_idx = np.where(mask)[0]
+        trips.extend(
+            DemandTrip(origins[k], dests[k], float(v), float(t))
+            for k, v, t in zip(kept_idx, kept_vols, dep_times)
+        )
+
+    pct = 100 * total_demand_kept / max(total_demand_full, 1)
+    logger.info("Built %d trips in %.1fs (%.0f of %.0f demand kept = %.1f%%, "
+                "min_volume=%.1f)",
+                len(trips), time.monotonic() - t0,
+                total_demand_kept, total_demand_full, pct, min_volume)
     return trips
 
 
@@ -476,6 +499,8 @@ def main():
                         help="Report output path")
     parser.add_argument("--demand-scale", type=float, default=1.0,
                         help="Demand multiplier (default 1.0 = full peak-hour demand)")
+    parser.add_argument("--min-volume", type=float, default=1.0,
+                        help="Min vehicles/period to keep an OD pair (default 1.0)")
     args = parser.parse_args()
 
     work = Path(args.work_dir or "/tmp/scale_test_multi_period")
@@ -488,7 +513,8 @@ def main():
     base, meta = build_network(work)
 
     # 2. Build demand from OD matrix with 24h profile
-    trips = build_demand(meta, demand_scale=args.demand_scale)
+    trips = build_demand(meta, demand_scale=args.demand_scale,
+                         min_volume=args.min_volume)
 
     # 3. Run streaming assignment
     t0 = time.monotonic()
