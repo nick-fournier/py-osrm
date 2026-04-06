@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Scale test: chi-regional with 96 periods (24h @ 15-min).
+"""Scale test: chi-regional with multi-period streaming assignment.
 
-Benchmarks the multi-period OSRM infrastructure:
-  1. Build chi-regional OSRM network from TNTP data
-  2. Generate 96 synthetic per-period speed CSVs (time-of-day profile)
-  3. customize_multi_period with all 96 CSVs → timing
-  4. Load engine → memory footprint
-  5. Route sample trips across periods → throughput
+Runs the full assign_stream pipeline on the Chicago Regional TNTP
+network (12,982 nodes, 39,018 links, 1,790 zones) with demand
+distributed across a 24-hour day at 15-minute periods.
+
+Produces an HTML report with congestion build-up, TT/FFTT ratio,
+network loading vs. departures, link saturation, and assignment
+convergence metrics.
 
 Usage:
-    uv run python scripts/scale_test_multi_period.py [--work-dir /path/to/workdir]
+    uv run python scripts/scale_test_multi_period.py [--demand-scale 1.0]
 """
 
 import argparse
@@ -23,10 +24,9 @@ from pathlib import Path
 import numpy as np
 
 import osrm
-from osrm.preprocessing import customize_multi_period
+from osrm.assignment import AssignmentConfig, AssignmentSolver, DensitySmoothingConfig
 from osrm.assignment.osm_synthesis import tntp_to_osm, LinkClass, patch_lanes
 from osrm.assignment.tntp import parse_net, parse_trips, load_node_coords, parse_flow
-from osrm.assignment.segment_speed_writer import SegmentSpeedWriter
 from osrm.assignment.od_matrix import DemandTrip
 
 logging.basicConfig(
@@ -99,659 +99,366 @@ def build_network(work: Path):
     return base, meta
 
 
-def generate_period_csvs(base: str, meta: dict, work: Path):
-    """Generate 96 speed CSVs with a time-of-day congestion profile.
-
-    Profile: sinusoidal AM/PM peaks (periods 28-36 and 64-72)
-    with freeflow overnight and moderate midday.
-    """
-    logger.info("=== Generating %d period speed CSVs ===", N_PERIODS)
-
-    # Discover network edges via a quick route probe
-    engine = osrm.OSRM(
-        storage_config=base, algorithm="MLD", use_shared_memory=False,
+def demand_profile(n_periods: int) -> np.ndarray:
+    """24h demand weight per period: AM/PM peaks, near-zero overnight."""
+    hours = np.arange(n_periods) * (24.0 / n_periods)
+    w = (
+        0.50 * np.exp(-0.5 * ((hours - 8.0) / 1.2) ** 2) +
+        0.40 * np.exp(-0.5 * ((hours - 17.5) / 1.5) ** 2) +
+        0.08 * np.clip(np.cos(np.pi * (hours - 13.0) / 12.0), 0, 1)
     )
+    return np.clip(w, 0, None)
 
-    # Build OD pairs from centroids
+
+def build_demand(
+    meta: dict,
+    demand_scale: float = 1.0,
+) -> list[DemandTrip]:
+    """Build trip list from OD matrix distributed across 24h.
+
+    The TNTP demand (1.36M) represents peak-hour equilibrium demand.
+    We normalize the demand profile so the peak hour's 4 periods sum to
+    the TNTP demand × demand_scale, then scale off-peak proportionally.
+    """
     centroids = meta["zone_centroids"]
-    zone_ids = sorted(centroids.keys())
-
-    # Sample routes to discover edges — use many probes for good coverage
+    od = meta["od_matrix"]
     rng = np.random.default_rng(42)
-    sample_zones = rng.choice(zone_ids, size=min(800, len(zone_ids)), replace=False)
 
-    from osrm.assignment.network_state import NetworkState
-    state = NetworkState.empty()
+    profile = demand_profile(N_PERIODS)
 
-    coords_list = []
-    for i in range(0, len(sample_zones) - 1, 2):
-        o_z, d_z = sample_zones[i], sample_zones[i + 1]
-        if o_z in centroids and d_z in centroids:
-            coords_list.append((centroids[o_z], centroids[d_z]))
+    # Identify peak hour (4 consecutive periods with max sum)
+    period_sums = np.convolve(profile, np.ones(4), mode="valid")
+    peak_start = int(np.argmax(period_sums))
+    peak_hour_weight = profile[peak_start:peak_start + 4].sum()
 
-    # Route to discover edges and their freeflow speeds
-    logger.info("Discovering edges via %d probe routes...", len(coords_list))
-    for o, d in coords_list:
-        rp = osrm.RouteParameters()
-        rp.coordinates = [o, d]
-        rp.annotations = True
-        rp.annotations_type = ["nodes", "speed", "distance"]
-        result = engine.Route(rp)
-        if result.get("code") == "Ok" and result.get("routes"):
-            for leg in result["routes"][0]["legs"]:
-                ann = leg["annotation"]
-                nodes = ann["nodes"]
-                speeds = ann.get("speed", [])
-                dists = ann.get("distance", [])
-                for si in range(len(nodes) - 1):
-                    spd = speeds[si] * 3.6 if si < len(speeds) else 50.0
-                    dist = dists[si] if si < len(dists) else 100.0
-                    state.register_edge(
-                        int(nodes[si]), int(nodes[si + 1]),
-                        float(dist), max(float(spd), 1.0),
-                        150.0,  # default jam density
-                        2,      # default lanes
-                    )
+    # Scale so peak hour sums to 1.0 × demand_scale of OD matrix
+    # Each period's demand = od[i,j] * (profile[p] / peak_hour_weight) * demand_scale
+    period_scale = (profile / peak_hour_weight) * demand_scale
 
-    del engine
-    logger.info("Discovered %d edges", state.n_edges)
+    logger.info("Demand profile: peak hour periods %d-%d (%.1fh-%.1fh), "
+                "scale range [%.3f, %.3f], total daily = %.1f× peak hour",
+                peak_start, peak_start + 3,
+                peak_start * 0.25, (peak_start + 4) * 0.25,
+                period_scale.min(), period_scale.max(),
+                period_scale.sum())
 
-    # Generate congestion factor per period (0-95)
-    # AM peak: periods 28-36 (7:00-9:00), PM peak: 64-72 (16:00-18:00)
-    hours = np.arange(N_PERIODS) * 0.25
-    # Smooth Gaussian peaks + raised-cosine midday shoulder
-    am = 0.50 * np.exp(-0.5 * ((hours - 8.0) / 1.0) ** 2)
-    pm = 0.60 * np.exp(-0.5 * ((hours - 17.0) / 1.2) ** 2)
-    midday = 0.15 * np.clip(np.cos(np.pi * (hours - 12.5) / 8.0), 0, 1)
-    congestion_factors = am + pm + midday
-
-    logger.info("Congestion factors: min=%.2f, max=%.2f, mean=%.2f",
-                congestion_factors.min(), congestion_factors.max(),
-                congestion_factors.mean())
-
-    writer = SegmentSpeedWriter(output_dir=str(work / "csvs"), prefix="period")
-    csv_paths = []
-
+    trips = []
     for p in range(N_PERIODS):
-        # Speed = freeflow * (1 - congestion_factor * 0.7)
-        # At peak: speeds drop to ~30% of freeflow
-        factor = 1.0 - congestion_factors[p] * 0.7
-        speeds = state.freeflow_kmh * factor
-        speeds = np.clip(speeds, 1.0, None)
+        if period_scale[p] < 1e-6:
+            continue
+        dep_base_s = p * PERIOD_DURATION_S
+        for i in range(od.shape[0]):
+            for j in range(od.shape[1]):
+                if od[i, j] > 0 and i != j:
+                    o_zone, d_zone = i + 1, j + 1
+                    if o_zone in centroids and d_zone in centroids:
+                        vol = od[i, j] * period_scale[p]
+                        if vol < 0.01:
+                            continue
+                        trips.append(DemandTrip(
+                            origin=centroids[o_zone],
+                            destination=centroids[d_zone],
+                            volume=vol,
+                            departure_time_s=dep_base_s + rng.uniform(0, PERIOD_DURATION_S),
+                        ))
 
-        csv_path = writer.write(state.edge_ids, speeds, suffix=f"_{p:03d}")
-        csv_paths.append(str(csv_path))
+    total_demand = sum(t.volume for t in trips)
+    n_od_pairs = len(set((t.origin, t.destination) for t in trips))
+    logger.info("Built %d trips (%.0f total demand) from %d OD pairs across %d periods",
+                len(trips), total_demand, n_od_pairs,
+                len(set(int(t.departure_time_s // PERIOD_DURATION_S) for t in trips)))
+    return trips
 
-    logger.info("Wrote %d CSVs to %s", len(csv_paths), work / "csvs")
-    return csv_paths, congestion_factors, state
 
+def run_assignment(
+    base: str,
+    meta: dict,
+    trips: list[DemandTrip],
+    work: Path,
+):
+    """Run assign_stream with production settings. Returns StreamResult."""
+    logger.info("=== Running streaming assignment (%d trips) ===", len(trips))
 
-def benchmark_customize(base: str, csv_paths: list):
-    """Run customize_multi_period with all 96 CSVs and time it."""
-    logger.info("=== Benchmarking customize_multi_period (%d periods) ===",
-                len(csv_paths))
+    run_dir = work / "assignment_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    period_speed_files = [(p, path) for p, path in enumerate(csv_paths)]
+    # Copy clean OSRM files so assign_stream can re-customize freely
+    src = Path(base).parent
+    for f in src.iterdir():
+        shutil.copy2(f, run_dir / f.name)
+    run_base = str(run_dir / Path(base).name)
 
-    mem_before = _get_mem_mb()
-    t0 = time.monotonic()
-    customize_multi_period(
-        base,
-        period_speed_files=period_speed_files,
+    config = AssignmentConfig(
+        smoothing=DensitySmoothingConfig(method="none"),
+        speed_csv_dir=str(run_dir),
         verbosity="INFO",
     )
-    cust_time = time.monotonic() - t0
-    mem_after = _get_mem_mb()
+    solver = AssignmentSolver(run_base, config)
 
-    logger.info("customize_multi_period: %.1fs, mem delta: +%.0f MB",
-                cust_time, mem_after - mem_before)
-
-    # Check file sizes
-    base_path = Path(base)
-    for suffix in [".cell_metrics", ".mldgr"]:
-        f = base_path.parent / (base_path.name + suffix)
-        if f.exists():
-            size_mb = f.stat().st_size / (1024 * 1024)
-            logger.info("  %s: %.1f MB", suffix, size_mb)
-
-    return cust_time
-
-
-def benchmark_engine_load(base: str):
-    """Load the multi-period engine and measure memory."""
-    logger.info("=== Benchmarking engine load ===")
-
-    mem_before = _get_mem_mb()
-    t0 = time.monotonic()
-    engine = osrm.OSRM(
-        storage_config=base, algorithm="MLD", use_shared_memory=False,
-    )
-    load_time = time.monotonic() - t0
-    mem_after = _get_mem_mb()
-
-    logger.info("Engine load: %.1fs, mem: %.0f MB (delta +%.0f MB)",
-                load_time, mem_after, mem_after - mem_before)
-
-    return engine, load_time, mem_after
-
-
-def benchmark_routing(engine, meta: dict, period_duration_s: float):
-    """Route sample trips at various departure periods and measure throughput."""
-    logger.info("=== Benchmarking routing throughput ===")
-
-    from osrm.osrm_ext import batch_route_accumulate
-
-    centroids = meta["zone_centroids"]
-    zone_ids = sorted(centroids.keys())
-    rng = np.random.default_rng(99)
-
-    # Build 20000 OD pairs for statistically meaningful durations
-    n_pairs = 20000
-    o_zones = rng.choice(zone_ids, size=n_pairs)
-    d_zones = rng.choice(zone_ids, size=n_pairs)
-
-    coords = np.empty((n_pairs, 4), dtype=np.float64)
-    volumes = np.ones(n_pairs, dtype=np.float64)
-
-    valid = 0
-    for i in range(n_pairs):
-        o, d = int(o_zones[i]), int(d_zones[i])
-        if o == d or o not in centroids or d not in centroids:
-            continue
-        oc, dc = centroids[o], centroids[d]
-        coords[valid] = [oc[0], oc[1], dc[0], dc[1]]
-        valid += 1
-
-    coords = coords[:valid]
-    volumes = volumes[:valid]
-    edge_ids = np.zeros((0, 2), dtype=np.uint64)
-    logger.info("Built %d valid OD pairs for routing benchmark", valid)
-
-    results = {}
-
-    # ── freeflow baseline (period 0 — overnight, near zero congestion) ──
-    # Use a 1k subsample for the sweep profile; 20k for spotlight periods
-    n_sweep = min(1000, valid)
-    sweep_coords = coords[:n_sweep]
-    sweep_vols = volumes[:n_sweep]
-
-    logger.info("  Routing freeflow baseline (period 0, %d trips)...", n_sweep)
-    _, _, _, _, ff_durations = batch_route_accumulate(
-        engine._engine, sweep_coords, sweep_vols, edge_ids,
-        n_threads=0, return_routes=False,
-        departure_period=0, period_duration=period_duration_s,
-        departure_offsets=np.zeros(n_sweep, dtype=np.float64),
-        n_periods=0,
-    )
-    ff_durs = np.asarray(ff_durations)
-    ff_routed = ff_durs > 0
-    ff_mean = np.mean(ff_durs[ff_routed]) if np.any(ff_routed) else 1.0
-
-    # ── sweep all periods for TT/FFTT profile ───────────────────────
-    logger.info("  Sweeping all %d periods for TT/FFTT profile (%d trips)...",
-                N_PERIODS, n_sweep)
-    tt_ratio_by_period = np.ones(N_PERIODS)
-    for p in range(N_PERIODS):
-        _, _, _, _, durs_p = batch_route_accumulate(
-            engine._engine, sweep_coords, sweep_vols, edge_ids,
-            n_threads=0, return_routes=False,
-            departure_period=p, period_duration=period_duration_s,
-            departure_offsets=np.zeros(n_sweep, dtype=np.float64),
-            n_periods=0,
-        )
-        durs_p = np.asarray(durs_p)
-        mask = ff_routed & (durs_p > 0)
-        if np.any(mask):
-            tt_ratio_by_period[p] = np.mean(durs_p[mask]) / np.mean(ff_durs[mask])
-
-    logger.info("  TT/FFTT range: [%.2f, %.2f]",
-                tt_ratio_by_period.min(), tt_ratio_by_period.max())
-
-    # ── spotlight periods for throughput benchmarks ────────────────────
-    test_periods = [
-        ("off-peak (3am)", 12),
-        ("AM peak (8am)", 32),
-        ("midday (12pm)", 48),
-        ("PM peak (5pm)", 68),
-    ]
-
-    for label, dep_period in test_periods:
-        offsets = rng.uniform(0, period_duration_s, size=valid).astype(np.float64)
-
-        t0 = time.monotonic()
-        _, tstt, new_edges, _, durations = batch_route_accumulate(
-            engine._engine, coords, volumes, edge_ids,
-            n_threads=0, return_routes=False,
-            departure_period=dep_period,
-            period_duration=period_duration_s,
-            departure_offsets=offsets,
-            n_periods=0,
-        )
-        elapsed = time.monotonic() - t0
-
-        durs = np.asarray(durations)
-        routed = np.sum(durs > 0)
-        mean_dur = np.mean(durs[durs > 0]) if routed > 0 else 0
-
-        throughput = routed / max(elapsed, 0.001)
-        results[label] = {
-            "period": dep_period,
-            "routed": int(routed),
-            "elapsed_s": elapsed,
-            "throughput": throughput,
-            "mean_duration_s": mean_dur,
-        }
-
-        logger.info(
-            "  %s (p=%d): %d/%d routed in %.2fs (%.0f routes/s), "
-            "mean_dur=%.1fs",
-            label, dep_period, routed, valid, elapsed, throughput, mean_dur,
-        )
-
-    # ── realistic 24h loading with spillover ────────────────────────
-    # Distribute trips across the day with a realistic demand profile:
-    # strong AM/PM peaks, near-zero overnight
-    logger.info("  Routing 24h demand profile with 2D attribution...")
-    hours_profile = np.arange(N_PERIODS) * 0.25
-    demand_weight = (
-        0.50 * np.exp(-0.5 * ((hours_profile - 8.0) / 1.2) ** 2) +
-        0.40 * np.exp(-0.5 * ((hours_profile - 17.5) / 1.5) ** 2) +
-        0.08 * np.clip(np.cos(np.pi * (hours_profile - 13.0) / 12.0), 0, 1)
-    )
-    demand_weight = np.clip(demand_weight, 0, None)
-    demand_weight /= demand_weight.sum()
-
-    # Assign each trip a departure period from the demand profile
-    trip_periods = rng.choice(N_PERIODS, size=valid, p=demand_weight)
-    dep_offsets_24h = (
-        trip_periods * period_duration_s +
-        rng.uniform(0, period_duration_s, size=valid)
-    ).astype(np.float64)
-
-    # Count departures per period
-    departures_per_period = np.bincount(trip_periods, minlength=N_PERIODS).astype(float)
+    def lane_patch(state):
+        patch_lanes(state, meta)
 
     t0 = time.monotonic()
-    vol2d_24h, _, _, _, durs_24h = batch_route_accumulate(
-        engine._engine, coords, volumes, edge_ids,
-        n_threads=0, return_routes=False,
-        departure_period=0,
-        period_duration=period_duration_s,
-        departure_offsets=dep_offsets_24h,
-        n_periods=N_PERIODS,
+    result = solver.assign_stream(
+        trips,
+        period_duration_s=PERIOD_DURATION_S,
+        state_patch=lane_patch,
     )
-    elapsed_24h = time.monotonic() - t0
+    total_time = time.monotonic() - t0
 
-    v2d = np.asarray(vol2d_24h)
-    volume_per_period = np.sum(v2d, axis=1)  # total link-volume per period
+    logger.info("Assignment complete: %d batches in %.1fs (%.1f trips/s)",
+                result.n_batches, total_time,
+                result.n_trips / max(total_time, 0.001))
 
-    spillover_data = {
-        "departures_per_period": departures_per_period,
-        "volume_per_period": volume_per_period,
-        "volume_2d": v2d,  # (n_periods, n_edges) for saturation analysis
-    }
+    return result
 
-    durs_24h = np.asarray(durs_24h)
-    routed_24h = np.sum(durs_24h > 0)
-    spill_periods = np.sum(volume_per_period > 0)
-    logger.info(
-        "  24h loading: %d/%d routed in %.2fs, %d/%d periods have flow",
-        routed_24h, valid, elapsed_24h, spill_periods, N_PERIODS,
-    )
-
-    return results, tt_ratio_by_period, spillover_data
 
 
 def generate_report(
-    congestion_factors: np.ndarray,
-    cust_time: float,
-    load_time: float,
-    mem_mb: float,
-    routing_results: dict,
-    tt_ratio_by_period: np.ndarray,
-    spillover_data: dict,
-    net_state,
+    result,  # StreamResult from assign_stream
+    trips: list[DemandTrip],
+    total_time_s: float,
     output_path: str = "plots/scale_test_multi_period.html",
 ):
-    """Generate an HTML report with scale test results."""
+    """Generate an HTML report from streaming assignment results."""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
     from osrm.assignment.plots import _write_combined_report
 
     figs = []
     descriptions = []
-
-    # ── 1. Time-of-day congestion profile ──────────────────────────
     hours = np.arange(N_PERIODS) * 0.25
-    fig_profile = go.Figure()
-    fig_profile.add_trace(go.Scatter(
-        x=hours.tolist(),
-        y=congestion_factors.tolist(),
-        mode="lines",
-        fill="tozeroy",
-        line=dict(color="#1565C0", width=2),
-        fillcolor="rgba(21, 101, 192, 0.15)",
-        hovertemplate="Hour %{x:.1f}: factor=%{y:.2f}<extra></extra>",
+
+    # ── Compute per-period demand from trips ─────────────────────────
+    departures_per_period = np.zeros(N_PERIODS)
+    demand_per_period = np.zeros(N_PERIODS)
+    for t in trips:
+        p = min(int(t.departure_time_s // PERIOD_DURATION_S), N_PERIODS - 1)
+        departures_per_period[p] += 1
+        demand_per_period[p] += t.volume
+
+    # ── Derive data from StreamResult ────────────────────────────────
+    state = result.network_state
+    batch_log = result.batch_log
+    period_flows = result.period_flows  # (n_periods, n_edges) or None
+
+    if period_flows is not None and period_flows.ndim == 2:
+        volume_per_period = np.sum(period_flows, axis=1)
+        n_flow_periods = period_flows.shape[0]
+    else:
+        volume_per_period = np.zeros(N_PERIODS)
+        n_flow_periods = 0
+
+    # ── 1. Demand profile ────────────────────────────────────────────
+    fig_demand = go.Figure()
+    fig_demand.add_trace(go.Bar(
+        name="Demand (veh)", x=hours.tolist(), y=demand_per_period.tolist(),
+        marker_color="#1565C0", opacity=0.7,
+        hovertemplate="Hour %{x:.1f}: %{y:,.0f} veh<extra></extra>",
     ))
-    fig_profile.update_layout(
+    fig_demand.add_trace(go.Scatter(
+        name="Trip count", x=hours.tolist(), y=departures_per_period.tolist(),
+        mode="lines", line=dict(color="#E65100", width=2, dash="dash"),
+        yaxis="y2",
+    ))
+    fig_demand.update_layout(
         template="plotly_white", height=350,
         xaxis_title="Hour of day",
-        yaxis_title="Congestion factor",
-        xaxis=dict(dtick=2, range=[0, 24]),
-        yaxis=dict(rangemode="tozero"),
-    )
-    figs.append(fig_profile)
-    descriptions.append(
-        "<h2>Time-of-Day Congestion Profile</h2>"
-        "<p>Synthetic congestion factors applied to generate per-period "
-        "speed CSVs. AM peak ~8:00, PM peak ~17:00. Factor of 0.6 means "
-        "speeds drop to 58% of freeflow.</p>"
-    )
-
-    # ── 2. TT / FFTT ratio by time of day ─────────────────────────
-    fig_ratio = go.Figure()
-    fig_ratio.add_trace(go.Scatter(
-        x=hours.tolist(),
-        y=tt_ratio_by_period.tolist(),
-        mode="lines",
-        line=dict(color="#E65100", width=2.5),
-        fill="tozeroy",
-        fillcolor="rgba(230, 81, 0, 0.10)",
-        hovertemplate="Hour %{x:.1f}: TT/FFTT=%{y:.3f}<extra></extra>",
-    ))
-    fig_ratio.add_hline(y=1.0, line_dash="dash", line_color="grey",
-                        annotation_text="freeflow")
-    fig_ratio.update_layout(
-        template="plotly_white", height=350,
-        xaxis_title="Hour of day",
-        yaxis_title="TT / FFTT",
-        xaxis=dict(dtick=2, range=[0, 24]),
-        yaxis=dict(rangemode="tozero"),
-    )
-    figs.append(fig_ratio)
-    descriptions.append(
-        "<h2>Experienced Travel Time Ratio (TT / FFTT)</h2>"
-        "<p>Mean travel time across 20k OD pairs at each period divided by "
-        "the freeflow mean. A ratio of 1.0 is uncongested; higher values "
-        "reflect the congestion penalty from the synthetic speed profile. "
-        f"Peak ratio: <b>{tt_ratio_by_period.max():.3f}</b>.</p>"
-    )
-
-    # ── 2. Infrastructure timing bar chart ─────────────────────────
-    timing_labels = [
-        f"customize\n({N_PERIODS} periods)",
-        "engine load",
-    ]
-    timing_values = [cust_time, load_time]
-
-    fig_timing = go.Figure()
-    fig_timing.add_trace(go.Bar(
-        x=timing_labels,
-        y=timing_values,
-        text=[f"{v:.1f}s" for v in timing_values],
-        textposition="outside",
-        marker_color=["#1565C0", "#2196F3"],
-    ))
-    fig_timing.update_layout(
-        template="plotly_white", height=350,
-        yaxis_title="Time (seconds)",
-        yaxis=dict(rangemode="tozero"),
-    )
-    figs.append(fig_timing)
-    descriptions.append(
-        "<h2>Infrastructure Timing</h2>"
-        f"<p><code>customize_multi_period</code> with {N_PERIODS} period "
-        f"CSVs: <b>{cust_time:.1f}s</b>. Engine load (all period cell "
-        f"metrics + weight deltas): <b>{load_time:.1f}s</b>. "
-        f"Peak RSS: <b>{mem_mb:.0f} MB</b>.</p>"
-    )
-
-    # ── 3. Routing throughput by period ────────────────────────────
-    r_labels = list(routing_results.keys())
-    r_throughput = [routing_results[k]["throughput"] for k in r_labels]
-    r_mean_dur = [routing_results[k]["mean_duration_s"] for k in r_labels]
-
-    fig_route = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=["Routing Throughput", "Mean Trip Duration"],
-    )
-    fig_route.add_trace(go.Bar(
-        x=r_labels, y=r_throughput,
-        text=[f"{v:.0f}" for v in r_throughput],
-        textposition="outside",
-        marker_color="#43A047",
-    ), row=1, col=1)
-    fig_route.add_trace(go.Bar(
-        x=r_labels, y=r_mean_dur,
-        text=[f"{v:.0f}s" for v in r_mean_dur],
-        textposition="outside",
-        marker_color="#FF8F00",
-    ), row=1, col=2)
-    fig_route.update_yaxes(title_text="Routes/sec", row=1, col=1)
-    fig_route.update_yaxes(title_text="Duration (s)", row=1, col=2)
-    fig_route.update_layout(
-        template="plotly_white", height=400, showlegend=False,
-    )
-    figs.append(fig_route)
-    descriptions.append(
-        "<h2>Routing Performance by Departure Period</h2>"
-        "<p>Throughput (routes/s) and mean trip duration routing 20k OD "
-        "pairs at different times of day against a 96-period multi-period "
-        "OSRM engine. Throughput should be stable regardless of period; "
-        "duration varies with congestion level.</p>"
-    )
-
-    # ── 5. Actual 24h network loading with spillover ────────────────
-    departures = spillover_data["departures_per_period"]
-    vol_per_p = spillover_data["volume_per_period"]
-
-    # Normalize departures to same scale as volume for visual comparison
-    # Scale departures so its peak matches volume peak (makes shape comparison easy)
-    dep_scale = vol_per_p.max() / max(departures.max(), 1) if departures.max() > 0 else 1
-    dep_scaled = departures * dep_scale
-
-    fig_spill = go.Figure()
-
-    # Actual volume per period (from 2D attribution)
-    fig_spill.add_trace(go.Bar(
-        name="Network volume (actual)",
-        x=hours.tolist(),
-        y=vol_per_p.tolist(),
-        marker_color="#1565C0",
-        opacity=0.7,
-        hovertemplate="Hour %{x:.1f}: vol=%{y:,.0f}<extra>actual</extra>",
-    ))
-
-    # Departures overlay (scaled to same peak)
-    fig_spill.add_trace(go.Scatter(
-        name="Trip departures (scaled)",
-        x=hours.tolist(),
-        y=dep_scaled.tolist(),
-        mode="lines",
-        line=dict(color="#E65100", width=2.5, dash="dash"),
-        hovertemplate="Hour %{x:.1f}: departures=%{customdata}<extra>demand</extra>",
-        customdata=departures.astype(int).tolist(),
-    ))
-
-    fig_spill.update_layout(
-        template="plotly_white", height=400,
-        xaxis_title="Hour of day",
-        yaxis_title="Total link-volume (veh·links)",
+        yaxis_title="Demand (vehicles)",
+        yaxis2=dict(title="Trip count", overlaying="y", side="right"),
         xaxis=dict(dtick=2, range=[0, 24]),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
-    figs.append(fig_spill)
-
-    # Quantify spillover: periods where volume > 0 but departures == 0
-    pure_spill = np.sum((vol_per_p > 0) & (departures == 0))
-    # Volume-weighted lag: how much later volume appears vs departures
-    vol_total = vol_per_p.sum()
-    dep_total = departures.sum()
-    if vol_total > 0 and dep_total > 0:
-        vol_centroid = np.average(np.arange(N_PERIODS), weights=vol_per_p)
-        dep_centroid = np.average(np.arange(N_PERIODS), weights=departures)
-        lag_min = (vol_centroid - dep_centroid) * (PERIOD_DURATION_S / 60)
-    else:
-        lag_min = 0
+    figs.append(fig_demand)
+    total_demand = demand_per_period.sum()
+    peak_demand = demand_per_period.max()
     descriptions.append(
-        "<h2>Network Loading vs. Trip Departures</h2>"
-        "<p>Blue bars show actual link-volume per period from routing 20k "
-        "trips distributed across 24h with a realistic demand profile "
-        "(AM/PM peaks). The dashed orange line shows when trips depart "
-        "(scaled to the same peak). The gap between the two reveals "
-        "<b>spillover</b>: volume shifts rightward because trips that "
-        "depart in one period are still traveling in the next.</p>"
-        f"<p>Volume centroid lags departures by <b>{lag_min:.1f} min</b>. "
-        f"<b>{pure_spill}</b> periods have volume but zero departures "
-        f"(pure spillover).</p>"
+        "<h2>Demand Profile</h2>"
+        f"<p>Total daily demand: <b>{total_demand:,.0f}</b> vehicles across "
+        f"<b>{int(np.sum(departures_per_period > 0))}</b> active periods. "
+        f"Peak period demand: <b>{peak_demand:,.0f}</b> veh. "
+        f"Total trip records: <b>{len(trips):,}</b>.</p>"
     )
 
-    # ── 6. Link saturation & spillover by period ─────────────────
-    vol_2d = spillover_data["volume_2d"]  # (n_periods, n_edges)
-    n_discovered = vol_2d.shape[1] if vol_2d.ndim == 2 else 0
+    # ── 2. Assignment convergence (batch metrics) ────────────────────
+    if batch_log:
+        batch_idx = [b.batch_index for b in batch_log]
+        mean_speeds = [b.mean_speed_kmh for b in batch_log]
+        queue_veh = [b.queue_vehicles for b in batch_log]
+        n_oversat = [b.n_oversaturated for b in batch_log]
+        tsstts = [b.tstt for b in batch_log]
 
-    # Compute per-edge capacity (veh/period) from NetworkState
-    # capacity_vph = n_lanes * per_lane_capacity; scale to period duration
-    per_lane_cap = 1800.0  # veh/hr/lane
-    if net_state is not None and net_state.n_edges > 0:
-        edge_cap_vph = net_state.n_lanes[:n_discovered].astype(float) * per_lane_cap
-        edge_cap_per_period = edge_cap_vph * (PERIOD_DURATION_S / 3600.0)
-    else:
-        edge_cap_per_period = np.full(n_discovered, 2 * per_lane_cap * PERIOD_DURATION_S / 3600.0)
+        fig_conv = make_subplots(
+            rows=2, cols=2, shared_xaxes=True,
+            subplot_titles=["Mean Speed (km/h)", "Queue Vehicles (veh/hr/lane)",
+                            "Oversaturated Links", "TSTT (veh·s)"],
+            vertical_spacing=0.12, horizontal_spacing=0.10,
+        )
+        fig_conv.add_trace(go.Scatter(
+            x=batch_idx, y=mean_speeds, mode="lines",
+            line=dict(color="#1565C0", width=2),
+        ), row=1, col=1)
+        fig_conv.add_trace(go.Scatter(
+            x=batch_idx, y=queue_veh, mode="lines",
+            line=dict(color="#E65100", width=2),
+        ), row=1, col=2)
+        fig_conv.add_trace(go.Scatter(
+            x=batch_idx, y=n_oversat, mode="lines",
+            line=dict(color="#C62828", width=2),
+        ), row=2, col=1)
+        fig_conv.add_trace(go.Scatter(
+            x=batch_idx, y=tsstts, mode="lines",
+            line=dict(color="#43A047", width=2),
+        ), row=2, col=2)
+        fig_conv.update_xaxes(title_text="Batch", row=2, col=1)
+        fig_conv.update_xaxes(title_text="Batch", row=2, col=2)
+        fig_conv.update_layout(
+            template="plotly_white", height=500, showlegend=False,
+        )
+        figs.append(fig_conv)
 
-    # Per period: count links with flow, saturated links, multi-period links
-    links_with_flow = np.zeros(N_PERIODS, dtype=int)
-    links_saturated = np.zeros(N_PERIODS, dtype=int)
-    links_over_50pct = np.zeros(N_PERIODS, dtype=int)
-    max_vc_ratio = np.zeros(N_PERIODS, dtype=float)
-
-    for p in range(N_PERIODS):
-        row = vol_2d[p] if vol_2d.ndim == 2 else np.zeros(0)
-        has_flow = row > 0
-        links_with_flow[p] = np.sum(has_flow)
-        if n_discovered > 0 and len(edge_cap_per_period) > 0:
-            vc = np.where(edge_cap_per_period > 0, row / edge_cap_per_period, 0)
-            links_saturated[p] = np.sum(vc >= 1.0)
-            links_over_50pct[p] = np.sum(vc >= 0.5)
-            max_vc_ratio[p] = vc.max() if len(vc) > 0 else 0
-
-    # Links with spillover: appear in a period where they had no departures
-    # (i.e., flow in periods beyond the departure window)
-    dep_pp = spillover_data["departures_per_period"]
-    links_spill_only = np.zeros(N_PERIODS, dtype=int)
-    for p in range(N_PERIODS):
-        if dep_pp[p] == 0 and vol_2d.ndim == 2:
-            links_spill_only[p] = np.sum(vol_2d[p] > 0)
-
-    fig_sat = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
-        subplot_titles=["Link Utilization by Period", "V/C Ratio & Spillover Links"],
-    )
-
-    # Top: links with flow, >50% saturated, fully saturated
-    fig_sat.add_trace(go.Scatter(
-        name="Links with flow",
-        x=hours.tolist(), y=links_with_flow.tolist(),
-        mode="lines", line=dict(color="#1565C0", width=2),
-        fill="tozeroy", fillcolor="rgba(21, 101, 192, 0.10)",
-    ), row=1, col=1)
-    fig_sat.add_trace(go.Scatter(
-        name="Links > 50% capacity",
-        x=hours.tolist(), y=links_over_50pct.tolist(),
-        mode="lines", line=dict(color="#FF8F00", width=2),
-        fill="tozeroy", fillcolor="rgba(255, 143, 0, 0.15)",
-    ), row=1, col=1)
-    fig_sat.add_trace(go.Scatter(
-        name="Links ≥ 100% capacity",
-        x=hours.tolist(), y=links_saturated.tolist(),
-        mode="lines", line=dict(color="#C62828", width=2),
-        fill="tozeroy", fillcolor="rgba(198, 40, 40, 0.15)",
-    ), row=1, col=1)
-
-    # Bottom: max V/C ratio + spillover-only links
-    fig_sat.add_trace(go.Scatter(
-        name="Max V/C ratio",
-        x=hours.tolist(), y=max_vc_ratio.tolist(),
-        mode="lines", line=dict(color="#E65100", width=2.5),
-    ), row=2, col=1)
-    fig_sat.add_trace(go.Bar(
-        name="Spillover-only links",
-        x=hours.tolist(), y=links_spill_only.tolist(),
-        marker_color="rgba(21, 101, 192, 0.4)",
-    ), row=2, col=1)
-    fig_sat.add_hline(y=1.0, line_dash="dash", line_color="grey",
-                      annotation_text="V/C = 1.0", row=2, col=1)
-
-    fig_sat.update_xaxes(title_text="Hour of day", dtick=2, range=[0, 24], row=2, col=1)
-    fig_sat.update_yaxes(title_text="Link count", row=1, col=1)
-    fig_sat.update_yaxes(title_text="V/C ratio / count", row=2, col=1)
-    fig_sat.update_layout(
-        template="plotly_white", height=600,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-    )
-    figs.append(fig_sat)
-
-    peak_sat = int(links_saturated.max())
-    peak_50 = int(links_over_50pct.max())
-    peak_flow = int(links_with_flow.max())
-    peak_vc = max_vc_ratio.max()
-    peak_spill_links = int(links_spill_only.max())
-    descriptions.append(
-        "<h2>Link Saturation & Spillover by Period</h2>"
-        f"<p><b>Top panel:</b> Of {n_discovered:,} discovered edges, "
-        f"peak <b>{peak_flow:,}</b> have flow in any period, "
-        f"<b>{peak_50:,}</b> exceed 50% V/C, and "
-        f"<b>{peak_sat:,}</b> are fully saturated (V/C ≥ 1.0). "
-        f"Capacity assumed at {per_lane_cap:.0f} veh/hr/lane.</p>"
-        f"<p><b>Bottom panel:</b> Peak V/C ratio = <b>{peak_vc:.2f}</b>. "
-        f"Spillover-only links (flow in periods with zero departures) peak "
-        f"at <b>{peak_spill_links:,}</b> — these are links still carrying "
-        f"traffic from trips that departed in earlier periods.</p>"
-    )
-
-    # ── 7. Summary table ──────────────────────────────────────────
-    rows_html = ""
-    for label, r in routing_results.items():
-        rows_html += (
-            f"<tr><td>{label}</td>"
-            f"<td style='text-align:right'>{r['routed']}</td>"
-            f"<td style='text-align:right'>{r['elapsed_s']:.2f}s</td>"
-            f"<td style='text-align:right'>{r['throughput']:.0f}</td>"
-            f"<td style='text-align:right'>{r['mean_duration_s']:.0f}s</td></tr>"
+        final = batch_log[-1]
+        descriptions.append(
+            "<h2>Assignment Loading Profile</h2>"
+            f"<p><b>{result.n_batches}</b> batches in "
+            f"<b>{total_time_s:.0f}s</b> ({total_time_s/60:.1f} min). "
+            f"Final state: mean speed <b>{final.mean_speed_kmh:.1f}</b> km/h, "
+            f"min speed <b>{final.min_speed_kmh:.1f}</b> km/h, "
+            f"<b>{final.n_oversaturated}</b> oversaturated links, "
+            f"queue <b>{final.queue_vehicles:.1f}</b> veh/hr/lane.</p>"
         )
 
+    # ── 3. Network loading vs departures (spillover) ─────────────────
+    if n_flow_periods > 0:
+        vpp = np.zeros(N_PERIODS)
+        vpp[:min(n_flow_periods, N_PERIODS)] = volume_per_period[:min(n_flow_periods, N_PERIODS)]
+
+        dep_scale = vpp.max() / max(demand_per_period.max(), 1)
+        dep_scaled = demand_per_period * dep_scale
+
+        fig_spill = go.Figure()
+        fig_spill.add_trace(go.Bar(
+            name="Network volume (actual)",
+            x=hours.tolist(), y=vpp.tolist(),
+            marker_color="#1565C0", opacity=0.7,
+            hovertemplate="Hour %{x:.1f}: vol=%{y:,.0f}<extra>actual</extra>",
+        ))
+        fig_spill.add_trace(go.Scatter(
+            name="Demand (scaled)", x=hours.tolist(), y=dep_scaled.tolist(),
+            mode="lines", line=dict(color="#E65100", width=2.5, dash="dash"),
+        ))
+        fig_spill.update_layout(
+            template="plotly_white", height=400,
+            xaxis_title="Hour of day",
+            yaxis_title="Total link-volume (veh·links)",
+            xaxis=dict(dtick=2, range=[0, 24]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        figs.append(fig_spill)
+
+        pure_spill = int(np.sum((vpp > 0) & (demand_per_period == 0)))
+        if vpp.sum() > 0 and demand_per_period.sum() > 0:
+            vol_c = np.average(np.arange(N_PERIODS), weights=np.clip(vpp, 1e-10, None))
+            dep_c = np.average(np.arange(N_PERIODS), weights=np.clip(demand_per_period, 1e-10, None))
+            lag_min = (vol_c - dep_c) * (PERIOD_DURATION_S / 60)
+        else:
+            lag_min = 0
+        descriptions.append(
+            "<h2>Network Loading vs. Trip Departures</h2>"
+            "<p>Blue bars: actual link-volume per period from streaming "
+            "assignment with VDF feedback. Dashed orange: demand (scaled). "
+            "The rightward shift reveals <b>spillover</b>.</p>"
+            f"<p>Volume centroid lags departures by <b>{lag_min:.1f} min</b>. "
+            f"<b>{pure_spill}</b> periods have volume but zero departures.</p>"
+        )
+
+    # ── 4. Link saturation by period ─────────────────────────────────
+    if period_flows is not None and period_flows.ndim == 2 and state is not None:
+        n_edges = period_flows.shape[1]
+        per_lane_cap = 1800.0
+        edge_cap_vph = state.n_lanes[:n_edges].astype(float) * per_lane_cap
+        edge_cap_per_period = edge_cap_vph * (PERIOD_DURATION_S / 3600.0)
+
+        links_with_flow = np.zeros(N_PERIODS, dtype=int)
+        links_saturated = np.zeros(N_PERIODS, dtype=int)
+        links_over_50pct = np.zeros(N_PERIODS, dtype=int)
+        max_vc_ratio = np.zeros(N_PERIODS, dtype=float)
+
+        for p in range(min(n_flow_periods, N_PERIODS)):
+            row = period_flows[p]
+            links_with_flow[p] = int(np.sum(row > 0))
+            vc = np.where(edge_cap_per_period > 0, row / edge_cap_per_period, 0)
+            links_saturated[p] = int(np.sum(vc >= 1.0))
+            links_over_50pct[p] = int(np.sum(vc >= 0.5))
+            max_vc_ratio[p] = float(vc.max()) if len(vc) > 0 else 0
+
+        fig_sat = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+            subplot_titles=["Link Utilization by Period", "V/C Ratio"],
+        )
+        fig_sat.add_trace(go.Scatter(
+            name="Links with flow", x=hours.tolist(), y=links_with_flow.tolist(),
+            mode="lines", line=dict(color="#1565C0", width=2),
+            fill="tozeroy", fillcolor="rgba(21, 101, 192, 0.10)",
+        ), row=1, col=1)
+        fig_sat.add_trace(go.Scatter(
+            name="Links > 50% V/C", x=hours.tolist(), y=links_over_50pct.tolist(),
+            mode="lines", line=dict(color="#FF8F00", width=2),
+            fill="tozeroy", fillcolor="rgba(255, 143, 0, 0.15)",
+        ), row=1, col=1)
+        fig_sat.add_trace(go.Scatter(
+            name="Links >= 100% V/C", x=hours.tolist(), y=links_saturated.tolist(),
+            mode="lines", line=dict(color="#C62828", width=2),
+            fill="tozeroy", fillcolor="rgba(198, 40, 40, 0.15)",
+        ), row=1, col=1)
+        fig_sat.add_trace(go.Scatter(
+            name="Max V/C ratio", x=hours.tolist(), y=max_vc_ratio.tolist(),
+            mode="lines", line=dict(color="#E65100", width=2.5),
+        ), row=2, col=1)
+        fig_sat.add_hline(y=1.0, line_dash="dash", line_color="grey",
+                          annotation_text="V/C = 1.0", row=2, col=1)
+        fig_sat.update_xaxes(title_text="Hour of day", dtick=2, range=[0, 24], row=2, col=1)
+        fig_sat.update_yaxes(title_text="Link count", row=1, col=1)
+        fig_sat.update_yaxes(title_text="V/C ratio", row=2, col=1)
+        fig_sat.update_layout(
+            template="plotly_white", height=600,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        figs.append(fig_sat)
+
+        descriptions.append(
+            "<h2>Link Saturation by Period</h2>"
+            f"<p>Of {n_edges:,} discovered edges, "
+            f"peak <b>{int(links_with_flow.max()):,}</b> have flow, "
+            f"<b>{int(links_over_50pct.max()):,}</b> exceed 50% V/C, "
+            f"<b>{int(links_saturated.max()):,}</b> fully saturated. "
+            f"Peak V/C = <b>{float(max_vc_ratio.max()):.2f}</b>.</p>"
+        )
+
+    # ── 5. Summary ───────────────────────────────────────────────────
     figs.append(None)
     descriptions.append(
         "<h2>Summary</h2>"
-        "<table style='border-collapse:collapse; width:100%;'>"
-        "<thead><tr style='border-bottom:2px solid #1565C0;'>"
-        "<th style='text-align:left; padding:6px;'>Period</th>"
-        "<th style='text-align:right; padding:6px;'>Routed</th>"
-        "<th style='text-align:right; padding:6px;'>Time</th>"
-        "<th style='text-align:right; padding:6px;'>Routes/s</th>"
-        "<th style='text-align:right; padding:6px;'>Mean dur</th>"
-        "</tr></thead><tbody>"
-        f"{rows_html}"
-        "</tbody></table>"
-        "<br>"
         f"<p><b>Network:</b> chi-regional (12,982 nodes, 39,018 links, "
         f"1,790 zones)</p>"
-        f"<p><b>Periods:</b> {N_PERIODS} × {PERIOD_DURATION_S:.0f}s "
+        f"<p><b>Periods:</b> {N_PERIODS} x {PERIOD_DURATION_S:.0f}s "
         f"(24-hour day at 15-min intervals)</p>"
-        f"<p><b>customize_multi_period:</b> {cust_time:.1f}s</p>"
-        f"<p><b>Engine load:</b> {load_time:.1f}s, RSS={mem_mb:.0f} MB</p>"
+        f"<p><b>Total demand:</b> {total_demand:,.0f} vehicles</p>"
+        f"<p><b>Trip records:</b> {len(trips):,}</p>"
+        f"<p><b>Assignment:</b> {result.n_batches} batches in "
+        f"{total_time_s:.0f}s ({total_time_s/60:.1f} min)</p>"
+        f"<p><b>Peak RSS:</b> {_get_mem_mb():.0f} MB</p>"
     )
 
     out = Path(output_path)
     _write_combined_report(
-        title=f"Multi-Period Scale Test — chi-regional, {N_PERIODS} periods",
+        title=f"Multi-Period Scale Test - chi-regional, {N_PERIODS} periods",
         intro=(
-            "<p>Benchmarks the multi-period OSRM infrastructure at scale: "
-            f"{N_PERIODS} periods (24-hour day at 15-min intervals) on the "
-            "Chicago Regional network (12,982 nodes, 39,018 links). "
-            "Measures <code>customize_multi_period</code> runtime, engine "
-            "memory footprint, and routing throughput at varying congestion "
-            "levels.</p>"
+            f"<p>Streaming assignment on the Chicago Regional network "
+            f"({N_PERIODS} periods, 24h at 15-min intervals). "
+            f"Total demand: {total_demand:,.0f} vehicles loaded via "
+            f"<code>assign_stream</code> with autotune batching and "
+            f"VDF feedback.</p>"
         ),
         figures=figs,
         descriptions=descriptions,
@@ -767,6 +474,8 @@ def main():
                         help="Working directory (default: /tmp/scale_test)")
     parser.add_argument("--output", type=str, default="plots/scale_test_multi_period.html",
                         help="Report output path")
+    parser.add_argument("--demand-scale", type=float, default=1.0,
+                        help="Demand multiplier (default 1.0 = full peak-hour demand)")
     args = parser.parse_args()
 
     work = Path(args.work_dir or "/tmp/scale_test_multi_period")
@@ -778,25 +487,17 @@ def main():
     # 1. Build network
     base, meta = build_network(work)
 
-    # 2. Generate period CSVs
-    csv_paths, congestion_factors, net_state = generate_period_csvs(base, meta, work)
+    # 2. Build demand from OD matrix with 24h profile
+    trips = build_demand(meta, demand_scale=args.demand_scale)
 
-    # 3. Benchmark customize_multi_period
-    cust_time = benchmark_customize(base, csv_paths)
+    # 3. Run streaming assignment
+    t0 = time.monotonic()
+    result = run_assignment(base, meta, trips, work)
+    total_time = time.monotonic() - t0
 
-    # 4. Benchmark engine load
-    engine, load_time, mem_mb = benchmark_engine_load(base)
-
-    # 5. Benchmark routing
-    routing_results, tt_ratio, spillover = benchmark_routing(
-        engine, meta, PERIOD_DURATION_S,
-    )
-    del engine
-
-    # 6. Generate report
+    # 4. Generate report
     report_path = generate_report(
-        congestion_factors, cust_time, load_time, mem_mb,
-        routing_results, tt_ratio, spillover, net_state,
+        result, trips, total_time,
         output_path=args.output,
     )
 
@@ -804,13 +505,15 @@ def main():
     logger.info("\n" + "=" * 60)
     logger.info("SCALE TEST SUMMARY: chi-regional, %d periods", N_PERIODS)
     logger.info("=" * 60)
-    logger.info("Network: %d zones, %d links",
-                len(meta["zone_centroids"]), meta["od_matrix"].shape[0])
-    logger.info("customize_multi_period: %.1fs", cust_time)
-    logger.info("Engine load: %.1fs, RSS: %.0f MB", load_time, mem_mb)
-    for label, r in routing_results.items():
-        logger.info("Route %-20s: %.0f routes/s, mean_dur=%.0fs",
-                     label, r["throughput"], r["mean_duration_s"])
+    logger.info("Demand: %.0f veh (scale=%.2f), %d trips",
+                sum(t.volume for t in trips), args.demand_scale, len(trips))
+    logger.info("Assignment: %d batches in %.0fs",
+                result.n_batches, total_time)
+    if result.batch_log:
+        final = result.batch_log[-1]
+        logger.info("Final: mean_speed=%.1f km/h, oversaturated=%d, queue=%.1f",
+                     final.mean_speed_kmh, final.n_oversaturated,
+                     final.queue_vehicles)
     logger.info("Report: %s", report_path)
     logger.info("=" * 60)
 

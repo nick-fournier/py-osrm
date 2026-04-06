@@ -1,12 +1,12 @@
 """End-to-end smoke tests for the multi-period scale test script.
 
-Exercises the full pipeline (build_network → generate_period_csvs →
-customize → route) on chi-regional to catch runtime crashes before
-the user runs the expensive scale test.  Marked @pytest.mark.slow.
+Exercises the full pipeline (build_network → build_demand →
+run_assignment → generate_report) on chi-regional to catch runtime
+crashes before the user runs the expensive scale test.
+Marked @pytest.mark.slow.
 """
 
 import sys
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +15,6 @@ import pytest
 # Make scripts/ importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scripts"))
 
-import osrm
 from osrm.assignment.osm_synthesis import LinkClass, classify_by_speed
 from osrm.assignment.tntp import TNTPLink, parse_net
 
@@ -133,7 +132,7 @@ class TestChiRegionalParsing:
 class TestScalePipelineSmoke:
     """Run the actual scale test pipeline functions to catch runtime errors.
 
-    Uses 4 periods instead of 96 to keep it fast (~15s total).
+    Uses tiny demand_scale (0.001) to keep the assignment fast.
     """
 
     @pytest.fixture(scope="class")
@@ -148,82 +147,52 @@ class TestScalePipelineSmoke:
         return base, meta
 
     @pytest.fixture(scope="class")
-    def period_csvs(self, network, work_dir):
-        """Generate period CSVs (4 periods for speed)."""
+    def trips(self, network):
+        """Build demand with tiny scale."""
         import scale_test_multi_period as smod
+        _, meta = network
+        # Use 4 periods to keep it fast
         orig = smod.N_PERIODS
         smod.N_PERIODS = 4
         try:
-            base, meta = network
-            csv_paths, factors, _state = smod.generate_period_csvs(base, meta, work_dir)
+            trips = smod.build_demand(meta, demand_scale=0.001)
         finally:
             smod.N_PERIODS = orig
-        return csv_paths, factors
+        return trips
 
     def test_build_network(self, network):
         """build_network runs without crashing."""
         base, meta = network
-        # base is a prefix like "dir/chi_regional.osrm"; actual files have
-        # additional suffixes (.ebg, .cell_metrics, etc.)
         osrm_files = list(Path(base).parent.glob(Path(base).name + "*"))
         assert len(osrm_files) > 5, f"Expected OSRM files at {base}, found {osrm_files}"
         assert "zone_centroids" in meta
         assert "od_matrix" in meta
         assert len(meta["zone_centroids"]) > 100
 
-    def test_generate_period_csvs(self, period_csvs):
-        """generate_period_csvs runs without crashing."""
-        csv_paths, factors = period_csvs
-        assert len(csv_paths) == 4
-        assert all(Path(p).exists() for p in csv_paths)
-        assert factors.shape == (4,)
-        assert np.all(factors >= 0)
+    def test_build_demand(self, trips):
+        """build_demand produces valid DemandTrip objects."""
+        assert len(trips) > 0, "Expected at least some trips"
+        for t in trips[:10]:
+            assert hasattr(t, "origin")
+            assert hasattr(t, "destination")
+            assert hasattr(t, "volume")
+            assert hasattr(t, "departure_time_s")
+            assert t.volume > 0
+            assert t.departure_time_s >= 0
 
-    def test_customize_and_route(self, network, period_csvs):
-        """customize_multi_period + routing with period awareness."""
-        from osrm.preprocessing import customize_multi_period
-        from osrm.osrm_ext import batch_route_accumulate
-
+    def test_run_assignment(self, network, trips, work_dir):
+        """assign_stream runs without crashing on tiny demand."""
+        import scale_test_multi_period as smod
         base, meta = network
-        csv_paths, _ = period_csvs
-        period_dur = 900.0
-
-        period_speed_files = [(p, path) for p, path in enumerate(csv_paths)]
-        customize_multi_period(base, period_speed_files=period_speed_files,
-                               verbosity="ERROR")
-
-        engine = osrm.OSRM(storage_config=base, algorithm="MLD",
-                            use_shared_memory=False)
-        centroids = meta["zone_centroids"]
-        zone_ids = sorted(centroids.keys())
-        rng = np.random.default_rng(42)
-
-        n_pairs = 50
-        o_zones = rng.choice(zone_ids, size=n_pairs)
-        d_zones = rng.choice(zone_ids, size=n_pairs)
-
-        coords = np.empty((n_pairs, 4), dtype=np.float64)
-        valid = 0
-        for i in range(n_pairs):
-            o, d = int(o_zones[i]), int(d_zones[i])
-            if o == d or o not in centroids or d not in centroids:
-                continue
-            oc, dc = centroids[o], centroids[d]
-            coords[valid] = [oc[0], oc[1], dc[0], dc[1]]
-            valid += 1
-        coords = coords[:valid]
-        volumes = np.ones(valid, dtype=np.float64)
-        edge_ids = np.zeros((0, 2), dtype=np.uint64)
-
-        vol, tstt, new_edges, _, durations = batch_route_accumulate(
-            engine._engine, coords, volumes, edge_ids,
-            n_threads=0, return_routes=False,
-            departure_period=1, period_duration=period_dur,
-            departure_offsets=np.zeros(valid, dtype=np.float64),
-            n_periods=0,
-        )
-        durs = np.asarray(durations)
-        routed = np.sum(durs > 0)
-        assert routed > 0, "Expected some routes to succeed"
-
-        del engine
+        # Use 4 periods
+        orig = smod.N_PERIODS
+        smod.N_PERIODS = 4
+        try:
+            result = smod.run_assignment(base, meta, trips, work_dir)
+        finally:
+            smod.N_PERIODS = orig
+        assert result.n_batches >= 1
+        assert result.n_trips >= 1
+        assert result.network_state is not None
+        assert result.batch_log is not None
+        assert len(result.batch_log) >= 1
