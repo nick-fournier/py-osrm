@@ -158,16 +158,12 @@ def generate_period_csvs(base: str, meta: dict, work: Path):
 
     # Generate congestion factor per period (0-95)
     # AM peak: periods 28-36 (7:00-9:00), PM peak: 64-72 (16:00-18:00)
-    congestion_factors = np.ones(N_PERIODS)
-    for p in range(N_PERIODS):
-        hour = p * 0.25  # hours from midnight
-        # AM peak
-        am_factor = 0.5 * np.exp(-0.5 * ((hour - 8.0) / 1.0) ** 2)
-        # PM peak
-        pm_factor = 0.6 * np.exp(-0.5 * ((hour - 17.0) / 1.2) ** 2)
-        # Midday baseline
-        mid_factor = 0.15 if 9 <= hour <= 16 else 0.0
-        congestion_factors[p] = max(0.0, am_factor + pm_factor + mid_factor)
+    hours = np.arange(N_PERIODS) * 0.25
+    # Smooth Gaussian peaks + raised-cosine midday shoulder
+    am = 0.50 * np.exp(-0.5 * ((hours - 8.0) / 1.0) ** 2)
+    pm = 0.60 * np.exp(-0.5 * ((hours - 17.0) / 1.2) ** 2)
+    midday = 0.15 * np.clip(np.cos(np.pi * (hours - 12.5) / 8.0), 0, 1)
+    congestion_factors = am + pm + midday
 
     logger.info("Congestion factors: min=%.2f, max=%.2f, mean=%.2f",
                 congestion_factors.min(), congestion_factors.max(),
@@ -249,8 +245,8 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
     zone_ids = sorted(centroids.keys())
     rng = np.random.default_rng(99)
 
-    # Build 2000 OD pairs
-    n_pairs = 2000
+    # Build 20000 OD pairs for statistically meaningful durations
+    n_pairs = 20000
     o_zones = rng.choice(zone_ids, size=n_pairs)
     d_zones = rng.choice(zone_ids, size=n_pairs)
 
