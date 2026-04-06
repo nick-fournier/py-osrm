@@ -349,15 +349,16 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
         )
 
     # ── realistic 24h loading with spillover ────────────────────────
-    # Distribute trips across the day following a demand profile
-    # (AM/PM peaks matching the congestion shape)
+    # Distribute trips across the day with a realistic demand profile:
+    # strong AM/PM peaks, near-zero overnight
     logger.info("  Routing 24h demand profile with 2D attribution...")
     hours_profile = np.arange(N_PERIODS) * 0.25
     demand_weight = (
         0.50 * np.exp(-0.5 * ((hours_profile - 8.0) / 1.2) ** 2) +
         0.40 * np.exp(-0.5 * ((hours_profile - 17.5) / 1.5) ** 2) +
-        0.10  # baseline
+        0.08 * np.clip(np.cos(np.pi * (hours_profile - 13.0) / 12.0), 0, 1)
     )
+    demand_weight = np.clip(demand_weight, 0, None)
     demand_weight /= demand_weight.sum()
 
     # Assign each trip a departure period from the demand profile
