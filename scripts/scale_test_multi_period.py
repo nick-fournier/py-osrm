@@ -269,26 +269,59 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
 
     results = {}
 
-    # Test routing at different periods: off-peak, AM peak, PM peak
+    # ── freeflow baseline (period 0 with no congestion) ─────────────
+    logger.info("  Routing freeflow baseline (period 0)...")
+    _, _, _, _, ff_durations = batch_route_accumulate(
+        engine._engine, coords, volumes, edge_ids,
+        n_threads=0, return_routes=False,
+        departure_period=0, period_duration=period_duration_s,
+        departure_offsets=np.zeros(valid, dtype=np.float64),
+        n_periods=0,
+    )
+    ff_durs = np.asarray(ff_durations)
+    ff_routed = ff_durs > 0
+    ff_mean = np.mean(ff_durs[ff_routed]) if np.any(ff_routed) else 1.0
+
+    # ── sweep all periods for TT/FFTT profile ───────────────────────
+    logger.info("  Sweeping all %d periods for TT/FFTT profile...", N_PERIODS)
+    tt_ratio_by_period = np.ones(N_PERIODS)
+    for p in range(N_PERIODS):
+        _, _, _, _, durs_p = batch_route_accumulate(
+            engine._engine, coords, volumes, edge_ids,
+            n_threads=0, return_routes=False,
+            departure_period=p, period_duration=period_duration_s,
+            departure_offsets=np.zeros(valid, dtype=np.float64),
+            n_periods=0,
+        )
+        durs_p = np.asarray(durs_p)
+        mask = ff_routed & (durs_p > 0)
+        if np.any(mask):
+            tt_ratio_by_period[p] = np.mean(durs_p[mask]) / np.mean(ff_durs[mask])
+
+    logger.info("  TT/FFTT range: [%.2f, %.2f]",
+                tt_ratio_by_period.min(), tt_ratio_by_period.max())
+
+    # ── spotlight periods for throughput + spillover ─────────────────
     test_periods = [
-        ("off-peak (3am)", 12),    # period 12 = 3:00
-        ("AM peak (8am)", 32),     # period 32 = 8:00
-        ("midday (12pm)", 48),     # period 48 = 12:00
-        ("PM peak (5pm)", 68),     # period 68 = 17:00
+        ("off-peak (3am)", 12),
+        ("AM peak (8am)", 32),
+        ("midday (12pm)", 48),
+        ("PM peak (5pm)", 68),
     ]
+
+    spillover_data = {}  # departure_label → per-period volume totals
 
     for label, dep_period in test_periods:
         offsets = rng.uniform(0, period_duration_s, size=valid).astype(np.float64)
 
         t0 = time.monotonic()
-        vol, tstt, new_edges, _, durations = batch_route_accumulate(
+        vol2d, tstt, new_edges, _, durations = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
-            n_threads=0,  # all cores
-            return_routes=False,
+            n_threads=0, return_routes=False,
             departure_period=dep_period,
             period_duration=period_duration_s,
             departure_offsets=offsets,
-            n_periods=0,
+            n_periods=N_PERIODS,
         )
         elapsed = time.monotonic() - t0
 
@@ -305,36 +338,21 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
             "mean_duration_s": mean_dur,
         }
 
+        # Per-period total volume for spillover visualization
+        v2d = np.asarray(vol2d)
+        spillover_data[label] = {
+            "dep_period": dep_period,
+            "period_volumes": np.sum(v2d, axis=1),  # shape (N_PERIODS,)
+        }
+
         logger.info(
             "  %s (p=%d): %d/%d routed in %.2fs (%.0f routes/s), "
-            "mean_dur=%.1fs",
+            "mean_dur=%.1fs, spill_periods=%d",
             label, dep_period, routed, valid, elapsed, throughput, mean_dur,
+            np.sum(np.any(v2d > 0, axis=1)),
         )
 
-    # Also test with 2D period attribution
-    logger.info("  2D attribution benchmark (96 periods)...")
-    offsets_2d = rng.uniform(0, period_duration_s, size=valid).astype(np.float64)
-    t0 = time.monotonic()
-    vol2d, tstt2d, _, _, _ = batch_route_accumulate(
-        engine._engine, coords, volumes, edge_ids,
-        n_threads=0,
-        return_routes=False,
-        departure_period=32,  # AM peak
-        period_duration=period_duration_s,
-        departure_offsets=offsets_2d,
-        n_periods=N_PERIODS,
-    )
-    elapsed_2d = time.monotonic() - t0
-    v2d = np.asarray(vol2d)
-    nonzero_periods = np.sum(np.any(v2d > 0, axis=1))
-    logger.info(
-        "  2D (96 periods): %.2fs (%.0f routes/s), "
-        "%d/%d periods have flow, shape=%s",
-        elapsed_2d, valid / max(elapsed_2d, 0.001),
-        nonzero_periods, N_PERIODS, v2d.shape,
-    )
-
-    return results
+    return results, tt_ratio_by_period, spillover_data
 
 
 def generate_report(
@@ -343,6 +361,8 @@ def generate_report(
     load_time: float,
     mem_mb: float,
     routing_results: dict,
+    tt_ratio_by_period: np.ndarray,
+    spillover_data: dict,
     output_path: str = "plots/scale_test_multi_period.html",
 ):
     """Generate an HTML report with scale test results."""
@@ -378,6 +398,35 @@ def generate_report(
         "<p>Synthetic congestion factors applied to generate per-period "
         "speed CSVs. AM peak ~8:00, PM peak ~17:00. Factor of 0.6 means "
         "speeds drop to 58% of freeflow.</p>"
+    )
+
+    # ── 2. TT / FFTT ratio by time of day ─────────────────────────
+    fig_ratio = go.Figure()
+    fig_ratio.add_trace(go.Scatter(
+        x=hours.tolist(),
+        y=tt_ratio_by_period.tolist(),
+        mode="lines",
+        line=dict(color="#E65100", width=2.5),
+        fill="tozeroy",
+        fillcolor="rgba(230, 81, 0, 0.10)",
+        hovertemplate="Hour %{x:.1f}: TT/FFTT=%{y:.3f}<extra></extra>",
+    ))
+    fig_ratio.add_hline(y=1.0, line_dash="dash", line_color="grey",
+                        annotation_text="freeflow")
+    fig_ratio.update_layout(
+        template="plotly_white", height=350,
+        xaxis_title="Hour of day",
+        yaxis_title="TT / FFTT",
+        xaxis=dict(dtick=2, range=[0, 24]),
+        yaxis=dict(rangemode="tozero"),
+    )
+    figs.append(fig_ratio)
+    descriptions.append(
+        "<h2>Experienced Travel Time Ratio (TT / FFTT)</h2>"
+        "<p>Mean travel time across 20k OD pairs at each period divided by "
+        "the freeflow mean. A ratio of 1.0 is uncongested; higher values "
+        "reflect the congestion penalty from the synthetic speed profile. "
+        f"Peak ratio: <b>{tt_ratio_by_period.max():.3f}</b>.</p>"
     )
 
     # ── 2. Infrastructure timing bar chart ─────────────────────────
@@ -438,13 +487,82 @@ def generate_report(
     figs.append(fig_route)
     descriptions.append(
         "<h2>Routing Performance by Departure Period</h2>"
-        "<p>Throughput (routes/s) and mean trip duration routing 2000 OD "
+        "<p>Throughput (routes/s) and mean trip duration routing 20k OD "
         "pairs at different times of day against a 96-period multi-period "
         "OSRM engine. Throughput should be stable regardless of period; "
         "duration varies with congestion level.</p>"
     )
 
-    # ── 4. Summary table ──────────────────────────────────────────
+    # ── 5. Cross-period spillover stacked bar ─────────────────────
+    fig_spill = go.Figure()
+    colors = ["#1565C0", "#43A047", "#FF8F00", "#E65100"]
+    for idx, (label, sd) in enumerate(spillover_data.items()):
+        pvol = sd["period_volumes"]
+        dep_p = sd["dep_period"]
+        # Show periods around the departure with nonzero volume
+        nonzero = np.where(pvol > 0)[0]
+        if len(nonzero) == 0:
+            continue
+        p_lo, p_hi = max(0, nonzero[0]), min(N_PERIODS - 1, nonzero[-1])
+        # Include 1 period padding each side for context
+        p_lo = max(0, p_lo - 1)
+        p_hi = min(N_PERIODS - 1, p_hi + 1)
+        ps = np.arange(p_lo, p_hi + 1)
+        ph = ps * 0.25  # convert to hours
+
+        # Split into: departure period volume vs spillover volume
+        dep_vol = np.where(ps == dep_p, pvol[ps], 0.0)
+        spill_vol = np.where(ps != dep_p, pvol[ps], 0.0)
+
+        fig_spill.add_trace(go.Bar(
+            name=f"{label} — departure",
+            x=ph.tolist(), y=dep_vol.tolist(),
+            marker_color=colors[idx % len(colors)],
+            opacity=0.9,
+            legendgroup=label,
+            hovertemplate="p=%{x:.1f}h vol=%{y:.0f}<extra>departure</extra>",
+        ))
+        fig_spill.add_trace(go.Bar(
+            name=f"{label} — spillover",
+            x=ph.tolist(), y=spill_vol.tolist(),
+            marker_color=colors[idx % len(colors)],
+            opacity=0.4,
+            marker_line=dict(width=1, color=colors[idx % len(colors)]),
+            legendgroup=label,
+            hovertemplate="p=%{x:.1f}h vol=%{y:.0f}<extra>spillover</extra>",
+        ))
+
+    fig_spill.update_layout(
+        template="plotly_white", height=450,
+        barmode="stack",
+        xaxis_title="Hour of day",
+        yaxis_title="Total link-volume (veh·links)",
+        xaxis=dict(dtick=1, range=[0, 24]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    figs.append(fig_spill)
+
+    # Compute spillover fractions for description
+    spill_fracs = {}
+    for label, sd in spillover_data.items():
+        pvol = sd["period_volumes"]
+        dep_p = sd["dep_period"]
+        total = pvol.sum()
+        if total > 0:
+            spill_fracs[label] = 1.0 - pvol[dep_p] / total
+        else:
+            spill_fracs[label] = 0.0
+    spill_desc = ", ".join(f"{k}: {v:.0%}" for k, v in spill_fracs.items())
+    descriptions.append(
+        "<h2>Cross-Period Flow Spillover</h2>"
+        "<p>When 20k trips depart in a single period, their routes may "
+        "traverse links in subsequent periods (spillover). Solid bars show "
+        "volume attributed to the departure period; translucent bars show "
+        "volume spilling into neighboring periods. "
+        f"Spillover fractions: {spill_desc}.</p>"
+    )
+
+    # ── 6. Summary table ──────────────────────────────────────────
     rows_html = ""
     for label, r in routing_results.items():
         rows_html += (
@@ -523,13 +641,16 @@ def main():
     engine, load_time, mem_mb = benchmark_engine_load(base)
 
     # 5. Benchmark routing
-    routing_results = benchmark_routing(engine, meta, PERIOD_DURATION_S)
+    routing_results, tt_ratio, spillover = benchmark_routing(
+        engine, meta, PERIOD_DURATION_S,
+    )
     del engine
 
     # 6. Generate report
     report_path = generate_report(
         congestion_factors, cust_time, load_time, mem_mb,
-        routing_results, output_path=args.output,
+        routing_results, tt_ratio, spillover,
+        output_path=args.output,
     )
 
     # Summary
