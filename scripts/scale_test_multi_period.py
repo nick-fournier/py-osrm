@@ -48,10 +48,10 @@ def _get_mem_mb():
 def _regional_classify_override(link, dist_m, default_cls):
     if getattr(link, "link_type", 0) == 3:
         return LinkClass(
-            highway="motorway_link", lanes=max(2, link.lanes or 2),
-            maxspeed_kmh=min(link.free_flow_speed_kmh or 100, 100),
+            highway="motorway_link", lanes=max(2, default_cls.lanes),
+            maxspeed_kmh=min(default_cls.maxspeed_kmh or 100, 100),
         )
-    if link.free_flow_speed_kmh and link.free_flow_speed_kmh > 130:
+    if default_cls.maxspeed_kmh and default_cls.maxspeed_kmh > 130:
         return LinkClass(
             highway=default_cls.highway, lanes=default_cls.lanes,
             maxspeed_kmh=130,
