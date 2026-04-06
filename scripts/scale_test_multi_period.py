@@ -345,10 +345,171 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
     return results
 
 
+def generate_report(
+    congestion_factors: np.ndarray,
+    cust_time: float,
+    load_time: float,
+    mem_mb: float,
+    routing_results: dict,
+    output_path: str = "plots/scale_test_multi_period.html",
+):
+    """Generate an HTML report with scale test results."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from osrm.assignment.plots import _write_combined_report
+
+    figs = []
+    descriptions = []
+
+    # ── 1. Time-of-day congestion profile ──────────────────────────
+    hours = np.arange(N_PERIODS) * 0.25
+    fig_profile = go.Figure()
+    fig_profile.add_trace(go.Scatter(
+        x=hours.tolist(),
+        y=congestion_factors.tolist(),
+        mode="lines",
+        fill="tozeroy",
+        line=dict(color="#1565C0", width=2),
+        fillcolor="rgba(21, 101, 192, 0.15)",
+        hovertemplate="Hour %{x:.1f}: factor=%{y:.2f}<extra></extra>",
+    ))
+    fig_profile.update_layout(
+        template="plotly_white", height=350,
+        xaxis_title="Hour of day",
+        yaxis_title="Congestion factor",
+        xaxis=dict(dtick=2, range=[0, 24]),
+        yaxis=dict(rangemode="tozero"),
+    )
+    figs.append(fig_profile)
+    descriptions.append(
+        "<h2>Time-of-Day Congestion Profile</h2>"
+        "<p>Synthetic congestion factors applied to generate per-period "
+        "speed CSVs. AM peak ~8:00, PM peak ~17:00. Factor of 0.6 means "
+        "speeds drop to 58% of freeflow.</p>"
+    )
+
+    # ── 2. Infrastructure timing bar chart ─────────────────────────
+    timing_labels = [
+        f"customize\n({N_PERIODS} periods)",
+        "engine load",
+    ]
+    timing_values = [cust_time, load_time]
+
+    fig_timing = go.Figure()
+    fig_timing.add_trace(go.Bar(
+        x=timing_labels,
+        y=timing_values,
+        text=[f"{v:.1f}s" for v in timing_values],
+        textposition="outside",
+        marker_color=["#1565C0", "#2196F3"],
+    ))
+    fig_timing.update_layout(
+        template="plotly_white", height=350,
+        yaxis_title="Time (seconds)",
+        yaxis=dict(rangemode="tozero"),
+    )
+    figs.append(fig_timing)
+    descriptions.append(
+        "<h2>Infrastructure Timing</h2>"
+        f"<p><code>customize_multi_period</code> with {N_PERIODS} period "
+        f"CSVs: <b>{cust_time:.1f}s</b>. Engine load (all period cell "
+        f"metrics + weight deltas): <b>{load_time:.1f}s</b>. "
+        f"Peak RSS: <b>{mem_mb:.0f} MB</b>.</p>"
+    )
+
+    # ── 3. Routing throughput by period ────────────────────────────
+    r_labels = list(routing_results.keys())
+    r_throughput = [routing_results[k]["throughput"] for k in r_labels]
+    r_mean_dur = [routing_results[k]["mean_duration_s"] for k in r_labels]
+
+    fig_route = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=["Routing Throughput", "Mean Trip Duration"],
+    )
+    fig_route.add_trace(go.Bar(
+        x=r_labels, y=r_throughput,
+        text=[f"{v:.0f}" for v in r_throughput],
+        textposition="outside",
+        marker_color="#43A047",
+    ), row=1, col=1)
+    fig_route.add_trace(go.Bar(
+        x=r_labels, y=r_mean_dur,
+        text=[f"{v:.0f}s" for v in r_mean_dur],
+        textposition="outside",
+        marker_color="#FF8F00",
+    ), row=1, col=2)
+    fig_route.update_yaxes(title_text="Routes/sec", row=1, col=1)
+    fig_route.update_yaxes(title_text="Duration (s)", row=1, col=2)
+    fig_route.update_layout(
+        template="plotly_white", height=400, showlegend=False,
+    )
+    figs.append(fig_route)
+    descriptions.append(
+        "<h2>Routing Performance by Departure Period</h2>"
+        "<p>Throughput (routes/s) and mean trip duration routing 2000 OD "
+        "pairs at different times of day against a 96-period multi-period "
+        "OSRM engine. Throughput should be stable regardless of period; "
+        "duration varies with congestion level.</p>"
+    )
+
+    # ── 4. Summary table ──────────────────────────────────────────
+    rows_html = ""
+    for label, r in routing_results.items():
+        rows_html += (
+            f"<tr><td>{label}</td>"
+            f"<td style='text-align:right'>{r['routed']}</td>"
+            f"<td style='text-align:right'>{r['elapsed_s']:.2f}s</td>"
+            f"<td style='text-align:right'>{r['throughput']:.0f}</td>"
+            f"<td style='text-align:right'>{r['mean_duration_s']:.0f}s</td></tr>"
+        )
+
+    figs.append(None)
+    descriptions.append(
+        "<h2>Summary</h2>"
+        "<table style='border-collapse:collapse; width:100%;'>"
+        "<thead><tr style='border-bottom:2px solid #1565C0;'>"
+        "<th style='text-align:left; padding:6px;'>Period</th>"
+        "<th style='text-align:right; padding:6px;'>Routed</th>"
+        "<th style='text-align:right; padding:6px;'>Time</th>"
+        "<th style='text-align:right; padding:6px;'>Routes/s</th>"
+        "<th style='text-align:right; padding:6px;'>Mean dur</th>"
+        "</tr></thead><tbody>"
+        f"{rows_html}"
+        "</tbody></table>"
+        "<br>"
+        f"<p><b>Network:</b> chi-regional (12,982 nodes, 39,018 links, "
+        f"1,790 zones)</p>"
+        f"<p><b>Periods:</b> {N_PERIODS} × {PERIOD_DURATION_S:.0f}s "
+        f"(24-hour day at 15-min intervals)</p>"
+        f"<p><b>customize_multi_period:</b> {cust_time:.1f}s</p>"
+        f"<p><b>Engine load:</b> {load_time:.1f}s, RSS={mem_mb:.0f} MB</p>"
+    )
+
+    out = Path(output_path)
+    _write_combined_report(
+        title=f"Multi-Period Scale Test — chi-regional, {N_PERIODS} periods",
+        intro=(
+            "<p>Benchmarks the multi-period OSRM infrastructure at scale: "
+            f"{N_PERIODS} periods (24-hour day at 15-min intervals) on the "
+            "Chicago Regional network (12,982 nodes, 39,018 links). "
+            "Measures <code>customize_multi_period</code> runtime, engine "
+            "memory footprint, and routing throughput at varying congestion "
+            "levels.</p>"
+        ),
+        figures=figs,
+        descriptions=descriptions,
+        path=out,
+    )
+    logger.info("Report written to %s", out)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Multi-period scale test")
     parser.add_argument("--work-dir", type=str, default=None,
                         help="Working directory (default: /tmp/scale_test)")
+    parser.add_argument("--output", type=str, default="plots/scale_test_multi_period.html",
+                        help="Report output path")
     args = parser.parse_args()
 
     work = Path(args.work_dir or "/tmp/scale_test_multi_period")
@@ -373,6 +534,12 @@ def main():
     routing_results = benchmark_routing(engine, meta, PERIOD_DURATION_S)
     del engine
 
+    # 6. Generate report
+    report_path = generate_report(
+        congestion_factors, cust_time, load_time, mem_mb,
+        routing_results, output_path=args.output,
+    )
+
     # Summary
     logger.info("\n" + "=" * 60)
     logger.info("SCALE TEST SUMMARY: chi-regional, %d periods", N_PERIODS)
@@ -384,6 +551,7 @@ def main():
     for label, r in routing_results.items():
         logger.info("Route %-20s: %.0f routes/s, mean_dur=%.0fs",
                      label, r["throughput"], r["mean_duration_s"])
+    logger.info("Report: %s", report_path)
     logger.info("=" * 60)
 
 
