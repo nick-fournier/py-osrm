@@ -48,13 +48,13 @@ def _get_mem_mb():
 def _regional_classify_override(link, dist_m, default_cls):
     if getattr(link, "link_type", 0) == 3:
         return LinkClass(
-            highway="motorway_link", lanes=max(2, default_cls.lanes),
-            maxspeed_kmh=min(default_cls.maxspeed_kmh or 100, 100),
+            highway="motorway_link", n_lanes=max(2, default_cls.n_lanes),
+            speed_kmh=min(default_cls.speed_kmh or 100, 100),
         )
-    if default_cls.maxspeed_kmh and default_cls.maxspeed_kmh > 130:
+    if default_cls.speed_kmh and default_cls.speed_kmh > 130:
         return LinkClass(
-            highway=default_cls.highway, lanes=default_cls.lanes,
-            maxspeed_kmh=130,
+            highway=default_cls.highway, n_lanes=default_cls.n_lanes,
+            speed_kmh=130,
         )
     return None
 
@@ -135,11 +135,7 @@ def generate_period_csvs(base: str, meta: dict, work: Path):
         rp = osrm.RouteParameters()
         rp.coordinates = [o, d]
         rp.annotations = True
-        rp.annotations_type = (
-            osrm.osrm_ext.RouteAnnotationsType.Nodes
-            | osrm.osrm_ext.RouteAnnotationsType.Speed
-            | osrm.osrm_ext.RouteAnnotationsType.Distance
-        )
+        rp.annotations_type = ["nodes", "speed", "distance"]
         result = engine.Route(rp)
         if result.get("code") == "Ok" and result.get("routes"):
             for leg in result["routes"][0]["legs"]:
