@@ -155,7 +155,7 @@ class TestScalePipelineSmoke:
         smod.N_PERIODS = 4
         try:
             base, meta = network
-            csv_paths, factors = smod.generate_period_csvs(base, meta, work_dir)
+            csv_paths, factors, _state = smod.generate_period_csvs(base, meta, work_dir)
         finally:
             smod.N_PERIODS = orig
         return csv_paths, factors

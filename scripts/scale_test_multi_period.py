@@ -183,7 +183,7 @@ def generate_period_csvs(base: str, meta: dict, work: Path):
         csv_paths.append(str(csv_path))
 
     logger.info("Wrote %d CSVs to %s", len(csv_paths), work / "csvs")
-    return csv_paths, congestion_factors
+    return csv_paths, congestion_factors, state
 
 
 def benchmark_customize(base: str, csv_paths: list):
@@ -388,6 +388,7 @@ def benchmark_routing(engine, meta: dict, period_duration_s: float):
     spillover_data = {
         "departures_per_period": departures_per_period,
         "volume_per_period": volume_per_period,
+        "volume_2d": v2d,  # (n_periods, n_edges) for saturation analysis
     }
 
     durs_24h = np.asarray(durs_24h)
@@ -409,6 +410,7 @@ def generate_report(
     routing_results: dict,
     tt_ratio_by_period: np.ndarray,
     spillover_data: dict,
+    net_state,
     output_path: str = "plots/scale_test_multi_period.html",
 ):
     """Generate an HTML report with scale test results."""
@@ -604,7 +606,110 @@ def generate_report(
         f"(pure spillover).</p>"
     )
 
-    # ── 6. Summary table ──────────────────────────────────────────
+    # ── 6. Link saturation & spillover by period ─────────────────
+    vol_2d = spillover_data["volume_2d"]  # (n_periods, n_edges)
+    n_discovered = vol_2d.shape[1] if vol_2d.ndim == 2 else 0
+
+    # Compute per-edge capacity (veh/period) from NetworkState
+    # capacity_vph = n_lanes * per_lane_capacity; scale to period duration
+    per_lane_cap = 1800.0  # veh/hr/lane
+    if net_state is not None and net_state.n_edges > 0:
+        edge_cap_vph = net_state.n_lanes[:n_discovered].astype(float) * per_lane_cap
+        edge_cap_per_period = edge_cap_vph * (PERIOD_DURATION_S / 3600.0)
+    else:
+        edge_cap_per_period = np.full(n_discovered, 2 * per_lane_cap * PERIOD_DURATION_S / 3600.0)
+
+    # Per period: count links with flow, saturated links, multi-period links
+    links_with_flow = np.zeros(N_PERIODS, dtype=int)
+    links_saturated = np.zeros(N_PERIODS, dtype=int)
+    links_over_50pct = np.zeros(N_PERIODS, dtype=int)
+    max_vc_ratio = np.zeros(N_PERIODS, dtype=float)
+
+    for p in range(N_PERIODS):
+        row = vol_2d[p] if vol_2d.ndim == 2 else np.zeros(0)
+        has_flow = row > 0
+        links_with_flow[p] = np.sum(has_flow)
+        if n_discovered > 0 and len(edge_cap_per_period) > 0:
+            vc = np.where(edge_cap_per_period > 0, row / edge_cap_per_period, 0)
+            links_saturated[p] = np.sum(vc >= 1.0)
+            links_over_50pct[p] = np.sum(vc >= 0.5)
+            max_vc_ratio[p] = vc.max() if len(vc) > 0 else 0
+
+    # Links with spillover: appear in a period where they had no departures
+    # (i.e., flow in periods beyond the departure window)
+    dep_pp = spillover_data["departures_per_period"]
+    links_spill_only = np.zeros(N_PERIODS, dtype=int)
+    for p in range(N_PERIODS):
+        if dep_pp[p] == 0 and vol_2d.ndim == 2:
+            links_spill_only[p] = np.sum(vol_2d[p] > 0)
+
+    fig_sat = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+        subplot_titles=["Link Utilization by Period", "V/C Ratio & Spillover Links"],
+    )
+
+    # Top: links with flow, >50% saturated, fully saturated
+    fig_sat.add_trace(go.Scatter(
+        name="Links with flow",
+        x=hours.tolist(), y=links_with_flow.tolist(),
+        mode="lines", line=dict(color="#1565C0", width=2),
+        fill="tozeroy", fillcolor="rgba(21, 101, 192, 0.10)",
+    ), row=1, col=1)
+    fig_sat.add_trace(go.Scatter(
+        name="Links > 50% capacity",
+        x=hours.tolist(), y=links_over_50pct.tolist(),
+        mode="lines", line=dict(color="#FF8F00", width=2),
+        fill="tozeroy", fillcolor="rgba(255, 143, 0, 0.15)",
+    ), row=1, col=1)
+    fig_sat.add_trace(go.Scatter(
+        name="Links ≥ 100% capacity",
+        x=hours.tolist(), y=links_saturated.tolist(),
+        mode="lines", line=dict(color="#C62828", width=2),
+        fill="tozeroy", fillcolor="rgba(198, 40, 40, 0.15)",
+    ), row=1, col=1)
+
+    # Bottom: max V/C ratio + spillover-only links
+    fig_sat.add_trace(go.Scatter(
+        name="Max V/C ratio",
+        x=hours.tolist(), y=max_vc_ratio.tolist(),
+        mode="lines", line=dict(color="#E65100", width=2.5),
+    ), row=2, col=1)
+    fig_sat.add_trace(go.Bar(
+        name="Spillover-only links",
+        x=hours.tolist(), y=links_spill_only.tolist(),
+        marker_color="rgba(21, 101, 192, 0.4)",
+    ), row=2, col=1)
+    fig_sat.add_hline(y=1.0, line_dash="dash", line_color="grey",
+                      annotation_text="V/C = 1.0", row=2, col=1)
+
+    fig_sat.update_xaxes(title_text="Hour of day", dtick=2, range=[0, 24], row=2, col=1)
+    fig_sat.update_yaxes(title_text="Link count", row=1, col=1)
+    fig_sat.update_yaxes(title_text="V/C ratio / count", row=2, col=1)
+    fig_sat.update_layout(
+        template="plotly_white", height=600,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    figs.append(fig_sat)
+
+    peak_sat = int(links_saturated.max())
+    peak_50 = int(links_over_50pct.max())
+    peak_flow = int(links_with_flow.max())
+    peak_vc = max_vc_ratio.max()
+    peak_spill_links = int(links_spill_only.max())
+    descriptions.append(
+        "<h2>Link Saturation & Spillover by Period</h2>"
+        f"<p><b>Top panel:</b> Of {n_discovered:,} discovered edges, "
+        f"peak <b>{peak_flow:,}</b> have flow in any period, "
+        f"<b>{peak_50:,}</b> exceed 50% V/C, and "
+        f"<b>{peak_sat:,}</b> are fully saturated (V/C ≥ 1.0). "
+        f"Capacity assumed at {per_lane_cap:.0f} veh/hr/lane.</p>"
+        f"<p><b>Bottom panel:</b> Peak V/C ratio = <b>{peak_vc:.2f}</b>. "
+        f"Spillover-only links (flow in periods with zero departures) peak "
+        f"at <b>{peak_spill_links:,}</b> — these are links still carrying "
+        f"traffic from trips that departed in earlier periods.</p>"
+    )
+
+    # ── 7. Summary table ──────────────────────────────────────────
     rows_html = ""
     for label, r in routing_results.items():
         rows_html += (
@@ -674,7 +779,7 @@ def main():
     base, meta = build_network(work)
 
     # 2. Generate period CSVs
-    csv_paths, congestion_factors = generate_period_csvs(base, meta, work)
+    csv_paths, congestion_factors, net_state = generate_period_csvs(base, meta, work)
 
     # 3. Benchmark customize_multi_period
     cust_time = benchmark_customize(base, csv_paths)
@@ -691,7 +796,7 @@ def main():
     # 6. Generate report
     report_path = generate_report(
         congestion_factors, cust_time, load_time, mem_mb,
-        routing_results, tt_ratio, spillover,
+        routing_results, tt_ratio, spillover, net_state,
         output_path=args.output,
     )
 
