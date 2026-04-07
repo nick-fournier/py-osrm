@@ -99,15 +99,18 @@ def build_network(work: Path):
     return base, meta
 
 
-def demand_profile(n_periods: int) -> np.ndarray:
-    """24h demand weight per period: AM/PM peaks, sustained midday."""
+def demand_profile(n_periods: int):
+    """24h demand weights per period, split into AM/PM/midday components.
+
+    Returns (am, pm, mid) arrays each of length n_periods.
+    AM = home→work (OD as-is), PM = work→home (OD transposed),
+    midday = symmetric blend.
+    """
     hours = np.arange(n_periods) * (24.0 / n_periods)
-    w = (
-        0.50 * np.exp(-0.5 * ((hours - 8.0) / 1.2) ** 2) +
-        0.40 * np.exp(-0.5 * ((hours - 17.5) / 1.5) ** 2) +
-        0.25 * np.clip(np.cos(np.pi * (hours - 13.0) / 10.0), 0, 1)
-    )
-    return np.clip(w, 0, None)
+    am = 0.50 * np.exp(-0.5 * ((hours - 8.0) / 1.2) ** 2)
+    pm = 0.40 * np.exp(-0.5 * ((hours - 17.5) / 1.5) ** 2)
+    mid = 0.25 * np.clip(np.cos(np.pi * (hours - 13.0) / 10.0), 0, 1)
+    return np.clip(am, 0, None), np.clip(pm, 0, None), np.clip(mid, 0, None)
 
 
 def build_demand(
@@ -118,59 +121,69 @@ def build_demand(
     """Build trip list from OD matrix distributed across 24h.
 
     The TNTP demand (1.36M) represents peak-hour equilibrium demand.
-    We normalize the demand profile so the peak hour's 4 periods sum to
-    the TNTP demand × demand_scale, then scale off-peak proportionally.
+    AM periods use OD (home→work), PM periods use OD.T (work→home),
+    midday uses a symmetric blend (OD + OD.T) / 2.
 
     Args:
         min_volume: Minimum vehicles per period to include an OD pair.
-            Default 1.0 (sub-vehicle flows aren't physically meaningful
-            and the full matrix at 96 periods produces ~68M trips).
+            Default 0.5 — keeps ~47% of demand while limiting trip count.
     """
     centroids = meta["zone_centroids"]
     od = meta["od_matrix"]
+    od_t = od.T.copy()  # transposed: work→home
     rng = np.random.default_rng(42)
 
-    profile = demand_profile(N_PERIODS)
+    am, pm, mid = demand_profile(N_PERIODS)
+    total_profile = am + pm + mid
 
-    # Identify peak hour (4 consecutive periods with max sum)
-    period_sums = np.convolve(profile, np.ones(4), mode="valid")
+    # Identify peak hour (4 consecutive periods with max total weight)
+    period_sums = np.convolve(total_profile, np.ones(4), mode="valid")
     peak_start = int(np.argmax(period_sums))
-    peak_hour_weight = profile[peak_start:peak_start + 4].sum()
+    peak_hour_weight = total_profile[peak_start:peak_start + 4].sum()
 
     # Scale so peak hour sums to 1.0 × demand_scale of OD matrix
-    # Each period's demand = od[i,j] * (profile[p] / peak_hour_weight) * demand_scale
-    period_scale = (profile / peak_hour_weight) * demand_scale
+    scale_factor = demand_scale / peak_hour_weight
 
     logger.info("Demand profile: peak hour periods %d-%d (%.1fh-%.1fh), "
-                "scale range [%.3f, %.3f], total daily = %.1f× peak hour",
+                "daily = %.1f× peak hour, directional AM/PM/mid split",
                 peak_start, peak_start + 3,
                 peak_start * 0.25, (peak_start + 4) * 0.25,
-                period_scale.min(), period_scale.max(),
-                period_scale.sum())
+                total_profile.sum() / peak_hour_weight)
 
-    # Extract non-zero OD pairs once (vectorized)
+    # Extract non-zero OD pairs from union of OD and OD.T
     t0 = time.monotonic()
-    ii, jj = np.where((od > 0) & ~np.eye(od.shape[0], dtype=bool))
+    combined = od + od_t
+    ii, jj = np.where((combined > 0) & ~np.eye(od.shape[0], dtype=bool))
     zone_o, zone_d = ii + 1, jj + 1  # TNTP zones are 1-indexed
     valid = np.array([z in centroids for z in zone_o]) & \
             np.array([z in centroids for z in zone_d])
     ii, jj = ii[valid], jj[valid]
-    base_vols = od[ii, jj]
+
+    # Per-pair base volumes for each direction
+    fwd_vols = od[ii, jj]      # home→work
+    rev_vols = od_t[ii, jj]    # work→home
     origins = [centroids[z] for z in (ii + 1)]
     dests = [centroids[z] for z in (jj + 1)]
     n_pairs = len(ii)
-    logger.info("OD pairs with demand: %d (%.1fs)", n_pairs, time.monotonic() - t0)
+    logger.info("OD pairs (union fwd+rev): %d (%.1fs)", n_pairs, time.monotonic() - t0)
 
-    # Build trips: vectorized per-period filtering with min_volume threshold
+    # Build trips per period with directional blending
     t0 = time.monotonic()
-    active_periods = [(p, period_scale[p]) for p in range(N_PERIODS)
-                      if period_scale[p] >= 1e-6]
-
     trips = []
     total_demand_full = 0.0
     total_demand_kept = 0.0
-    for p, ps in active_periods:
-        vols = base_vols * ps
+
+    for p in range(N_PERIODS):
+        w_total = total_profile[p]
+        if w_total < 1e-8:
+            continue
+
+        # Blend: AM→forward, PM→reverse, midday→symmetric average
+        w_am = am[p] * scale_factor
+        w_pm = pm[p] * scale_factor
+        w_mid = mid[p] * scale_factor
+        vols = fwd_vols * (w_am + w_mid * 0.5) + rev_vols * (w_pm + w_mid * 0.5)
+
         total_demand_full += vols.sum()
         mask = vols >= min_volume
         n_keep = int(mask.sum())
