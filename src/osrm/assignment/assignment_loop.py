@@ -102,7 +102,7 @@ class AssignmentConfig:
     # sensitivity < 1 → concave (aggressive early shrinkage)
     # sensitivity > 1 → convex (tolerant of mild congestion)
     # 0 disables dynamic sizing (fixed batch size throughout)
-    stream_batch_sensitivity: float = 0.25
+    stream_batch_sensitivity: float = 0.1
     stream_batch_min_scale: float = 0.1  # floor: never below 10% of base
 
     def __post_init__(self):
@@ -1401,15 +1401,16 @@ class AssignmentSolver:
             _n_oversat_links = batch_result.n_oversaturated
 
             if bi % max(1, n_batches_est // 10) == 0:
+                r_pct = 100.0 * _n_oversat_links / max(_n_active_links, 1)
                 logger.info(
-                    "Batch %d (~%d est): %d trips (bs=%d), "
+                    "Batch %d (~%d est): %d trips (bs=%d, r=%.1f%%), "
                     "queue=%.0f veh/hr/lane, "
-                    "mean_speed=%.1f km/h, oversat=%d, "
+                    "mean_speed=%.1f km/h, oversat=%d/%d, "
                     "route=%.1fs, cust=%.1fs",
                     bi + 1, n_batches_est, len(batch.trips),
-                    current_effective_bs,
+                    current_effective_bs, r_pct,
                     mean_queue_per_lane, batch_result.mean_speed_kmh,
-                    batch_result.n_oversaturated,
+                    batch_result.n_oversaturated, _n_active_links,
                     route_time, customize_time,
                 )
 
