@@ -1369,8 +1369,15 @@ class AssignmentSolver:
             engine = self._create_engine(quiet=True)
             engine_time = time.monotonic() - t_engine
 
-            # Metrics
+            # Metrics — use flow-weighted mean speed (stable denominator)
             active = state.flow_vph > 0
+            total_flow = float(np.sum(state.flow_vph))
+            if total_flow > 0:
+                weighted_speed = float(
+                    np.sum(state.speed_kmh * state.flow_vph) / total_flow
+                )
+            else:
+                weighted_speed = float(np.mean(state.speed_kmh))
             active_speeds = state.speed_kmh[active] if np.any(active) else state.speed_kmh
             link_time_s = state.length_m * 3.6 / np.maximum(
                 state.speed_kmh, self.config.vdf_min_speed_kmh,
@@ -1388,7 +1395,7 @@ class AssignmentSolver:
                 tstt=tstt,
                 queue_vehicles=mean_queue_per_lane,
                 total_unserved_vph=total_unserved,
-                mean_speed_kmh=float(np.mean(active_speeds)),
+                mean_speed_kmh=weighted_speed,
                 min_speed_kmh=float(np.min(active_speeds)),
                 n_oversaturated=int(np.sum(
                     state.density_vpkm > self.vdf.critical_density(state.jam_density, kc_ratio=state.kc_ratio)
@@ -1396,8 +1403,9 @@ class AssignmentSolver:
             )
             batch_log.append(batch_result)
 
-            # Update dynamic sizing state for next batch
-            _n_active_links = int(np.sum(state.flow_vph > 0))
+            # Update dynamic sizing state — use total discovered edges
+            # (not just active) so edge discovery doesn't dilute the ratio
+            _n_active_links = state.n_edges
             _n_oversat_links = batch_result.n_oversaturated
 
             if bi % max(1, n_batches_est // 10) == 0:
