@@ -102,7 +102,7 @@ class AssignmentConfig:
     # sensitivity < 1 → concave (aggressive early shrinkage)
     # sensitivity > 1 → convex (tolerant of mild congestion)
     # 0 disables dynamic sizing (fixed batch size throughout)
-    stream_batch_sensitivity: float = 0.5
+    stream_batch_sensitivity: float = 0.25
     stream_batch_min_scale: float = 0.1  # floor: never below 10% of base
 
     def __post_init__(self):

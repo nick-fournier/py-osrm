@@ -100,12 +100,12 @@ def build_network(work: Path):
 
 
 def demand_profile(n_periods: int) -> np.ndarray:
-    """24h demand weight per period: AM/PM peaks, near-zero overnight."""
+    """24h demand weight per period: AM/PM peaks, sustained midday."""
     hours = np.arange(n_periods) * (24.0 / n_periods)
     w = (
         0.50 * np.exp(-0.5 * ((hours - 8.0) / 1.2) ** 2) +
         0.40 * np.exp(-0.5 * ((hours - 17.5) / 1.5) ** 2) +
-        0.08 * np.clip(np.cos(np.pi * (hours - 13.0) / 12.0), 0, 1)
+        0.25 * np.clip(np.cos(np.pi * (hours - 13.0) / 10.0), 0, 1)
     )
     return np.clip(w, 0, None)
 
@@ -113,7 +113,7 @@ def demand_profile(n_periods: int) -> np.ndarray:
 def build_demand(
     meta: dict,
     demand_scale: float = 1.0,
-    min_volume: float = 1.0,
+    min_volume: float = 0.5,
 ) -> list[DemandTrip]:
     """Build trip list from OD matrix distributed across 24h.
 
@@ -511,8 +511,8 @@ def main():
                         help="Report output path")
     parser.add_argument("--demand-scale", type=float, default=1.0,
                         help="Demand multiplier (default 1.0 = full peak-hour demand)")
-    parser.add_argument("--min-volume", type=float, default=1.0,
-                        help="Min vehicles/period to keep an OD pair (default 1.0)")
+    parser.add_argument("--min-volume", type=float, default=0.5,
+                        help="Min vehicles/period to keep an OD pair (default 0.5)")
     args = parser.parse_args()
 
     work = Path(args.work_dir or "/tmp/scale_test_multi_period")
