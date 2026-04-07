@@ -311,12 +311,14 @@ def generate_report(
         queue_veh = [b.queue_vehicles for b in batch_log]
         n_oversat = [b.n_oversaturated for b in batch_log]
         tsstts = [b.tstt for b in batch_log]
+        eff_bs = [b.effective_batch_size for b in batch_log]
 
         fig_conv = make_subplots(
-            rows=2, cols=2, shared_xaxes=True,
+            rows=3, cols=2, shared_xaxes=True,
             subplot_titles=["Mean Speed (km/h)", "Queue Vehicles (veh/hr/lane)",
-                            "Oversaturated Links", "TSTT (veh·s)"],
-            vertical_spacing=0.12, horizontal_spacing=0.10,
+                            "Oversaturated Links", "TSTT (veh·s)",
+                            "Effective Batch Size", ""],
+            vertical_spacing=0.08, horizontal_spacing=0.10,
         )
         fig_conv.add_trace(go.Scatter(
             x=batch_idx, y=mean_speeds, mode="lines",
@@ -334,18 +336,27 @@ def generate_report(
             x=batch_idx, y=tsstts, mode="lines",
             line=dict(color="#43A047", width=2),
         ), row=2, col=2)
-        fig_conv.update_xaxes(title_text="Batch", row=2, col=1)
-        fig_conv.update_xaxes(title_text="Batch", row=2, col=2)
+        fig_conv.add_trace(go.Scatter(
+            x=batch_idx, y=eff_bs, mode="lines",
+            line=dict(color="#7B1FA2", width=2),
+            fill="tozeroy", fillcolor="rgba(123, 31, 162, 0.10)",
+        ), row=3, col=1)
+        fig_conv.update_xaxes(title_text="Batch", row=3, col=1)
+        fig_conv.update_xaxes(title_text="Batch", row=3, col=2)
         fig_conv.update_layout(
-            template="plotly_white", height=500, showlegend=False,
+            template="plotly_white", height=650, showlegend=False,
         )
         figs.append(fig_conv)
 
         final = batch_log[-1]
+        bs_min = min(eff_bs)
+        bs_max = max(eff_bs)
         descriptions.append(
             "<h2>Assignment Loading Profile</h2>"
             f"<p><b>{result.n_batches}</b> batches in "
             f"<b>{total_time_s:.0f}s</b> ({total_time_s/60:.1f} min). "
+            f"Batch size ranged from <b>{bs_min:,}</b> to <b>{bs_max:,}</b> "
+            f"(dynamic sizing). "
             f"Final state: mean speed <b>{final.mean_speed_kmh:.1f}</b> km/h, "
             f"min speed <b>{final.min_speed_kmh:.1f}</b> km/h, "
             f"<b>{final.n_oversaturated}</b> oversaturated links, "

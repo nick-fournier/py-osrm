@@ -65,6 +65,52 @@ class TripStreamAdapter:
                 departure_bin=None,
             )
 
+    def iter_time_slices_dynamic(
+        self,
+        *,
+        bin_width_s: float,
+        base_batch_size: int,
+        batch_size_fn=None,
+    ) -> Iterator[TripBatch]:
+        """Yield batches grouped by departure-time bin with dynamic sizing.
+
+        Parameters
+        ----------
+        bin_width_s : float
+            Width of each departure-time slice in seconds.
+        base_batch_size : int
+            Maximum / starting batch size.
+        batch_size_fn : callable, optional
+            Called with no arguments before each sub-batch to get the
+            current effective batch size.  If None, uses base_batch_size.
+        """
+        if bin_width_s <= 0:
+            raise ValueError("bin_width_s must be positive")
+        if base_batch_size <= 0:
+            raise ValueError("base_batch_size must be positive")
+
+        # Group trips by time bin
+        bins: dict[int, list[DemandTrip]] = {}
+        for trip in self._trips:
+            bi = int(trip.departure_time_s // bin_width_s)
+            bins.setdefault(bi, []).append(trip)
+
+        batch_index = 0
+        for bin_idx in sorted(bins.keys()):
+            chunk = bins[bin_idx]
+            pos = 0
+            while pos < len(chunk):
+                bs = batch_size_fn() if batch_size_fn else base_batch_size
+                bs = max(1, min(bs, base_batch_size))
+                end = min(pos + bs, len(chunk))
+                yield TripBatch(
+                    chunk[pos:end],
+                    batch_index=batch_index,
+                    departure_bin=bin_idx,
+                )
+                batch_index += 1
+                pos = end
+
     def iter_time_slices(
         self,
         *,

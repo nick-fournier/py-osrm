@@ -98,6 +98,12 @@ class AssignmentConfig:
     stagnation_tol: float = 0.001
     stagnation_window: int = 3
     n_threads: int = -1  # -1 = cpu_count - 2; 0 = all cores; >0 = explicit cap
+    # Dynamic batch sizing: scale = 1 - (n_oversat/n_active)^sensitivity
+    # sensitivity < 1 → concave (aggressive early shrinkage)
+    # sensitivity > 1 → convex (tolerant of mild congestion)
+    # 0 disables dynamic sizing (fixed batch size throughout)
+    stream_batch_sensitivity: float = 0.5
+    stream_batch_min_scale: float = 0.1  # floor: never below 10% of base
 
     def __post_init__(self):
         if self.n_threads == -1:
@@ -171,6 +177,7 @@ class StreamBatchResult:
 
     batch_index: int
     n_trips: int
+    effective_batch_size: int  # dynamic batch size used for this batch
     route_time_s: float
     customize_time_s: float
     engine_time_s: float
@@ -212,6 +219,7 @@ class StreamResult:
         return {
             "batch": [r.batch_index for r in self.batch_log],
             "n_trips": [r.n_trips for r in self.batch_log],
+            "effective_batch_size": [r.effective_batch_size for r in self.batch_log],
             "tstt": [r.tstt for r in self.batch_log],
             "queue_vehicles": [r.queue_vehicles for r in self.batch_log],
             "total_unserved_vph": [r.total_unserved_vph for r in self.batch_log],
@@ -1110,6 +1118,25 @@ class AssignmentSolver:
             n_trips, batch_size, self.config.n_threads,
         )
 
+        # Dynamic batch sizing state
+        sensitivity = self.config.stream_batch_sensitivity
+        min_scale = self.config.stream_batch_min_scale
+        base_batch_size = batch_size
+        current_effective_bs = batch_size
+        _n_active_links = 0
+        _n_oversat_links = 0
+
+        def _dynamic_batch_size() -> int:
+            """Compute next batch size from congestion state."""
+            nonlocal current_effective_bs
+            if sensitivity <= 0 or _n_active_links == 0:
+                current_effective_bs = base_batch_size
+                return base_batch_size
+            r = _n_oversat_links / _n_active_links
+            scale = max(min_scale, 1.0 - r ** sensitivity)
+            current_effective_bs = max(100, int(base_batch_size * scale))
+            return current_effective_bs
+
         # Network starts empty — edges discovered during routing
         state = NetworkState.empty()
         if state_patch:
@@ -1139,24 +1166,31 @@ class AssignmentSolver:
             route_demands = {}
 
         # Group trips into periods if multi-period requested
+        # Use a generator (not list) so dynamic batch sizing can adapt
         if period_duration_s is not None:
-            all_batches = list(
-                adapter.iter_time_slices(
-                    bin_width_s=period_duration_s,
-                    max_batch_size=batch_size,
-                )
+            batch_iter = adapter.iter_time_slices_dynamic(
+                bin_width_s=period_duration_s,
+                base_batch_size=batch_size,
+                batch_size_fn=_dynamic_batch_size,
             )
         else:
-            all_batches = list(adapter.iter_batches(batch_size))
+            batch_iter = adapter.iter_batches(batch_size)
 
-        n_batches = len(all_batches)
-        logger.info("Split into %d loading batches", n_batches)
+        # We don't know total batch count upfront with dynamic sizing
+        n_batches_est = max(1, n_trips // batch_size)
+        logger.info("Estimated ~%d loading batches (dynamic sizing %s)",
+                     n_batches_est,
+                     "enabled" if sensitivity > 0 else "disabled")
 
         # Cumulative flow within the current period (1D legacy path)
         cumulative_volume = queue_carryforward.copy()
-        current_period_bin = all_batches[0].departure_bin if all_batches else None
+        current_period_bin = None  # set from first batch
+        n_batches = 0
 
-        for batch in all_batches:
+        for batch in batch_iter:
+            if current_period_bin is None:
+                current_period_bin = batch.departure_bin
+            n_batches += 1
             t_batch = time.monotonic()
             bi = batch.batch_index
 
@@ -1346,6 +1380,7 @@ class AssignmentSolver:
             batch_result = StreamBatchResult(
                 batch_index=bi,
                 n_trips=len(batch.trips),
+                effective_batch_size=current_effective_bs,
                 route_time_s=route_time,
                 customize_time_s=customize_time,
                 engine_time_s=engine_time,
@@ -1361,19 +1396,25 @@ class AssignmentSolver:
             )
             batch_log.append(batch_result)
 
-            if bi % max(1, n_batches // 10) == 0 or bi == n_batches - 1:
+            # Update dynamic sizing state for next batch
+            _n_active_links = int(np.sum(state.flow_vph > 0))
+            _n_oversat_links = batch_result.n_oversaturated
+
+            if bi % max(1, n_batches_est // 10) == 0:
                 logger.info(
-                    "Batch %d/%d: %d trips, queue=%.0f veh/hr/lane, "
+                    "Batch %d (~%d est): %d trips (bs=%d), "
+                    "queue=%.0f veh/hr/lane, "
                     "mean_speed=%.1f km/h, oversat=%d, "
                     "route=%.1fs, cust=%.1fs",
-                    bi + 1, n_batches, len(batch.trips),
+                    bi + 1, n_batches_est, len(batch.trips),
+                    current_effective_bs,
                     mean_queue_per_lane, batch_result.mean_speed_kmh,
                     batch_result.n_oversaturated,
                     route_time, customize_time,
                 )
 
             if progress_callback:
-                progress_callback(bi, n_batches, mean_queue_per_lane)
+                progress_callback(bi, n_batches_est, mean_queue_per_lane)
 
         total_time = time.monotonic() - t_start
         del engine
