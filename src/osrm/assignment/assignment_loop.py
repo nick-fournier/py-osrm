@@ -13,6 +13,7 @@ from __future__ import annotations
 import enum
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -104,6 +105,9 @@ class AssignmentConfig:
     # 0 disables dynamic sizing (fixed batch size throughout)
     stream_batch_sensitivity: float = 0.1
     stream_batch_min_scale: float = 0.1  # floor: never below 10% of base
+    # Sampled gap: fraction of period trips re-routed at period-final to
+    # estimate Wardrop gap.  0 disables (no extra routing cost).
+    gap_sample_frac: float = 0.0
 
     def __post_init__(self):
         if self.n_threads == -1:
@@ -187,7 +191,13 @@ class StreamBatchResult:
     total_unserved_vph: float  # network-wide total unserved (veh/hr)
     mean_speed_kmh: float
     min_speed_kmh: float
+    p10_speed_kmh: float  # 10th percentile (flow-weighted)
+    p50_speed_kmh: float  # 50th percentile (flow-weighted)
     n_oversaturated: int
+    departure_bin: int = -1
+    vc_cv: float = float('nan')            # V/C coefficient of variation
+    flow_stability: float = float('nan')   # ‖Δflow‖/‖flow‖ vs previous period-final
+    sampled_gap: float = float('nan')      # sampled Wardrop relative gap
 
 
 @dataclass
@@ -228,6 +238,9 @@ class StreamResult:
             "n_oversaturated": [r.n_oversaturated for r in self.batch_log],
             "route_time_s": [r.route_time_s for r in self.batch_log],
             "customize_time_s": [r.customize_time_s for r in self.batch_log],
+            "vc_cv": [r.vc_cv for r in self.batch_log],
+            "flow_stability": [r.flow_stability for r in self.batch_log],
+            "sampled_gap": [r.sampled_gap for r in self.batch_log],
         }
 
 
@@ -1187,6 +1200,11 @@ class AssignmentSolver:
         current_period_bin = None  # set from first batch
         n_batches = 0
 
+        # Equilibrium quality tracking
+        gap_sample_frac = self.config.gap_sample_frac
+        prev_period_final_flow: Optional[np.ndarray] = None
+        current_period_trips: List[DemandTrip] = []
+
         for batch in batch_iter:
             if current_period_bin is None:
                 current_period_bin = batch.departure_bin
@@ -1200,6 +1218,64 @@ class AssignmentSolver:
                 and batch.departure_bin != current_period_bin
             ):
                 old_period = current_period_bin
+
+                # ── Period-final equilibrium metrics ──────────────
+                # Computed BEFORE state resets for the new period.
+                if batch_log:
+                    pf = batch_log[-1]  # last batch of completing period
+
+                    # Flow stability: ‖Δflow‖/‖flow‖ vs previous period
+                    if prev_period_final_flow is not None:
+                        flow_now = state.flow_vph
+                        norm_now = float(np.linalg.norm(flow_now))
+                        if norm_now > 0:
+                            delta = float(np.linalg.norm(
+                                flow_now[:len(prev_period_final_flow)]
+                                - prev_period_final_flow[:len(flow_now)]
+                            ))
+                            pf.flow_stability = delta / norm_now
+
+                    # Sampled Wardrop gap
+                    if gap_sample_frac > 0 and current_period_trips:
+                        n_sample = max(
+                            10,
+                            int(len(current_period_trips) * gap_sample_frac),
+                        )
+                        sample = (
+                            random.sample(current_period_trips, n_sample)
+                            if n_sample < len(current_period_trips)
+                            else current_period_trips
+                        )
+                        t_gap = time.monotonic()
+                        aon_sample, _, _ = self._route_and_accumulate(
+                            engine, sample, state,
+                            n_periods=0,
+                        )
+                        # Scale sample AON to full-period estimate
+                        scale = len(current_period_trips) / len(sample)
+                        aon_scaled = aon_sample * scale
+                        # Pad/trim to match state
+                        if len(aon_scaled) < state.n_edges:
+                            aon_scaled = np.append(
+                                aon_scaled,
+                                np.zeros(state.n_edges - len(aon_scaled)),
+                            )
+                        link_cost = state.length_m * 3.6 / np.maximum(
+                            state.speed_kmh, self.config.vdf_min_speed_kmh,
+                        )
+                        num = float(np.sum(state.flow_vph * link_cost))
+                        den = float(np.sum(aon_scaled[:state.n_edges] * link_cost))
+                        pf.sampled_gap = (num / den - 1.0) if den > 0 else float('nan')
+                        logger.info(
+                            "Period %s gap: %.4f (sample=%d/%d, %.1fs)",
+                            old_period, pf.sampled_gap,
+                            len(sample), len(current_period_trips),
+                            time.monotonic() - t_gap,
+                        )
+
+                    prev_period_final_flow = state.flow_vph.copy()
+                    current_period_trips = []
+                # ──────────────────────────────────────────────────
 
                 if n_periods > 0 and period_flows is not None:
                     # Save per-period CSV for the completing period
@@ -1274,6 +1350,10 @@ class AssignmentSolver:
                 n_periods=n_periods,
             )
             route_time = time.monotonic() - t_route
+
+            # Buffer trips for sampled gap at period-final
+            if gap_sample_frac > 0:
+                current_period_trips.extend(batch.trips)
 
             # Aggregate polylines into route_demands dict
             if return_routes and batch_polylines is not None:
@@ -1379,10 +1459,32 @@ class AssignmentSolver:
             else:
                 weighted_speed = float(np.mean(state.speed_kmh))
             active_speeds = state.speed_kmh[active] if np.any(active) else state.speed_kmh
+            # Flow-weighted speed percentiles
+            if total_flow > 0:
+                a_flow = state.flow_vph[active] if np.any(active) else state.flow_vph
+                si = np.argsort(active_speeds)
+                cs = active_speeds[si]
+                cf = np.cumsum(a_flow[si])
+                cf /= cf[-1]
+                p10_speed = float(cs[np.searchsorted(cf, 0.10)])
+                p50_speed = float(cs[np.searchsorted(cf, 0.50)])
+            else:
+                p10_speed = float(np.percentile(active_speeds, 10))
+                p50_speed = float(np.percentile(active_speeds, 50))
             link_time_s = state.length_m * 3.6 / np.maximum(
                 state.speed_kmh, self.config.vdf_min_speed_kmh,
             )
             tstt = float(np.sum(state.flow_vph * link_time_s))
+
+            # V/C coefficient of variation (utilization uniformity)
+            q_c = self.vdf.capacity_flow(
+                state.freeflow_kmh, state.jam_density,
+                kc_ratio=state.kc_ratio,
+            )
+            vc = state.flow_vph / np.maximum(q_c, 1.0)
+            vc_active = vc[active] if np.any(active) else vc
+            vc_mean = float(np.mean(vc_active))
+            vc_cv = float(np.std(vc_active) / max(vc_mean, 1e-9))
 
             batch_result = StreamBatchResult(
                 batch_index=bi,
@@ -1397,9 +1499,14 @@ class AssignmentSolver:
                 total_unserved_vph=total_unserved,
                 mean_speed_kmh=weighted_speed,
                 min_speed_kmh=float(np.min(active_speeds)),
+                p10_speed_kmh=p10_speed,
+                p50_speed_kmh=p50_speed,
                 n_oversaturated=int(np.sum(
                     state.density_vpkm > self.vdf.critical_density(state.jam_density, kc_ratio=state.kc_ratio)
                 )),
+                departure_bin=(batch.departure_bin
+                               if batch.departure_bin is not None else -1),
+                vc_cv=vc_cv,
             )
             batch_log.append(batch_result)
 
@@ -1424,6 +1531,54 @@ class AssignmentSolver:
 
             if progress_callback:
                 progress_callback(bi, n_batches_est, mean_queue_per_lane)
+
+        # Final period equilibrium metrics (no transition triggers these)
+        if batch_log:
+            pf = batch_log[-1]
+            if prev_period_final_flow is not None:
+                flow_now = state.flow_vph
+                norm_now = float(np.linalg.norm(flow_now))
+                if norm_now > 0:
+                    delta = float(np.linalg.norm(
+                        flow_now[:len(prev_period_final_flow)]
+                        - prev_period_final_flow[:len(flow_now)]
+                    ))
+                    pf.flow_stability = delta / norm_now
+
+            if gap_sample_frac > 0 and current_period_trips:
+                n_sample = max(
+                    10,
+                    int(len(current_period_trips) * gap_sample_frac),
+                )
+                sample = (
+                    random.sample(current_period_trips, n_sample)
+                    if n_sample < len(current_period_trips)
+                    else current_period_trips
+                )
+                t_gap = time.monotonic()
+                aon_sample, _, _ = self._route_and_accumulate(
+                    engine, sample, state,
+                    n_periods=0,
+                )
+                scale_f = len(current_period_trips) / len(sample)
+                aon_scaled = aon_sample * scale_f
+                if len(aon_scaled) < state.n_edges:
+                    aon_scaled = np.append(
+                        aon_scaled,
+                        np.zeros(state.n_edges - len(aon_scaled)),
+                    )
+                link_cost = state.length_m * 3.6 / np.maximum(
+                    state.speed_kmh, self.config.vdf_min_speed_kmh,
+                )
+                num = float(np.sum(state.flow_vph * link_cost))
+                den = float(np.sum(aon_scaled[:state.n_edges] * link_cost))
+                pf.sampled_gap = (num / den - 1.0) if den > 0 else float('nan')
+                logger.info(
+                    "Final period gap: %.4f (sample=%d/%d, %.1fs)",
+                    pf.sampled_gap, len(sample),
+                    len(current_period_trips),
+                    time.monotonic() - t_gap,
+                )
 
         total_time = time.monotonic() - t_start
         del engine

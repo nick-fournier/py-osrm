@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import logging
+import math
 import os
 import resource
 import shutil
@@ -211,6 +212,8 @@ def run_assignment(
     meta: dict,
     trips: list[DemandTrip],
     work: Path,
+    batch_size: int | None = None,
+    gap_sample_frac: float = 0.0,
 ):
     """Run assign_stream with production settings. Returns StreamResult."""
     logger.info("=== Running streaming assignment (%d trips) ===", len(trips))
@@ -229,6 +232,7 @@ def run_assignment(
         smoothing=DensitySmoothingConfig(method="none"),
         speed_csv_dir=str(run_dir),
         verbosity="INFO",
+        gap_sample_frac=gap_sample_frac,
     )
     solver = AssignmentSolver(run_base, config)
 
@@ -238,6 +242,7 @@ def run_assignment(
     t0 = time.monotonic()
     result = solver.assign_stream(
         trips,
+        batch_size=batch_size,
         period_duration_s=PERIOD_DURATION_S,
         state_patch=lane_patch,
     )
@@ -321,59 +326,147 @@ def generate_report(
     if batch_log:
         batch_idx = [b.batch_index for b in batch_log]
         mean_speeds = [b.mean_speed_kmh for b in batch_log]
+        p50_speeds = [b.p50_speed_kmh for b in batch_log]
+        p10_speeds = [b.p10_speed_kmh for b in batch_log]
         queue_veh = [b.queue_vehicles for b in batch_log]
         n_oversat = [b.n_oversaturated for b in batch_log]
         tsstts = [b.tstt for b in batch_log]
         eff_bs = [b.effective_batch_size for b in batch_log]
+        vc_cvs = [b.vc_cv for b in batch_log]
+
+        # Identify period-final batches (last batch before departure_bin changes)
+        period_final = []
+        for i in range(len(batch_log)):
+            if (i == len(batch_log) - 1
+                    or batch_log[i + 1].departure_bin != batch_log[i].departure_bin):
+                period_final.append(i)
+        pf_idx = [batch_idx[i] for i in period_final]
+        pf_mean = [mean_speeds[i] for i in period_final]
+        pf_p50 = [p50_speeds[i] for i in period_final]
+        pf_p10 = [p10_speeds[i] for i in period_final]
+        pf_queue = [queue_veh[i] for i in period_final]
+        pf_oversat = [n_oversat[i] for i in period_final]
+        pf_tstt = [tsstts[i] for i in period_final]
+        pf_vc_cv = [vc_cvs[i] for i in period_final]
+        pf_flow_stab = [batch_log[i].flow_stability for i in period_final]
+        pf_gap = [batch_log[i].sampled_gap for i in period_final]
 
         fig_conv = make_subplots(
-            rows=3, cols=2, shared_xaxes=True,
-            subplot_titles=["Mean Speed (km/h)", "Queue Vehicles (veh/hr/lane)",
+            rows=4, cols=2, shared_xaxes=True,
+            subplot_titles=["Speed (km/h)", "Queue Vehicles (veh/hr/lane)",
                             "Oversaturated Links", "TSTT (veh·s)",
+                            "V/C CV (utilization uniformity)",
+                            "Sampled Gap / Flow Stability",
                             "Effective Batch Size", ""],
-            vertical_spacing=0.08, horizontal_spacing=0.10,
+            vertical_spacing=0.06, horizontal_spacing=0.10,
         )
+
+        # All batches — dashed, thin, low opacity
+        batch_traces = [
+            (mean_speeds, "#1565C0", 1, 1),
+            (queue_veh,   "#E65100", 1, 2),
+            (n_oversat,   "#C62828", 2, 1),
+            (tsstts,      "#43A047", 2, 2),
+            (vc_cvs,      "#6A1B9A", 3, 1),
+        ]
+        for y, color, row, col in batch_traces:
+            fig_conv.add_trace(go.Scatter(
+                x=batch_idx, y=y, mode="lines",
+                line=dict(color=color, width=1, dash="dot"),
+                opacity=0.25, name="batch", showlegend=False,
+            ), row=row, col=col)
+
+        # Period-final speed bands: mean, P50, P10
         fig_conv.add_trace(go.Scatter(
-            x=batch_idx, y=mean_speeds, mode="lines",
+            x=pf_idx, y=pf_mean, mode="lines+markers",
             line=dict(color="#1565C0", width=2),
+            marker=dict(size=4), name="Mean",
         ), row=1, col=1)
         fig_conv.add_trace(go.Scatter(
-            x=batch_idx, y=queue_veh, mode="lines",
-            line=dict(color="#E65100", width=2),
-        ), row=1, col=2)
+            x=pf_idx, y=pf_p50, mode="lines+markers",
+            line=dict(color="#42A5F5", width=2, dash="dash"),
+            marker=dict(size=3), name="P50",
+        ), row=1, col=1)
         fig_conv.add_trace(go.Scatter(
-            x=batch_idx, y=n_oversat, mode="lines",
-            line=dict(color="#C62828", width=2),
-        ), row=2, col=1)
+            x=pf_idx, y=pf_p10, mode="lines+markers",
+            line=dict(color="#EF5350", width=2, dash="dash"),
+            marker=dict(size=3), name="P10",
+        ), row=1, col=1)
+
+        # Period-final for other core metrics
+        pf_other = [
+            (pf_queue,   "#E65100", 1, 2),
+            (pf_oversat, "#C62828", 2, 1),
+            (pf_tstt,    "#43A047", 2, 2),
+        ]
+        for y, color, row, col in pf_other:
+            fig_conv.add_trace(go.Scatter(
+                x=pf_idx, y=y, mode="lines+markers",
+                line=dict(color=color, width=2),
+                marker=dict(size=4), showlegend=False,
+            ), row=row, col=col)
+
+        # V/C CV period-final
         fig_conv.add_trace(go.Scatter(
-            x=batch_idx, y=tsstts, mode="lines",
-            line=dict(color="#43A047", width=2),
-        ), row=2, col=2)
+            x=pf_idx, y=pf_vc_cv, mode="lines+markers",
+            line=dict(color="#6A1B9A", width=2),
+            marker=dict(size=4), showlegend=False,
+        ), row=3, col=1)
+
+        # Sampled gap + flow stability (period-final only, may contain NaN)
+        valid_gap = [(x, y) for x, y in zip(pf_idx, pf_gap)
+                     if not math.isnan(y)]
+        valid_stab = [(x, y) for x, y in zip(pf_idx, pf_flow_stab)
+                      if not math.isnan(y)]
+        if valid_gap:
+            fig_conv.add_trace(go.Scatter(
+                x=[p[0] for p in valid_gap],
+                y=[p[1] for p in valid_gap],
+                mode="lines+markers",
+                line=dict(color="#D84315", width=2),
+                marker=dict(size=5), name="Sampled Gap",
+            ), row=3, col=2)
+        if valid_stab:
+            fig_conv.add_trace(go.Scatter(
+                x=[p[0] for p in valid_stab],
+                y=[p[1] for p in valid_stab],
+                mode="lines+markers",
+                line=dict(color="#00897B", width=2, dash="dash"),
+                marker=dict(size=4), name="Flow Δ‖·‖",
+            ), row=3, col=2)
+
         fig_conv.add_trace(go.Scatter(
             x=batch_idx, y=eff_bs, mode="lines",
             line=dict(color="#7B1FA2", width=2),
             fill="tozeroy", fillcolor="rgba(123, 31, 162, 0.10)",
-        ), row=3, col=1)
-        fig_conv.update_xaxes(title_text="Batch", row=3, col=1)
-        fig_conv.update_xaxes(title_text="Batch", row=3, col=2)
+            showlegend=False,
+        ), row=4, col=1)
+        fig_conv.update_xaxes(title_text="Batch", row=4, col=1)
+        fig_conv.update_xaxes(title_text="Batch", row=4, col=2)
         fig_conv.update_layout(
-            template="plotly_white", height=650, showlegend=False,
+            template="plotly_white", height=850,
+            legend=dict(x=0.02, y=0.98, bgcolor="rgba(255,255,255,0.8)"),
         )
         figs.append(fig_conv)
 
         final = batch_log[-1]
         bs_min = min(eff_bs)
         bs_max = max(eff_bs)
+        gap_str = (f"sampled gap <b>{final.sampled_gap:.4f}</b>, "
+                   if not math.isnan(final.sampled_gap) else "")
         descriptions.append(
             "<h2>Assignment Loading Profile</h2>"
             f"<p><b>{result.n_batches}</b> batches in "
             f"<b>{total_time_s:.0f}s</b> ({total_time_s/60:.1f} min). "
-            f"Batch size ranged from <b>{bs_min:,}</b> to <b>{bs_max:,}</b> "
-            f"(dynamic sizing). "
+            f"Batch size ranged from <b>{bs_min:,}</b> to <b>{bs_max:,}</b>. "
+            f"Solid line = period-final state, dashed = intra-period batches. "
             f"Final state: mean speed <b>{final.mean_speed_kmh:.1f}</b> km/h, "
             f"min speed <b>{final.min_speed_kmh:.1f}</b> km/h, "
             f"<b>{final.n_oversaturated}</b> oversaturated links, "
-            f"queue <b>{final.queue_vehicles:.1f}</b> veh/hr/lane.</p>"
+            f"queue <b>{final.queue_vehicles:.1f}</b> veh/hr/lane, "
+            f"V/C CV <b>{final.vc_cv:.2f}</b>, "
+            f"{gap_str}"
+            f"</p>"
         )
 
     # ── 3. Network loading vs departures (spillover) ─────────────────
@@ -526,6 +619,11 @@ def main():
                         help="Demand multiplier (default 1.0 = full peak-hour demand)")
     parser.add_argument("--min-volume", type=float, default=0.5,
                         help="Min vehicles/period to keep an OD pair (default 0.5)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Fixed batch size (default: autotune)")
+    parser.add_argument("--gap-sample", type=float, default=0.0,
+                        help="Fraction of period trips to re-route for gap estimate "
+                             "(0 = disabled, 0.01-0.10 recommended)")
     args = parser.parse_args()
 
     work = Path(args.work_dir or "/tmp/scale_test_multi_period")
@@ -543,7 +641,9 @@ def main():
 
     # 3. Run streaming assignment
     t0 = time.monotonic()
-    result = run_assignment(base, meta, trips, work)
+    result = run_assignment(base, meta, trips, work,
+                            batch_size=args.batch_size,
+                            gap_sample_frac=args.gap_sample)
     total_time = time.monotonic() - t0
 
     # 4. Generate report
