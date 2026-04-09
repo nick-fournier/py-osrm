@@ -438,6 +438,7 @@ def generate_report(
 
         # Mean V/C series (drives batch sizing)
         mean_vcs = [b.mean_vc for b in batch_log]
+        pf_mean_vc = [mean_vcs[i] for i in period_final]
 
         fig_conv.add_trace(go.Scatter(
             x=batch_idx, y=eff_bs, mode="lines",
@@ -446,11 +447,16 @@ def generate_report(
             showlegend=False,
         ), row=4, col=1)
 
-        # Mean V/C panel (row 4, col 2)
+        # Mean V/C panel (row 4, col 2) — batch (dashed) + period-final (solid)
         fig_conv.add_trace(go.Scatter(
             x=batch_idx, y=mean_vcs, mode="lines",
+            line=dict(color="#1565C0", width=1, dash="dot"),
+            opacity=0.25, showlegend=False,
+        ), row=4, col=2)
+        fig_conv.add_trace(go.Scatter(
+            x=pf_idx, y=pf_mean_vc, mode="lines+markers",
             line=dict(color="#1565C0", width=2),
-            name="Mean V/C",
+            marker=dict(size=4), name="Mean V/C",
         ), row=4, col=2)
         fig_conv.update_xaxes(title_text="Batch", row=4, col=1)
         fig_conv.update_xaxes(title_text="Batch", row=4, col=2)

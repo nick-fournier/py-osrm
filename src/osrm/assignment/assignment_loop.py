@@ -1117,7 +1117,7 @@ class AssignmentSolver:
                 n_edges_est = n_edges_probe
 
             trips_per_1vpl = n_edges_est / max(avg_edges_per_route, 1.0)
-            batch_size = max(100, int(10 * trips_per_1vpl))
+            batch_size = max(100, int(5 * trips_per_1vpl))
 
             logger.info(
                 "Auto-tuned batch_size=%d (~%d batches): "
