@@ -1203,6 +1203,8 @@ class AssignmentSolver:
         gap_sample_frac = self.config.gap_sample_frac
         prev_period_final_flow: Optional[np.ndarray] = None
         current_period_trips: List[DemandTrip] = []
+        # 1D unsplit flow for current period's trips (for gap numerator)
+        period_1d_flow = np.zeros(state.n_edges, dtype=np.float64)
 
         for batch in batch_iter:
             if current_period_bin is None:
@@ -1262,7 +1264,9 @@ class AssignmentSolver:
                         link_cost = state.length_m * 3.6 / np.maximum(
                             state.speed_kmh, self.config.vdf_min_speed_kmh,
                         )
-                        num = float(np.sum(state.flow_vph * link_cost))
+                        # Use 1D unsplit flow for this period's trips
+                        gap_flow = period_1d_flow[:state.n_edges]
+                        num = float(np.sum(gap_flow * link_cost))
                         den = float(np.sum(aon_scaled[:state.n_edges] * link_cost))
                         pf.sampled_gap = (num / den - 1.0) if den > 0 else float('nan')
                         logger.info(
@@ -1274,6 +1278,7 @@ class AssignmentSolver:
 
                     prev_period_final_flow = state.flow_vph.copy()
                     current_period_trips = []
+                    period_1d_flow = np.zeros(state.n_edges, dtype=np.float64)
                 # ──────────────────────────────────────────────────
 
                 if n_periods > 0 and period_flows is not None:
@@ -1396,6 +1401,16 @@ class AssignmentSolver:
                 # Add this batch's per-period flow
                 period_flows += aon_volume
 
+                # Accumulate 1D unsplit flow for gap computation
+                if gap_sample_frac > 0:
+                    batch_1d = np.sum(aon_volume, axis=0)
+                    if len(period_1d_flow) < len(batch_1d):
+                        period_1d_flow = np.append(
+                            period_1d_flow,
+                            np.zeros(len(batch_1d) - len(period_1d_flow)),
+                        )
+                    period_1d_flow[:len(batch_1d)] += batch_1d
+
                 # Current period's total flow for VDF
                 cp = current_period_bin if current_period_bin is not None else 0
                 if cp < n_periods:
@@ -1422,6 +1437,15 @@ class AssignmentSolver:
 
                 cumulative_volume += aon_volume
                 state.flow_vph = np.maximum(cumulative_volume, 0.0)
+
+                # Accumulate 1D flow for gap computation (legacy path)
+                if gap_sample_frac > 0:
+                    if len(period_1d_flow) < len(aon_volume):
+                        period_1d_flow = np.append(
+                            period_1d_flow,
+                            np.zeros(len(aon_volume) - len(period_1d_flow)),
+                        )
+                    period_1d_flow[:len(aon_volume)] += aon_volume
 
             # 3. VDF: flow → density → speed
             self._update_state(state)
@@ -1571,7 +1595,9 @@ class AssignmentSolver:
                 link_cost = state.length_m * 3.6 / np.maximum(
                     state.speed_kmh, self.config.vdf_min_speed_kmh,
                 )
-                num = float(np.sum(state.flow_vph * link_cost))
+                # Use 1D unsplit flow for this period's trips
+                gap_flow = period_1d_flow[:state.n_edges]
+                num = float(np.sum(gap_flow * link_cost))
                 den = float(np.sum(aon_scaled[:state.n_edges] * link_cost))
                 pf.sampled_gap = (num / den - 1.0) if den > 0 else float('nan')
                 logger.info(
