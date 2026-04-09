@@ -195,6 +195,8 @@ class StreamBatchResult:
     n_oversaturated: int
     departure_bin: int = -1
     vc_cv: float = float('nan')            # V/C coefficient of variation
+    mean_vc: float = float('nan')          # mean V/C of active links
+    frac_vc_gt80: float = float('nan')     # fraction of active links with V/C > 0.8
     flow_stability: float = float('nan')   # ‖Δflow‖/‖flow‖ vs previous period-final
     sampled_gap: float = float('nan')      # sampled Wardrop relative gap
 
@@ -238,6 +240,8 @@ class StreamResult:
             "route_time_s": [r.route_time_s for r in self.batch_log],
             "customize_time_s": [r.customize_time_s for r in self.batch_log],
             "vc_cv": [r.vc_cv for r in self.batch_log],
+            "mean_vc": [r.mean_vc for r in self.batch_log],
+            "frac_vc_gt80": [r.frac_vc_gt80 for r in self.batch_log],
             "flow_stability": [r.flow_stability for r in self.batch_log],
             "sampled_gap": [r.sampled_gap for r in self.batch_log],
         }
@@ -1484,6 +1488,8 @@ class AssignmentSolver:
             vc_active = vc[active] if np.any(active) else vc
             vc_mean = float(np.mean(vc_active))
             vc_cv = float(np.std(vc_active) / max(vc_mean, 1e-9))
+            n_active = int(np.sum(active))
+            frac_vc_gt80 = float(np.sum(vc_active > 0.8) / max(n_active, 1))
 
             batch_result = StreamBatchResult(
                 batch_index=bi,
@@ -1506,6 +1512,8 @@ class AssignmentSolver:
                 departure_bin=(batch.departure_bin
                                if batch.departure_bin is not None else -1),
                 vc_cv=vc_cv,
+                mean_vc=vc_mean,
+                frac_vc_gt80=frac_vc_gt80,
             )
             batch_log.append(batch_result)
 

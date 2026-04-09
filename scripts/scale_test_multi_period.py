@@ -357,7 +357,8 @@ def generate_report(
                             "Oversaturated Links", "TSTT (veh·s)",
                             "V/C CV (utilization uniformity)",
                             "Sampled Gap / Flow Stability",
-                            "Effective Batch Size", ""],
+                            "Effective Batch Size",
+                            "Congestion Ratios (r signals)"],
             vertical_spacing=0.06, horizontal_spacing=0.10,
         )
 
@@ -435,12 +436,28 @@ def generate_report(
                 marker=dict(size=4), name="Flow Δ‖·‖",
             ), row=3, col=2)
 
+        # Congestion ratio series (for diagnostic panel)
+        mean_vcs = [b.mean_vc for b in batch_log]
+        frac_gt80 = [b.frac_vc_gt80 for b in batch_log]
+
         fig_conv.add_trace(go.Scatter(
             x=batch_idx, y=eff_bs, mode="lines",
             line=dict(color="#7B1FA2", width=2),
             fill="tozeroy", fillcolor="rgba(123, 31, 162, 0.10)",
             showlegend=False,
         ), row=4, col=1)
+
+        # Congestion ratios panel (row 4, col 2)
+        fig_conv.add_trace(go.Scatter(
+            x=batch_idx, y=mean_vcs, mode="lines",
+            line=dict(color="#1565C0", width=2),
+            name="Mean V/C",
+        ), row=4, col=2)
+        fig_conv.add_trace(go.Scatter(
+            x=batch_idx, y=frac_gt80, mode="lines",
+            line=dict(color="#E65100", width=2, dash="dash"),
+            name="Frac V/C>0.8",
+        ), row=4, col=2)
         fig_conv.update_xaxes(title_text="Batch", row=4, col=1)
         fig_conv.update_xaxes(title_text="Batch", row=4, col=2)
         fig_conv.update_layout(
