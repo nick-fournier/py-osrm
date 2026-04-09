@@ -1510,9 +1510,9 @@ class AssignmentSolver:
             )
             batch_log.append(batch_result)
 
-            # Update dynamic sizing state — use total discovered edges
-            # (not just active) so edge discovery doesn't dilute the ratio
-            _n_active_links = state.n_edges
+            # Update dynamic sizing state — use links with flow (active)
+            # so empty edges don't dilute the congestion signal
+            _n_active_links = int(np.sum(state.flow_vph > 0))
             _n_oversat_links = batch_result.n_oversaturated
 
             if bi % max(1, n_batches_est // 10) == 0:
