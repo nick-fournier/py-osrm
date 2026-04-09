@@ -99,10 +99,10 @@ class AssignmentConfig:
     stagnation_tol: float = 0.001
     stagnation_window: int = 3
     n_threads: int = -1  # -1 = cpu_count - 2; 0 = all cores; >0 = explicit cap
-    # Dynamic batch sizing: scale = k / (r + k) where r = n_oversat/n_active
-    # k is the half-point: when r = k, batch size = 50% of base.
+    # Dynamic batch sizing: scale = k / (mean_vc + k)
+    # k is the half-point: when mean V/C = k, batch size = 50% of base.
     # 0 disables dynamic sizing (fixed batch size throughout)
-    stream_batch_halfpoint: float = 0.10
+    stream_batch_halfpoint: float = 0.05
     stream_batch_min_scale: float = 0.1  # floor: never below 10% of base
     # Sampled gap: fraction of period trips re-routed at period-final to
     # estimate Wardrop gap.  0 disables (no extra routing cost).
@@ -196,7 +196,6 @@ class StreamBatchResult:
     departure_bin: int = -1
     vc_cv: float = float('nan')            # V/C coefficient of variation
     mean_vc: float = float('nan')          # mean V/C of active links
-    frac_vc_gt80: float = float('nan')     # fraction of active links with V/C > 0.8
     flow_stability: float = float('nan')   # ‖Δflow‖/‖flow‖ vs previous period-final
     sampled_gap: float = float('nan')      # sampled Wardrop relative gap
 
@@ -241,7 +240,6 @@ class StreamResult:
             "customize_time_s": [r.customize_time_s for r in self.batch_log],
             "vc_cv": [r.vc_cv for r in self.batch_log],
             "mean_vc": [r.mean_vc for r in self.batch_log],
-            "frac_vc_gt80": [r.frac_vc_gt80 for r in self.batch_log],
             "flow_stability": [r.flow_stability for r in self.batch_log],
             "sampled_gap": [r.sampled_gap for r in self.batch_log],
         }
@@ -1139,17 +1137,15 @@ class AssignmentSolver:
         min_scale = self.config.stream_batch_min_scale
         base_batch_size = batch_size
         current_effective_bs = batch_size
-        _n_active_links = 0
-        _n_oversat_links = 0
+        _mean_vc = 0.0
 
         def _dynamic_batch_size() -> int:
             """Compute next batch size from congestion state."""
             nonlocal current_effective_bs
-            if halfpoint <= 0 or _n_active_links == 0:
+            if halfpoint <= 0 or _mean_vc <= 0:
                 current_effective_bs = base_batch_size
                 return base_batch_size
-            r = _n_oversat_links / _n_active_links
-            scale = max(min_scale, halfpoint / (r + halfpoint))
+            scale = max(min_scale, halfpoint / (_mean_vc + halfpoint))
             current_effective_bs = max(100, int(base_batch_size * scale))
             return current_effective_bs
 
@@ -1488,8 +1484,6 @@ class AssignmentSolver:
             vc_active = vc[active] if np.any(active) else vc
             vc_mean = float(np.mean(vc_active))
             vc_cv = float(np.std(vc_active) / max(vc_mean, 1e-9))
-            n_active = int(np.sum(active))
-            frac_vc_gt80 = float(np.sum(vc_active > 0.8) / max(n_active, 1))
 
             batch_result = StreamBatchResult(
                 batch_index=bi,
@@ -1513,26 +1507,22 @@ class AssignmentSolver:
                                if batch.departure_bin is not None else -1),
                 vc_cv=vc_cv,
                 mean_vc=vc_mean,
-                frac_vc_gt80=frac_vc_gt80,
             )
             batch_log.append(batch_result)
 
-            # Update dynamic sizing state — use links with flow (active)
-            # so empty edges don't dilute the congestion signal
-            _n_active_links = int(np.sum(state.flow_vph > 0))
-            _n_oversat_links = batch_result.n_oversaturated
+            # Update dynamic sizing state — mean V/C drives batch scaling
+            _mean_vc = batch_result.mean_vc
 
             if bi % max(1, n_batches_est // 10) == 0:
-                r_pct = 100.0 * _n_oversat_links / max(_n_active_links, 1)
                 logger.info(
-                    "Batch %d (~%d est): %d trips (bs=%d, r=%.1f%%), "
+                    "Batch %d (~%d est): %d trips (bs=%d, mean_vc=%.3f), "
                     "queue=%.0f veh/hr/lane, "
-                    "mean_speed=%.1f km/h, oversat=%d/%d, "
+                    "mean_speed=%.1f km/h, oversat=%d, "
                     "route=%.1fs, cust=%.1fs",
                     bi + 1, n_batches_est, len(batch.trips),
-                    current_effective_bs, r_pct,
+                    current_effective_bs, _mean_vc,
                     mean_queue_per_lane, batch_result.mean_speed_kmh,
-                    batch_result.n_oversaturated, _n_active_links,
+                    batch_result.n_oversaturated,
                     route_time, customize_time,
                 )
 
