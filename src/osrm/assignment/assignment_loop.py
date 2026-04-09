@@ -99,11 +99,10 @@ class AssignmentConfig:
     stagnation_tol: float = 0.001
     stagnation_window: int = 3
     n_threads: int = -1  # -1 = cpu_count - 2; 0 = all cores; >0 = explicit cap
-    # Dynamic batch sizing: scale = 1 - (n_oversat/n_active)^sensitivity
-    # sensitivity < 1 → concave (aggressive early shrinkage)
-    # sensitivity > 1 → convex (tolerant of mild congestion)
+    # Dynamic batch sizing: scale = k / (r + k) where r = n_oversat/n_active
+    # k is the half-point: when r = k, batch size = 50% of base.
     # 0 disables dynamic sizing (fixed batch size throughout)
-    stream_batch_sensitivity: float = 0.1
+    stream_batch_halfpoint: float = 0.10
     stream_batch_min_scale: float = 0.1  # floor: never below 10% of base
     # Sampled gap: fraction of period trips re-routed at period-final to
     # estimate Wardrop gap.  0 disables (no extra routing cost).
@@ -1132,7 +1131,7 @@ class AssignmentSolver:
         )
 
         # Dynamic batch sizing state
-        sensitivity = self.config.stream_batch_sensitivity
+        halfpoint = self.config.stream_batch_halfpoint
         min_scale = self.config.stream_batch_min_scale
         base_batch_size = batch_size
         current_effective_bs = batch_size
@@ -1142,11 +1141,11 @@ class AssignmentSolver:
         def _dynamic_batch_size() -> int:
             """Compute next batch size from congestion state."""
             nonlocal current_effective_bs
-            if sensitivity <= 0 or _n_active_links == 0:
+            if halfpoint <= 0 or _n_active_links == 0:
                 current_effective_bs = base_batch_size
                 return base_batch_size
             r = _n_oversat_links / _n_active_links
-            scale = max(min_scale, 1.0 - r ** sensitivity)
+            scale = max(min_scale, halfpoint / (r + halfpoint))
             current_effective_bs = max(100, int(base_batch_size * scale))
             return current_effective_bs
 
@@ -1193,7 +1192,7 @@ class AssignmentSolver:
         n_batches_est = max(1, n_trips // batch_size)
         logger.info("Estimated ~%d loading batches (dynamic sizing %s)",
                      n_batches_est,
-                     "enabled" if sensitivity > 0 else "disabled")
+                     f"k={halfpoint}" if halfpoint > 0 else "disabled")
 
         # Cumulative flow within the current period (1D legacy path)
         cumulative_volume = queue_carryforward.copy()
