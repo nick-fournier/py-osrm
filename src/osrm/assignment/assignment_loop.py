@@ -1302,7 +1302,11 @@ class AssignmentSolver:
                     # Add unserved demand to next period's flow
                     new_period = batch.departure_bin
                     if new_period is not None and new_period < n_periods:
-                        period_flows[new_period, :] += unserved
+                        # Pad period_flows if new edges discovered since last resize
+                        if period_flows.shape[1] < state.n_edges:
+                            pad = state.n_edges - period_flows.shape[1]
+                            period_flows = np.pad(period_flows, ((0, 0), (0, pad)))
+                        period_flows[new_period, :state.n_edges] += unserved
 
                     # Set state to new period's accumulated flow for VDF
                     state.flow_vph = np.maximum(
