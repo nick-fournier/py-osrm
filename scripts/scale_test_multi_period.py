@@ -213,7 +213,6 @@ def run_assignment(
     trips: list[DemandTrip],
     work: Path,
     batch_size: int | None = None,
-    gap_sample_frac: float = 0.0,
 ):
     """Run assign_stream with production settings. Returns StreamResult."""
     logger.info("=== Running streaming assignment (%d trips) ===", len(trips))
@@ -232,7 +231,6 @@ def run_assignment(
         smoothing=DensitySmoothingConfig(method="none"),
         speed_csv_dir=str(run_dir),
         verbosity="INFO",
-        gap_sample_frac=gap_sample_frac,
     )
     solver = AssignmentSolver(run_base, config)
 
@@ -349,14 +347,13 @@ def generate_report(
         pf_tstt = [tsstts[i] for i in period_final]
         pf_vc_cv = [vc_cvs[i] for i in period_final]
         pf_flow_stab = [batch_log[i].flow_stability for i in period_final]
-        pf_gap = [batch_log[i].sampled_gap for i in period_final]
 
         fig_conv = make_subplots(
             rows=4, cols=2, shared_xaxes=True,
             subplot_titles=["Speed (km/h)", "Queue Vehicles (veh/hr/lane)",
                             "Oversaturated Links", "TSTT (veh·s)",
                             "V/C CV (utilization uniformity)",
-                            "Sampled Gap / Flow Stability",
+                            "Flow Stability",
                             "Effective Batch Size",
                             "Mean V/C (batch sizing signal)"],
             vertical_spacing=0.06, horizontal_spacing=0.10,
@@ -414,25 +411,15 @@ def generate_report(
             marker=dict(size=4), showlegend=False,
         ), row=3, col=1)
 
-        # Sampled gap + flow stability (period-final only, may contain NaN)
-        valid_gap = [(x, y) for x, y in zip(pf_idx, pf_gap)
-                     if not math.isnan(y)]
+        # Flow stability (period-final only, may contain NaN)
         valid_stab = [(x, y) for x, y in zip(pf_idx, pf_flow_stab)
                       if not math.isnan(y)]
-        if valid_gap:
-            fig_conv.add_trace(go.Scatter(
-                x=[p[0] for p in valid_gap],
-                y=[p[1] for p in valid_gap],
-                mode="lines+markers",
-                line=dict(color="#D84315", width=2),
-                marker=dict(size=5), name="Sampled Gap",
-            ), row=3, col=2)
         if valid_stab:
             fig_conv.add_trace(go.Scatter(
                 x=[p[0] for p in valid_stab],
                 y=[p[1] for p in valid_stab],
                 mode="lines+markers",
-                line=dict(color="#00897B", width=2, dash="dash"),
+                line=dict(color="#00897B", width=2),
                 marker=dict(size=4), name="Flow Δ‖·‖",
             ), row=3, col=2)
 
@@ -469,8 +456,6 @@ def generate_report(
         final = batch_log[-1]
         bs_min = min(eff_bs)
         bs_max = max(eff_bs)
-        gap_str = (f"sampled gap <b>{final.sampled_gap:.4f}</b>, "
-                   if not math.isnan(final.sampled_gap) else "")
         descriptions.append(
             "<h2>Assignment Loading Profile</h2>"
             f"<p><b>{result.n_batches}</b> batches in "
@@ -481,8 +466,7 @@ def generate_report(
             f"min speed <b>{final.min_speed_kmh:.1f}</b> km/h, "
             f"<b>{final.n_oversaturated}</b> oversaturated links, "
             f"queue <b>{final.queue_vehicles:.1f}</b> veh/hr/lane, "
-            f"V/C CV <b>{final.vc_cv:.2f}</b>. "
-            f"{gap_str}</p>"
+            f"V/C CV <b>{final.vc_cv:.2f}</b>.</p>"
             "<h3>Metric Guide</h3>"
             "<ul>"
             "<li><b>V/C CV</b> — Coefficient of variation of V/C ratios across "
@@ -499,11 +483,6 @@ def generate_report(
             "Lower = more stable network state across periods. "
             "High values indicate large flow pattern shifts at period "
             "boundaries.</li>"
-            "<li><b>Sampled Gap</b> — Wardrop relative gap estimated by "
-            "re-routing a sample of each period's trips on the period-final "
-            "congested network: <code>Σ(V·c) / Σ(V<sub>aon</sub>·c) − 1"
-            "</code>. Zero = perfect equilibrium (all trips on shortest "
-            "paths). Requires <code>--gap-sample &gt; 0</code>.</li>"
             "</ul>"
         )
 
@@ -659,9 +638,6 @@ def main():
                         help="Min vehicles/period to keep an OD pair (default 0.5)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Fixed batch size (default: autotune)")
-    parser.add_argument("--gap-sample", type=float, default=0.0,
-                        help="Fraction of period trips to re-route for gap estimate "
-                             "(0 = disabled, 0.01-0.10 recommended)")
     args = parser.parse_args()
 
     work = Path(args.work_dir or "/tmp/scale_test_multi_period")
@@ -680,8 +656,7 @@ def main():
     # 3. Run streaming assignment
     t0 = time.monotonic()
     result = run_assignment(base, meta, trips, work,
-                            batch_size=args.batch_size,
-                            gap_sample_frac=args.gap_sample)
+                            batch_size=args.batch_size)
     total_time = time.monotonic() - t0
 
     # 4. Generate report
