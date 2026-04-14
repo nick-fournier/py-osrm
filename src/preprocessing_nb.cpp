@@ -2,6 +2,7 @@
 #include "osrm/contractor.hpp"
 #include "osrm/partitioner.hpp"
 #include "osrm/customizer.hpp"
+#include "osrm/incremental_customizer.hpp"
 #include "osrm/extractor_config.hpp"
 #include "osrm/contractor_config.hpp"
 #include "osrm/partitioner_config.hpp"
@@ -18,6 +19,7 @@
 
 #include <sstream>
 #include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <thread>
 
@@ -433,4 +435,47 @@ void init_Preprocessing(nb::module_& m) {
           nb::arg("verbosity") = "INFO",
           nb::arg("progress_callback") = nb::none(),
           "Customize graph with output capture and optional progress callback");
+
+    // IncrementalCustomizer — dirty-cell recustomization for streaming assignment
+    using IC = osrm::customizer::IncrementalCustomizer;
+    using ICR = IC::RecustomizeResult;
+
+    nb::class_<ICR>(m, "RecustomizeResult")
+        .def_ro("dirty_cells", &ICR::dirty_cells)
+        .def_ro("total_cells", &ICR::total_cells)
+        .def_ro("elapsed_seconds", &ICR::elapsed_seconds);
+
+    nb::class_<IC>(m, "IncrementalCustomizer")
+        .def(nb::init<>())
+        .def("initialize",
+             [](IC &self, const std::string &base_path,
+                int n_threads, const std::string &verbosity) {
+                 set_log_level(verbosity);
+                 osrm::customizer::CustomizationConfig config;
+                 config.UseDefaultOutputNames(std::filesystem::path(base_path));
+                 if (n_threads > 0)
+                     config.requested_num_threads = n_threads;
+                 nb::gil_scoped_release release;
+                 self.Initialize(config, n_threads);
+             },
+             nb::arg("base_path"), nb::arg("n_threads") = 0,
+             nb::arg("verbosity") = "INFO",
+             "Load partition/cells/graph and run full initial customize")
+        .def("recustomize",
+             [](IC &self, const std::string &segment_speed_csv,
+                int n_threads, const std::string &verbosity) -> ICR {
+                 set_log_level(verbosity);
+                 nb::gil_scoped_release release;
+                 return self.Recustomize(segment_speed_csv, n_threads);
+             },
+             nb::arg("segment_speed_csv"), nb::arg("n_threads") = 0,
+             nb::arg("verbosity") = "ERROR",
+             "Recustomize with dirty-cell detection from a speed CSV")
+        .def("write_cell_metrics",
+             [](const IC &self) {
+                 nb::gil_scoped_release release;
+                 self.WriteCellMetrics();
+             },
+             "Write current cell metrics to disk")
+        .def("is_initialized", &IC::IsInitialized);
 }

@@ -303,6 +303,7 @@ class AssignmentSolver:
             prefix="osrm_assignment",
         )
         self._engine: Optional[osrm_module.OSRM] = None
+        self._incr_customizer: Optional[osrm_module.IncrementalCustomizer] = None
 
     def _create_engine(self, *, quiet: bool = False) -> osrm_module.OSRM:
         """Create a fresh OSRM engine instance."""
@@ -316,6 +317,55 @@ class AssignmentSolver:
         )
         _log("Engine loaded in %.2fs", time.monotonic() - t0)
         return eng
+
+    def _customize_and_reload(
+        self, csv_path: str, engine: "osrm_module.OSRM",
+    ) -> tuple["osrm_module.OSRM", float, float]:
+        """Customize OSRM with a speed CSV and reload the engine.
+
+        Uses IncrementalCustomizer (dirty-cell) if available, otherwise
+        falls back to full customize.
+
+        Returns (engine, customize_time, engine_time).
+        """
+        t_cust = time.monotonic()
+
+        # Try incremental path
+        if self._incr_customizer is not None:
+            try:
+                result = self._incr_customizer.recustomize(
+                    csv_path, n_threads=self.config.n_threads,
+                )
+                customize_time = time.monotonic() - t_cust
+                t_eng = time.monotonic()
+                del engine
+                engine = self._create_engine(quiet=True)
+                engine_time = time.monotonic() - t_eng
+                logger.debug(
+                    "Incremental customize: %d/%d cells in %.2fs + engine %.2fs",
+                    result.dirty_cells, result.total_cells,
+                    customize_time, engine_time,
+                )
+                return engine, customize_time, engine_time
+            except Exception:
+                logger.warning(
+                    "IncrementalCustomizer failed, falling back to full customize",
+                    exc_info=True,
+                )
+                self._incr_customizer = None
+
+        # Full customize fallback
+        osrm_module.customize(
+            self.base_path,
+            segment_speed_file=csv_path,
+            verbosity="ERROR",
+        )
+        customize_time = time.monotonic() - t_cust
+        t_eng = time.monotonic()
+        del engine
+        engine = self._create_engine(quiet=True)
+        engine_time = time.monotonic() - t_eng
+        return engine, customize_time, engine_time
 
     def _snap_trips(
         self,
@@ -781,6 +831,24 @@ class AssignmentSolver:
         inc_steps = self.config.incremental_steps
         n_inc = 0
         _last_log = time.monotonic()
+
+        # Initialize incremental customizer (caches partition/cells for
+        # dirty-cell recustomization).  Falls back to full customize on error.
+        try:
+            self._incr_customizer = osrm_module.IncrementalCustomizer()
+            self._incr_customizer.initialize(
+                self.base_path,
+                n_threads=self.config.n_threads,
+                verbosity="WARNING",
+            )
+            logger.info("IncrementalCustomizer initialized")
+        except Exception:
+            logger.warning(
+                "IncrementalCustomizer not available, using full customize",
+                exc_info=True,
+            )
+            self._incr_customizer = None
+
         for step_frac in inc_steps:
             if step_frac >= 1.0:
                 break  # 1.0 is handled by the main loop's first iteration
@@ -811,13 +879,7 @@ class AssignmentSolver:
             # Customize OSRM with partial-demand speeds
             csv_path = self.writer.write_from_state(state, only_changed=True)
             logger.info("Customizing OSRM (incremental step %d)...", n_inc)
-            osrm_module.customize(
-                self.base_path,
-                segment_speed_file=str(csv_path),
-                verbosity="ERROR",
-            )
-            del engine
-            engine = self._create_engine()
+            engine, _, _ = self._customize_and_reload(str(csv_path), engine)
 
             logger.debug(
                 "Incremental step %d: frac=%.2f, max_k/kj=%.2f, route=%.3fs",
@@ -895,21 +957,11 @@ class AssignmentSolver:
             n_oversat = int(np.sum(state.density_vpkm > k_c))
 
             # 6. Write CSV and re-customize
-            t_cust = time.monotonic()
             csv_path = self.writer.write_from_state(state, only_changed=True)
             logger.info("Customizing OSRM (iter %d)...", n)
-            osrm_module.customize(
-                self.base_path,
-                segment_speed_file=str(csv_path),
-                verbosity="ERROR",
+            engine, customize_time, engine_time = self._customize_and_reload(
+                str(csv_path), engine,
             )
-            customize_time = time.monotonic() - t_cust
-
-            # 7. Reload engine
-            t_engine = time.monotonic()
-            del engine
-            engine = self._create_engine()
-            engine_time = time.monotonic() - t_engine
 
             # Compute speed and TT metrics for this iteration
             active = state.flow_vph > 0
@@ -1131,6 +1183,22 @@ class AssignmentSolver:
             n_trips, batch_size, self.config.n_threads,
         )
 
+        # Initialize incremental customizer for this run
+        try:
+            self._incr_customizer = osrm_module.IncrementalCustomizer()
+            self._incr_customizer.initialize(
+                self.base_path,
+                n_threads=self.config.n_threads,
+                verbosity="WARNING",
+            )
+            logger.info("IncrementalCustomizer initialized")
+        except Exception:
+            logger.warning(
+                "IncrementalCustomizer not available, using full customize",
+                exc_info=True,
+            )
+            self._incr_customizer = None
+
         # Dynamic batch sizing state
         halfpoint = self.config.stream_batch_halfpoint
         min_scale = self.config.stream_batch_min_scale
@@ -1291,13 +1359,7 @@ class AssignmentSolver:
                 # Re-customize and reload for new period's starting state
                 self._update_state(state)
                 csv_path = self.writer.write_from_state(state, only_changed=True)
-                osrm_module.customize(
-                    self.base_path,
-                    segment_speed_file=str(csv_path),
-                    verbosity="ERROR",
-                )
-                del engine
-                engine = self._create_engine(quiet=True)
+                engine, _, _ = self._customize_and_reload(str(csv_path), engine)
 
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
@@ -1391,20 +1453,10 @@ class AssignmentSolver:
             total_unserved = float(np.sum(unserved_vph))
 
             # 5. Write CSV and re-customize OSRM
-            t_cust = time.monotonic()
             csv_path = self.writer.write_from_state(state, only_changed=True)
-            osrm_module.customize(
-                self.base_path,
-                segment_speed_file=str(csv_path),
-                verbosity="ERROR",
+            engine, customize_time, engine_time = self._customize_and_reload(
+                str(csv_path), engine,
             )
-            customize_time = time.monotonic() - t_cust
-
-            # 6. Reload engine with updated weights
-            t_engine = time.monotonic()
-            del engine
-            engine = self._create_engine(quiet=True)
-            engine_time = time.monotonic() - t_engine
 
             # Metrics — use flow-weighted mean speed (stable denominator)
             active = state.flow_vph > 0
