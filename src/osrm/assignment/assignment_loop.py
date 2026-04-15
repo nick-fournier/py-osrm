@@ -510,6 +510,7 @@ class AssignmentSolver:
         departure_period: int = -1,
         period_duration: float = 0.0,
         n_periods: int = 0,
+        period_flows: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
         """Route all trips, accumulate link volume.
 
@@ -543,6 +544,7 @@ class AssignmentSolver:
             departure_period=departure_period,
             period_duration=period_duration,
             n_periods=n_periods,
+            period_flows=period_flows,
         )
 
     def _route_and_accumulate_cpp(
@@ -555,10 +557,13 @@ class AssignmentSolver:
         departure_period: int = -1,
         period_duration: float = 0.0,
         n_periods: int = 0,
+        period_flows: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
         """C++ fast path: route + accumulate in one native call.
         
-        Returns (volume, tstt, route_geoms).
+        When period_flows is provided (writable 2D buffer), C++ accumulates
+        directly into it — no intermediate sparse arrays or Python scatter.
+        Returns None for volume in that case.
         Also stores trip_durations on self._last_trip_durations for callers.
         """
         from osrm.osrm_ext import batch_route_accumulate
@@ -596,6 +601,7 @@ class AssignmentSolver:
             period_duration=period_duration,
             departure_offsets=departure_offsets,
             n_periods=n_periods,
+            period_flows=period_flows,
         )
 
         logger.debug(
@@ -615,10 +621,14 @@ class AssignmentSolver:
                 self.config.default_n_lanes,
             )
 
-        volume = np.asarray(volume) if not isinstance(volume, tuple) else volume
-
         # Store per-trip durations for experienced_times collection
         self._last_trip_durations = np.asarray(trip_durations, dtype=np.float64)
+
+        # In-place mode: volume is None, accumulation already done in C++
+        if volume is None:
+            return None, float(tstt), route_geoms
+
+        volume = np.asarray(volume) if not isinstance(volume, tuple) else volume
 
         # For 1D (non-period) mode, pad to match state.n_edges
         if not isinstance(volume, tuple):
@@ -1404,6 +1414,21 @@ class AssignmentSolver:
 
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
+
+            # Initialize period_flows lazily before first batch
+            if n_periods > 0 and period_flows is None:
+                period_flows = np.zeros(
+                    (n_periods, state.n_edges), dtype=np.float64
+                )
+
+            # Grow period_flows if new edges were discovered
+            if period_flows is not None and period_flows.shape[1] < state.n_edges:
+                pad = state.n_edges - period_flows.shape[1]
+                period_flows = np.pad(period_flows, ((0, 0), (0, pad)))
+                if state_patch:
+                    state_patch(state)
+                self.smoother.build_adjacency(state.edge_ids, state.length_m)
+
             aon_volume, aon_tstt, batch_polylines = self._route_and_accumulate(
                 engine, batch.trips, state,
                 return_routes=return_routes,
@@ -1412,6 +1437,7 @@ class AssignmentSolver:
                 period_duration=(period_duration_s
                                  if period_duration_s is not None else 0.0),
                 n_periods=n_periods,
+                period_flows=period_flows,
             )
             route_time = time.monotonic() - t_route
 
@@ -1434,25 +1460,19 @@ class AssignmentSolver:
 
             # 2. Accumulate flow
             t_accum = time.monotonic()
-            if n_periods > 0 and isinstance(aon_volume, tuple):
-                # Sparse COO path: (period_indices, edge_indices, volumes)
-                sp_periods, sp_edges, sp_flows = aon_volume
-
-                # Initialize period_flows lazily on first batch
-                if period_flows is None:
-                    period_flows = np.zeros(
-                        (n_periods, state.n_edges), dtype=np.float64
+            if n_periods > 0 and aon_volume is None:
+                # In-place path: C++ already wrote into period_flows buffer.
+                # Just update state.flow_vph for VDF.
+                cp = current_period_bin if current_period_bin is not None else 0
+                if cp < n_periods:
+                    state.flow_vph = np.maximum(period_flows[cp, :], 0.0)
+                else:
+                    state.flow_vph = np.maximum(
+                        np.sum(period_flows, axis=0), 0.0
                     )
-
-                # Grow period_flows if new edges were discovered
-                if period_flows.shape[1] < state.n_edges:
-                    pad = state.n_edges - period_flows.shape[1]
-                    period_flows = np.pad(period_flows, ((0, 0), (0, pad)))
-                    if state_patch:
-                        state_patch(state)
-                    self.smoother.build_adjacency(state.edge_ids, state.length_m)
-
-                # Scatter-add sparse entries into period_flows
+            elif n_periods > 0 and isinstance(aon_volume, tuple):
+                # Sparse COO fallback (new edges exceeded buffer)
+                sp_periods, sp_edges, sp_flows = aon_volume
                 np.add.at(period_flows, (sp_periods, sp_edges), sp_flows)
 
                 # Current period's total flow for VDF

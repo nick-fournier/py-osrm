@@ -79,7 +79,8 @@ void init_Assignment(nb::module_& m) {
            int    departure_period,
            double period_duration,
            nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> departure_offsets,
-           int    n_periods)
+           int    n_periods,
+           nb::object period_flows_obj)
     {
 
         // Optionally cap TBB parallelism
@@ -99,6 +100,16 @@ void init_Assignment(nb::module_& m) {
 
         // Period-attributed 2D accumulation when n_periods > 0
         const bool use_2d = (has_period && n_periods > 0);
+
+        // In-place accumulation: if caller passes a writable (n_periods, n_edges)
+        // buffer, write directly into it instead of building sparse triples.
+        double* pf_ptr = nullptr;
+        size_t  pf_stride = 0;  // n_edges dimension of the buffer
+        if (use_2d && !period_flows_obj.is_none()) {
+            auto pf = nb::cast<nb::ndarray<double, nb::ndim<2>, nb::c_contig, nb::device::cpu>>(period_flows_obj);
+            pf_ptr = pf.data();
+            pf_stride = pf.shape(1);
+        }
 
         // ── 1. build RouteParameters in C++ ──────────────────────
         std::vector<RouteParameters> params(n_trips);
@@ -165,8 +176,7 @@ void init_Assignment(nb::module_& m) {
         // ── 4. accumulate volume (sequential, in C++) ───────────
         auto t_accum_start = std::chrono::steady_clock::now();
 
-        // Sparse accumulation: collect (period, edge_idx, volume) triples
-        // instead of building a dense (n_periods × n_edges) array.
+        // Sparse accumulation: only needed when no in-place buffer provided
         struct FlowEntry { int period; int edge_idx; double vol; };
         std::vector<FlowEntry> sparse_flow;
 
@@ -262,7 +272,11 @@ void init_Assignment(nb::module_& m) {
                             + static_cast<int>(total_time / period_duration);
                         if (seg_period < 0) seg_period = 0;
                         if (seg_period >= n_periods) seg_period = n_periods - 1;
-                        sparse_flow.push_back({seg_period, idx, trip_vol});
+                        if (pf_ptr && idx < static_cast<int>(pf_stride)) {
+                            pf_ptr[seg_period * pf_stride + idx] += trip_vol;
+                        } else {
+                            sparse_flow.push_back({seg_period, idx, trip_vol});
+                        }
                     } else {
                         volume[idx] += trip_vol;
                     }
@@ -302,9 +316,13 @@ void init_Assignment(nb::module_& m) {
             dur_buf, 1, dur_shape, dur_owner);
 
         if (use_2d) {
-            // Pre-aggregate sparse entries: combine duplicates by (period, edge)
-            // This reduces ~1.8M raw entries to ~100-200K unique pairs,
-            // making Python-side np.add.at much faster.
+            if (pf_ptr && sparse_flow.empty()) {
+                // All accumulation was done in-place — return None for volume
+                return nb::make_tuple(nb::none(), tstt, py_new_edges, py_geoms_obj, py_durations, route_ms, accum_ms);
+            }
+
+            // Fallback: pre-aggregate sparse entries for new edges that
+            // exceeded the buffer dimensions.
             std::unordered_map<uint64_t, double> agg;
             agg.reserve(sparse_flow.size() / 4);
             for (const auto& e : sparse_flow) {
@@ -362,6 +380,7 @@ void init_Assignment(nb::module_& m) {
     nb::arg("period_duration") = 0.0,
     nb::arg("departure_offsets") = nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu>(),
     nb::arg("n_periods") = 0,
+    nb::arg("period_flows") = nb::none(),
     "Route OD pairs and accumulate link volume in C++.\n\n"
     "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
     "builds RouteParameters internally — no Python param construction.\n"
