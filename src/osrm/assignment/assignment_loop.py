@@ -1257,6 +1257,7 @@ class AssignmentSolver:
         cumulative_volume = queue_carryforward.copy()
         current_period_bin = None  # set from first batch
         n_batches = 0
+        n_batches_in_period = 0
 
         # Equilibrium quality tracking
         prev_period_final_flow: Optional[np.ndarray] = None
@@ -1265,6 +1266,7 @@ class AssignmentSolver:
             if current_period_bin is None:
                 current_period_bin = batch.departure_bin
             n_batches += 1
+            n_batches_in_period += 1
             t_batch = time.monotonic()
             bi = batch.batch_index
 
@@ -1348,10 +1350,13 @@ class AssignmentSolver:
 
                 current_period_bin = batch.departure_bin
 
-                # Re-customize and reload for new period's starting state
-                self._update_state(state)
-                csv_path = self.writer.write_from_state(state, only_changed=True)
-                engine, _, _ = self._customize_and_reload(str(csv_path), engine)
+                # Re-customize for new period's starting state — but skip if
+                # only 1 batch in the prior period (post-route already did it)
+                if n_batches_in_period > 1:
+                    self._update_state(state)
+                    csv_path = self.writer.write_from_state(state, only_changed=True)
+                    engine, _, _ = self._customize_and_reload(str(csv_path), engine)
+                n_batches_in_period = 1  # this batch starts the new period
 
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
