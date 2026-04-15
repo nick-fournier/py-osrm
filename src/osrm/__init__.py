@@ -68,6 +68,9 @@ from .osrm_ext import ( # type: ignore
     ContractorConfig,
     PartitionerConfig,
     CustomizationConfig,
+
+    # In-memory customizer
+    InMemoryCustomizer,
 )
 
 # Preprocessing functions
