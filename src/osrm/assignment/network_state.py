@@ -272,6 +272,75 @@ class NetworkState:
         self._edge_index[key] = idx
         return idx
 
+    def register_edges_batch(
+        self,
+        from_ids: np.ndarray,
+        to_ids: np.ndarray,
+        lengths_m: np.ndarray,
+        freeflow_kmh: np.ndarray,
+        jam_density: float,
+        n_lanes: int,
+    ) -> int:
+        """Register multiple new edges at once (vectorized).
+
+        Filters out duplicates against existing edges and within the batch.
+        Returns the number of new edges actually added.
+        """
+        n = len(from_ids)
+        if n == 0:
+            return 0
+
+        # Filter out already-known edges
+        mask = np.ones(n, dtype=bool)
+        for i in range(n):
+            key = (int(from_ids[i]), int(to_ids[i]))
+            if key in self._edge_index:
+                mask[i] = False
+
+        # Also deduplicate within the batch
+        seen = set()
+        for i in range(n):
+            if not mask[i]:
+                continue
+            key = (int(from_ids[i]), int(to_ids[i]))
+            if key in seen:
+                mask[i] = False
+            else:
+                seen.add(key)
+
+        new_from = from_ids[mask]
+        new_to = to_ids[mask]
+        new_len = lengths_m[mask]
+        new_ff = freeflow_kmh[mask]
+        n_new = int(np.sum(mask))
+        if n_new == 0:
+            return 0
+
+        base_idx = self.n_edges
+        new_eids = np.column_stack([
+            new_from.astype(np.uint64),
+            new_to.astype(np.uint64),
+        ])
+        self.edge_ids = np.vstack([self.edge_ids, new_eids])
+        self.length_m = np.append(self.length_m, new_len)
+        ff_clamped = np.maximum(new_ff, 1.0)
+        self.freeflow_kmh = np.append(self.freeflow_kmh, ff_clamped)
+        self.jam_density = np.append(self.jam_density,
+                                     np.full(n_new, jam_density))
+        self.n_lanes = np.append(self.n_lanes,
+                                 np.full(n_new, n_lanes, dtype=np.uint8))
+        self.flow_vph = np.append(self.flow_vph, np.zeros(n_new))
+        self.density_vpkm = np.append(self.density_vpkm, np.zeros(n_new))
+        self.speed_kmh = np.append(self.speed_kmh, ff_clamped)
+        self.kc_ratio = np.append(self.kc_ratio,
+                                  np.full(n_new, 1.0 / 3.0))
+
+        for i in range(n_new):
+            key = (int(new_from[i]), int(new_to[i]))
+            self._edge_index[key] = base_idx + i
+
+        return n_new
+
     @classmethod
     def empty(cls) -> "NetworkState":
         """Create an empty state with no edges (populated during routing)."""

@@ -25,6 +25,7 @@
 #include <tbb/blocked_range.h>
 #include <tbb/global_control.h>
 
+#include <chrono>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -145,6 +146,7 @@ void init_Assignment(nb::module_& m) {
         // ── 3. BatchRoute (TBB parallel, GIL released) ──────────
         std::vector<json::Object>          results(n_trips);
         std::vector<osrm::engine::Status>  statuses(n_trips);
+        auto t_route_start = std::chrono::steady_clock::now();
         {
             nb::gil_scoped_release release;
             tbb::parallel_for(
@@ -156,8 +158,12 @@ void init_Assignment(nb::module_& m) {
                 }
             );
         }
+        auto t_route_end = std::chrono::steady_clock::now();
+        double route_ms = std::chrono::duration<double, std::milli>(
+            t_route_end - t_route_start).count();
 
         // ── 4. accumulate volume (sequential, in C++) ───────────
+        auto t_accum_start = std::chrono::steady_clock::now();
         // 2D mode: period_vol[p][edge] tracks flow per period
         // 1D mode: volume[edge] (legacy, no period attribution)
         std::vector<std::vector<double>> period_vol;
@@ -267,6 +273,9 @@ void init_Assignment(nb::module_& m) {
         }
 
         // ── 5. pack results into numpy / Python objects ─────────
+        auto t_accum_end = std::chrono::steady_clock::now();
+        double accum_ms = std::chrono::duration<double, std::milli>(
+            t_accum_end - t_accum_start).count();
         nb::list py_new_edges;
         for (const auto& ne : new_edges) {
             py_new_edges.append(nb::make_tuple(
@@ -309,7 +318,7 @@ void init_Assignment(nb::module_& m) {
             auto py_vol = nb::ndarray<nb::numpy, double, nb::ndim<2>>(
                 v2d, 2, shape, owner);
 
-            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj, py_durations);
+            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj, py_durations, route_ms, accum_ms);
         } else {
             // Return 1D volume: (n_total_edges,)
             size_t n_total = volume.size();
@@ -323,7 +332,7 @@ void init_Assignment(nb::module_& m) {
             auto py_vol = nb::ndarray<nb::numpy, double, nb::ndim<1>>(
                 v_buf, 1, shape, owner);
 
-            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj, py_durations);
+            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj, py_durations, route_ms, accum_ms);
         }
     },
     nb::arg("engine"),

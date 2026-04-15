@@ -515,18 +515,13 @@ class AssignmentSolver:
         polylines : list of str or None
             Per-trip polyline6 geometry strings when return_routes=True.
         """
-        try:
-            return self._route_and_accumulate_cpp(
-                engine, trips, state,
-                return_routes=return_routes,
-                departure_period=departure_period,
-                period_duration=period_duration,
-                n_periods=n_periods,
-            )
-        except Exception:
-            logger.debug("C++ accumulation unavailable, using Python fallback")
-            vol, tstt = self._route_and_accumulate_py(engine, trips, state)
-            return vol, tstt, None
+        return self._route_and_accumulate_cpp(
+            engine, trips, state,
+            return_routes=return_routes,
+            departure_period=departure_period,
+            period_duration=period_duration,
+            n_periods=n_periods,
+        )
 
     def _route_and_accumulate_cpp(
         self,
@@ -564,7 +559,7 @@ class AssignmentSolver:
         default_jam = (self.config.default_jam_density_per_lane
                        * self.config.default_n_lanes)
 
-        volume, tstt, new_edges, route_geoms, trip_durations = batch_route_accumulate(
+        volume, tstt, new_edges, route_geoms, trip_durations, route_ms, accum_ms = batch_route_accumulate(
             engine._engine,
             coords,
             volumes,
@@ -577,11 +572,21 @@ class AssignmentSolver:
             n_periods=n_periods,
         )
 
-        # Register any newly discovered edges
-        for from_id, to_id, length_m, speed_kmh in new_edges:
-            state.register_edge(
-                int(from_id), int(to_id), float(length_m),
-                float(speed_kmh), default_jam, self.config.default_n_lanes,
+        logger.info(
+            "C++ batch_route_accumulate: %d trips, route=%.1fms, accum=%.1fms",
+            n, route_ms, accum_ms,
+        )
+
+        # Register any newly discovered edges (vectorized)
+        if len(new_edges) > 0:
+            ne_arr = np.array(new_edges, dtype=np.float64)
+            state.register_edges_batch(
+                ne_arr[:, 0].astype(np.uint64),
+                ne_arr[:, 1].astype(np.uint64),
+                ne_arr[:, 2],
+                ne_arr[:, 3],
+                default_jam,
+                self.config.default_n_lanes,
             )
 
         volume = np.asarray(volume, dtype=np.float64)
@@ -1183,21 +1188,8 @@ class AssignmentSolver:
             n_trips, batch_size, self.config.n_threads,
         )
 
-        # Initialize incremental customizer for this run
-        try:
-            self._incr_customizer = osrm_module.IncrementalCustomizer()
-            self._incr_customizer.initialize(
-                self.base_path,
-                n_threads=self.config.n_threads,
-                verbosity="WARNING",
-            )
-            logger.info("IncrementalCustomizer initialized")
-        except Exception:
-            logger.warning(
-                "IncrementalCustomizer not available, using full customize",
-                exc_info=True,
-            )
-            self._incr_customizer = None
+        # IncrementalCustomizer was removed — always use full customize
+        self._incr_customizer = None
 
         # Dynamic batch sizing state
         halfpoint = self.config.stream_batch_halfpoint
@@ -1491,6 +1483,7 @@ class AssignmentSolver:
                 kc_ratio=state.kc_ratio,
             )
             vc = state.flow_vph / np.maximum(q_c, 1.0)
+            max_vc = float(np.max(vc)) if len(vc) > 0 else 0.0
             vc_active = vc[active] if np.any(active) else vc
             vc_mean = float(np.mean(vc_active))
             vc_cv = float(np.std(vc_active) / max(vc_mean, 1e-9))
@@ -1525,12 +1518,12 @@ class AssignmentSolver:
 
             if bi % max(1, n_batches_est // 10) == 0:
                 logger.info(
-                    "Batch %d (~%d est): %d trips (bs=%d, mean_vc=%.3f), "
+                    "Batch %d (~%d est): %d trips (bs=%d, mean_vc=%.3f, max_vc=%.3f), "
                     "queue=%.0f veh/hr/lane, "
                     "mean_speed=%.1f km/h, oversat=%d, "
                     "route=%.1fs, cust=%.1fs",
                     bi + 1, n_batches_est, len(batch.trips),
-                    current_effective_bs, _mean_vc,
+                    current_effective_bs, _mean_vc, max_vc,
                     mean_queue_per_lane, batch_result.mean_speed_kmh,
                     batch_result.n_oversaturated,
                     route_time, customize_time,
@@ -1709,7 +1702,7 @@ class AssignmentSolver:
         logger.info("Phase 2: routing %d trips with time-dependent weights", n_trips)
         t_route = time.monotonic()
 
-        vol, total_tstt, new_edges, _, trip_durations = batch_route_accumulate(
+        vol, total_tstt, new_edges, _, trip_durations, route_ms, accum_ms = batch_route_accumulate(
             engine._engine,
             coords,
             volumes,
