@@ -1393,12 +1393,13 @@ class AssignmentSolver:
 
                 current_period_bin = batch.departure_bin
 
-                # Re-customize for new period's starting state — but skip if
-                # only 1 batch in the prior period (post-route already did it)
-                if n_batches_in_period > 1:
-                    self._update_state(state)
-                    csv_path = self.writer.write_from_state(state, only_changed=True)
-                    engine, _, _ = self._customize_and_reload(str(csv_path), engine)
+                # Re-customize for new period's starting state (includes
+                # unserved carryforward).  The last batch already customized,
+                # but that was on old-period flow — we need weights that
+                # reflect the new period's baseline (unserved demand).
+                self._update_state(state)
+                csv_path = self.writer.write_from_state(state, only_changed=True)
+                engine, _, _ = self._customize_and_reload(str(csv_path), engine)
                 n_batches_in_period = 1  # this batch starts the new period
 
             # 1. Route this batch against current (congested) weights
@@ -1499,12 +1500,19 @@ class AssignmentSolver:
             vdf_time = time.monotonic() - t_vdf
 
             # 5. Write CSV and re-customize OSRM
-            t_csv = time.monotonic()
-            csv_path = self.writer.write_from_state(state, only_changed=True)
-            csv_time = time.monotonic() - t_csv
-            engine, customize_time, engine_time = self._customize_and_reload(
-                str(csv_path), engine,
-            )
+            # Skip if this is the only batch in the period so far — the
+            # period-transition customize will handle it with unserved
+            # demand included, avoiding a redundant ~16s customize.
+            customize_time = 0.0
+            engine_time = 0.0
+            csv_time = 0.0
+            if n_batches_in_period > 1:
+                t_csv = time.monotonic()
+                csv_path = self.writer.write_from_state(state, only_changed=True)
+                csv_time = time.monotonic() - t_csv
+                engine, customize_time, engine_time = self._customize_and_reload(
+                    str(csv_path), engine,
+                )
 
             # Metrics — use flow-weighted mean speed (stable denominator)
             t_metrics = time.monotonic()
