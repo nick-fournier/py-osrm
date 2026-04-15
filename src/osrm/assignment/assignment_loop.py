@@ -304,6 +304,7 @@ class AssignmentSolver:
         )
         self._engine: Optional[osrm_module.OSRM] = None
         self._incr_customizer: Optional[osrm_module.IncrementalCustomizer] = None
+        self._in_mem_customizer: Optional[osrm_module.InMemoryCustomizer] = None
 
     def _create_engine(self, *, quiet: bool = False) -> osrm_module.OSRM:
         """Create a fresh OSRM engine instance."""
@@ -321,14 +322,33 @@ class AssignmentSolver:
     def _customize_and_reload(
         self, csv_path: str, engine: "osrm_module.OSRM",
     ) -> tuple["osrm_module.OSRM", float, float]:
-        """Customize OSRM with a speed CSV and reload the engine.
+        """Customize OSRM with a speed CSV and update routing weights.
 
-        Uses IncrementalCustomizer (dirty-cell) if available, otherwise
-        falls back to full customize.
+        Tries InMemoryCustomizer first (in-place metric swap, no engine
+        reload), then IncrementalCustomizer, then full customize.
 
         Returns (engine, customize_time, engine_time).
         """
         t_cust = time.monotonic()
+
+        # Try in-memory path (no engine reload needed)
+        if self._in_mem_customizer is not None:
+            try:
+                cell_time = self._in_mem_customizer.recustomize(
+                    csv_path, engine,
+                )
+                customize_time = time.monotonic() - t_cust
+                logger.debug(
+                    "InMemoryCustomizer: cell_dijkstra=%.2fs, total=%.2fs",
+                    cell_time, customize_time,
+                )
+                return engine, customize_time, 0.0
+            except Exception:
+                logger.warning(
+                    "InMemoryCustomizer failed, falling back",
+                    exc_info=True,
+                )
+                self._in_mem_customizer = None
 
         # Try incremental path
         if self._incr_customizer is not None:
@@ -1131,6 +1151,22 @@ class AssignmentSolver:
         n_trips = len(trips)
 
         engine = self._create_engine()
+
+        # Initialize InMemoryCustomizer for fast in-place metric swaps
+        try:
+            imc = osrm_module.InMemoryCustomizer()
+            imc.initialize(
+                self.base_path,
+                threads=self.config.n_threads,
+            )
+            self._in_mem_customizer = imc
+            logger.info("InMemoryCustomizer initialized")
+        except Exception:
+            logger.warning(
+                "InMemoryCustomizer unavailable, using full customize",
+                exc_info=True,
+            )
+            self._in_mem_customizer = None
 
         # Sort trips by departure time
         adapter = TripStreamAdapter(trips, sort_by_departure=True)

@@ -8,12 +8,16 @@
 #include "osrm/tile_parameters.hpp"
 #include "osrm/trip_parameters.hpp"
 
+#include "customizer/in_memory_customizer.hpp"
+#include "customizer/customizer_config.hpp"
+
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
 #include <stdexcept>
 #include <cstdlib>
+#include <filesystem>
 #include <vector>
 
 #include <tbb/parallel_for.h>
@@ -301,7 +305,71 @@ NB_MODULE(osrm_ext, m) {
                 (json): [A Trip JSON Response](https://project-osrm.org/docs/v5.24.0/api/#trip-service).\n\n"
             "Raises:\n\
                 RuntimeError: On invalid TripParameters."
+            )
+        .def("UpdateMetricBlock", [](OSRM* t, const std::string &name,
+                                     nb::bytes data) {
+            return t->UpdateMetricBlock(name, data.c_str(), data.size());
+        }, "Copy metric data in-place into the engine's memory.\n\n"
+            "Args:\n\
+                name (str): TAR block path.\n\
+                data (bytes): Raw metric data (must match block size exactly).\n\n"
+            "Returns:\n\
+                (bool): True if copy succeeded."
             );
+
+    // InMemoryCustomizer — caches MLD graph/partition for fast recustomize
+    nb::class_<osrm::customizer::InMemoryCustomizer>(m, "InMemoryCustomizer")
+        .def(nb::init<>())
+        .def("initialize", [](osrm::customizer::InMemoryCustomizer &self,
+                               const std::string &osrm_path,
+                               const std::string &speed_csv,
+                               int threads) {
+            osrm::customizer::CustomizationConfig config;
+            config.UseDefaultOutputNames(std::filesystem::path(osrm_path));
+            if (!speed_csv.empty())
+                config.updater_config.segment_speed_lookup_paths = {speed_csv};
+            config.requested_num_threads = threads;
+            {
+                nb::gil_scoped_release release;
+                self.Initialize(config);
+            }
+        }, nb::arg("osrm_path"), nb::arg("speed_csv") = "", nb::arg("threads") = 0)
+        .def("recustomize", [](osrm::customizer::InMemoryCustomizer &self,
+                                const std::string &speed_csv,
+                                OSRM *engine) -> double {
+            double cell_time;
+            {
+                nb::gil_scoped_release release;
+                cell_time = self.Recustomize(speed_csv);
+            }
+
+            // Copy metrics into the engine's memory buffers
+            if (engine != nullptr)
+            {
+                const auto &metrics = self.GetLatestMetrics();
+                for (std::size_t i = 0; i < metrics.size(); ++i)
+                {
+                    auto prefix = "/mld/metrics/routability/exclude/" + std::to_string(i);
+                    engine->UpdateMetricBlock(
+                        prefix + "/weights",
+                        metrics[i].weights.data(),
+                        metrics[i].weights.size() * sizeof(EdgeWeight));
+                    engine->UpdateMetricBlock(
+                        prefix + "/durations",
+                        metrics[i].durations.data(),
+                        metrics[i].durations.size() * sizeof(EdgeDuration));
+                    engine->UpdateMetricBlock(
+                        prefix + "/distances",
+                        metrics[i].distances.data(),
+                        metrics[i].distances.size() * sizeof(EdgeDistance));
+                }
+            }
+
+            return cell_time;
+        }, nb::arg("speed_csv"), nb::arg("engine") = nb::none(),
+           "Re-customize and optionally swap metrics into engine in-place.\n"
+           "Returns cell Dijkstra time in seconds.")
+        .def_prop_ro("initialized", &osrm::customizer::InMemoryCustomizer::IsInitialized);
 
     // Register cleanup handler to prevent TBB thread pool from hanging on exit
     // This must be done after all bindings are created

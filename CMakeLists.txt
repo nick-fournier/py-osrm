@@ -4,7 +4,7 @@ set(PROJECT_NAME "osrm")
 set(EXT_NAME "osrm_ext")
 project(${PROJECT_NAME} LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -202,6 +202,11 @@ target_include_directories(${EXT_NAME}
   PUBLIC
     ${libosrm_SOURCE_DIR}/include
     ${libosrm_SOURCE_DIR}/third_party/flatbuffers/include
+    ${libosrm_BINARY_DIR}/include
+)
+
+target_compile_definitions(${EXT_NAME} PRIVATE
+  OSRM_PROJECT_DIR="${libosrm_SOURCE_DIR}"
 )
 
 target_link_libraries(${EXT_NAME}
