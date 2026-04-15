@@ -598,7 +598,7 @@ class AssignmentSolver:
             n_periods=n_periods,
         )
 
-        logger.info(
+        logger.debug(
             "C++ batch_route_accumulate: %d trips, route=%.1fms, accum=%.1fms",
             n, route_ms, accum_ms,
         )
@@ -615,17 +615,14 @@ class AssignmentSolver:
                 self.config.default_n_lanes,
             )
 
-        volume = np.asarray(volume, dtype=np.float64)
+        volume = np.asarray(volume) if not isinstance(volume, tuple) else volume
 
         # Store per-trip durations for experienced_times collection
         self._last_trip_durations = np.asarray(trip_durations, dtype=np.float64)
 
-        # Pad to match state.n_edges (new edges registered above)
-        if volume.ndim == 2:
-            if volume.shape[1] < state.n_edges:
-                pad = state.n_edges - volume.shape[1]
-                volume = np.pad(volume, ((0, 0), (0, pad)))
-        else:
+        # For 1D (non-period) mode, pad to match state.n_edges
+        if not isinstance(volume, tuple):
+            volume = np.asarray(volume, dtype=np.float64)
             if len(volume) < state.n_edges:
                 volume = np.append(volume,
                                    np.zeros(state.n_edges - len(volume)))
@@ -1435,8 +1432,11 @@ class AssignmentSolver:
                         rec.trip_ids.append(trip.trip_id)
 
             # 2. Accumulate flow
-            if n_periods > 0 and aon_volume.ndim == 2:
-                # 2D path: period-attributed flow
+            t_accum = time.monotonic()
+            if n_periods > 0 and isinstance(aon_volume, tuple):
+                # Sparse COO path: (period_indices, edge_indices, volumes)
+                sp_periods, sp_edges, sp_flows = aon_volume
+
                 # Initialize period_flows lazily on first batch
                 if period_flows is None:
                     period_flows = np.zeros(
@@ -1451,21 +1451,17 @@ class AssignmentSolver:
                         state_patch(state)
                     self.smoother.build_adjacency(state.edge_ids, state.length_m)
 
-                # Pad aon_volume to match if needed
-                if aon_volume.shape[1] < period_flows.shape[1]:
-                    pad = period_flows.shape[1] - aon_volume.shape[1]
-                    aon_volume = np.pad(aon_volume, ((0, 0), (0, pad)))
-
-                # Add this batch's per-period flow
-                period_flows += aon_volume
+                # Scatter-add sparse entries into period_flows
+                np.add.at(period_flows, (sp_periods, sp_edges), sp_flows)
 
                 # Current period's total flow for VDF
                 cp = current_period_bin if current_period_bin is not None else 0
                 if cp < n_periods:
                     state.flow_vph = np.maximum(period_flows[cp, :], 0.0)
                 else:
+                    # Fallback: sum all periods
                     state.flow_vph = np.maximum(
-                        np.sum(aon_volume, axis=0), 0.0
+                        np.sum(period_flows, axis=0), 0.0
                     )
             else:
                 # Legacy 1D path
@@ -1487,6 +1483,8 @@ class AssignmentSolver:
                 state.flow_vph = np.maximum(cumulative_volume, 0.0)
 
             # 3. VDF: flow → density → speed
+            accum_time = time.monotonic() - t_accum
+            t_vdf = time.monotonic()
             self._update_state(state)
 
             # 4. Unserved demand: flow exceeding physical throughput
@@ -1498,14 +1496,18 @@ class AssignmentSolver:
                 if np.any(oversat_mask) else 0.0
             )
             total_unserved = float(np.sum(unserved_vph))
+            vdf_time = time.monotonic() - t_vdf
 
             # 5. Write CSV and re-customize OSRM
+            t_csv = time.monotonic()
             csv_path = self.writer.write_from_state(state, only_changed=True)
+            csv_time = time.monotonic() - t_csv
             engine, customize_time, engine_time = self._customize_and_reload(
                 str(csv_path), engine,
             )
 
             # Metrics — use flow-weighted mean speed (stable denominator)
+            t_metrics = time.monotonic()
             active = state.flow_vph > 0
             total_flow = float(np.sum(state.flow_vph))
             if total_flow > 0:
@@ -1542,6 +1544,7 @@ class AssignmentSolver:
             vc_active = vc[active] if np.any(active) else vc
             vc_mean = float(np.mean(vc_active))
             vc_cv = float(np.std(vc_active) / max(vc_mean, 1e-9))
+            metrics_time = time.monotonic() - t_metrics
 
             batch_result = StreamBatchResult(
                 batch_index=bi,
@@ -1576,12 +1579,12 @@ class AssignmentSolver:
                     "Batch %d (~%d est): %d trips (bs=%d, mean_vc=%.3f, max_vc=%.3f), "
                     "queue=%.0f veh/hr/lane, "
                     "mean_speed=%.1f km/h, oversat=%d, "
-                    "route=%.1fs, cust=%.1fs",
+                    "route=%.1fs, accum=%.1fs, cust=%.1fs",
                     bi + 1, n_batches_est, len(batch.trips),
                     current_effective_bs, _mean_vc, max_vc,
                     mean_queue_per_lane, batch_result.mean_speed_kmh,
                     batch_result.n_oversaturated,
-                    route_time, customize_time,
+                    route_time, accum_time, customize_time,
                 )
 
             if progress_callback:

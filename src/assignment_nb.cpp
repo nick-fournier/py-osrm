@@ -164,14 +164,15 @@ void init_Assignment(nb::module_& m) {
 
         // ── 4. accumulate volume (sequential, in C++) ───────────
         auto t_accum_start = std::chrono::steady_clock::now();
-        // 2D mode: period_vol[p][edge] tracks flow per period
+
+        // Sparse accumulation: collect (period, edge_idx, volume) triples
+        // instead of building a dense (n_periods × n_edges) array.
+        struct FlowEntry { int period; int edge_idx; double vol; };
+        std::vector<FlowEntry> sparse_flow;
+
         // 1D mode: volume[edge] (legacy, no period attribution)
-        std::vector<std::vector<double>> period_vol;
         std::vector<double> volume;
-        if (use_2d) {
-            period_vol.resize(static_cast<size_t>(n_periods),
-                              std::vector<double>(n_edges0, 0.0));
-        } else {
+        if (!use_2d) {
             volume.resize(n_edges0, 0.0);
         }
 
@@ -238,13 +239,13 @@ void init_Assignment(nb::module_& m) {
                     if (it != emap.end()) {
                         idx = it->second;
                     } else {
-                        // New edge: grow all volume vectors in lockstep
-                        if (use_2d) {
-                            idx = static_cast<int>(period_vol[0].size());
-                            for (auto& pv : period_vol) pv.push_back(0.0);
-                        } else {
+                        // New edge: grow volume vector in lockstep
+                        if (!use_2d) {
                             idx = static_cast<int>(volume.size());
                             volume.push_back(0.0);
+                        } else {
+                            // For sparse mode, just assign next index
+                            idx = static_cast<int>(n_edges0 + new_edges.size());
                         }
                         emap[{from_id, to_id}] = idx;
 
@@ -255,14 +256,13 @@ void init_Assignment(nb::module_& m) {
 
                     // Attribute volume to the correct period
                     if (use_2d) {
-                        // Use segment midpoint time for period attribution
                         double mid_time = cumulative_time_s + seg_time_s * 0.5;
                         double total_time = trip_dep_offset + mid_time;
                         int seg_period = departure_period
                             + static_cast<int>(total_time / period_duration);
                         if (seg_period < 0) seg_period = 0;
                         if (seg_period >= n_periods) seg_period = n_periods - 1;
-                        period_vol[static_cast<size_t>(seg_period)][idx] += trip_vol;
+                        sparse_flow.push_back({seg_period, idx, trip_vol});
                     } else {
                         volume[idx] += trip_vol;
                     }
@@ -302,23 +302,28 @@ void init_Assignment(nb::module_& m) {
             dur_buf, 1, dur_shape, dur_owner);
 
         if (use_2d) {
-            // Return 2D volume: (n_periods, n_total_edges)
-            size_t n_total = period_vol[0].size();
-            size_t n_per = period_vol.size();
-            double* v2d = new double[n_per * n_total];
-            for (size_t p = 0; p < n_per; ++p)
-                std::memcpy(v2d + p * n_total,
-                            period_vol[p].data(),
-                            n_total * sizeof(double));
+            // Return sparse COO: (periods, edge_indices, volumes) arrays
+            size_t n_entries = sparse_flow.size();
+            int32_t* p_buf = new int32_t[n_entries];
+            int32_t* e_buf = new int32_t[n_entries];
+            double*  f_buf = new double[n_entries];
+            for (size_t i = 0; i < n_entries; ++i) {
+                p_buf[i] = sparse_flow[i].period;
+                e_buf[i] = sparse_flow[i].edge_idx;
+                f_buf[i] = sparse_flow[i].vol;
+            }
 
-            nb::capsule owner(v2d, [](void* p) noexcept {
-                delete[] static_cast<double*>(p);
-            });
-            size_t shape[2] = {n_per, n_total};
-            auto py_vol = nb::ndarray<nb::numpy, double, nb::ndim<2>>(
-                v2d, 2, shape, owner);
+            nb::capsule p_owner(p_buf, [](void* p) noexcept { delete[] static_cast<int32_t*>(p); });
+            nb::capsule e_owner(e_buf, [](void* p) noexcept { delete[] static_cast<int32_t*>(p); });
+            nb::capsule f_owner(f_buf, [](void* p) noexcept { delete[] static_cast<double*>(p); });
+            size_t shape1[1] = {n_entries};
 
-            return nb::make_tuple(py_vol, tstt, py_new_edges, py_geoms_obj, py_durations, route_ms, accum_ms);
+            auto py_periods = nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(p_buf, 1, shape1, p_owner);
+            auto py_edges   = nb::ndarray<nb::numpy, int32_t, nb::ndim<1>>(e_buf, 1, shape1, e_owner);
+            auto py_flows   = nb::ndarray<nb::numpy, double,  nb::ndim<1>>(f_buf, 1, shape1, f_owner);
+
+            auto py_sparse = nb::make_tuple(py_periods, py_edges, py_flows);
+            return nb::make_tuple(py_sparse, tstt, py_new_edges, py_geoms_obj, py_durations, route_ms, accum_ms);
         } else {
             // Return 1D volume: (n_total_edges,)
             size_t n_total = volume.size();
