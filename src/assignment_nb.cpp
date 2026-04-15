@@ -302,15 +302,27 @@ void init_Assignment(nb::module_& m) {
             dur_buf, 1, dur_shape, dur_owner);
 
         if (use_2d) {
-            // Return sparse COO: (periods, edge_indices, volumes) arrays
-            size_t n_entries = sparse_flow.size();
+            // Pre-aggregate sparse entries: combine duplicates by (period, edge)
+            // This reduces ~1.8M raw entries to ~100-200K unique pairs,
+            // making Python-side np.add.at much faster.
+            std::unordered_map<uint64_t, double> agg;
+            agg.reserve(sparse_flow.size() / 4);
+            for (const auto& e : sparse_flow) {
+                uint64_t key = (static_cast<uint64_t>(e.period) << 32)
+                             | static_cast<uint64_t>(static_cast<uint32_t>(e.edge_idx));
+                agg[key] += e.vol;
+            }
+
+            size_t n_entries = agg.size();
             int32_t* p_buf = new int32_t[n_entries];
             int32_t* e_buf = new int32_t[n_entries];
             double*  f_buf = new double[n_entries];
-            for (size_t i = 0; i < n_entries; ++i) {
-                p_buf[i] = sparse_flow[i].period;
-                e_buf[i] = sparse_flow[i].edge_idx;
-                f_buf[i] = sparse_flow[i].vol;
+            size_t i = 0;
+            for (const auto& [key, vol] : agg) {
+                p_buf[i] = static_cast<int32_t>(key >> 32);
+                e_buf[i] = static_cast<int32_t>(key & 0xFFFFFFFF);
+                f_buf[i] = vol;
+                ++i;
             }
 
             nb::capsule p_owner(p_buf, [](void* p) noexcept { delete[] static_cast<int32_t*>(p); });
