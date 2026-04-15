@@ -341,7 +341,7 @@ class AssignmentSolver:
                 )
                 customize_time = time.monotonic() - t_cust
                 logger.debug(
-                    "InMemoryCustomizer: cell_dijkstra=%.2fs, total=%.2fs",
+                    "InMemoryCustomizer: cell=%.2fs, total=%.2fs (no reload)",
                     cell_time, customize_time,
                 )
                 return engine, customize_time, 0.0
@@ -556,7 +556,11 @@ class AssignmentSolver:
         period_duration: float = 0.0,
         n_periods: int = 0,
     ) -> Tuple[np.ndarray, float, Optional[List[str]]]:
-        """C++ fast path: route + accumulate in one native call."""
+        """C++ fast path: route + accumulate in one native call.
+        
+        Returns (volume, tstt, route_geoms).
+        Also stores trip_durations on self._last_trip_durations for callers.
+        """
         from osrm.osrm_ext import batch_route_accumulate
 
         n = len(trips)
@@ -612,6 +616,9 @@ class AssignmentSolver:
             )
 
         volume = np.asarray(volume, dtype=np.float64)
+
+        # Store per-trip durations for experienced_times collection
+        self._last_trip_durations = np.asarray(trip_durations, dtype=np.float64)
 
         # Pad to match state.n_edges (new edges registered above)
         if volume.ndim == 2:
@@ -1296,6 +1303,7 @@ class AssignmentSolver:
         current_period_bin = None  # set from first batch
         n_batches = 0
         n_batches_in_period = 0
+        all_trip_durations: List[np.ndarray] = []
 
         # Equilibrium quality tracking
         prev_period_final_flow: Optional[np.ndarray] = None
@@ -1408,6 +1416,10 @@ class AssignmentSolver:
                 n_periods=n_periods,
             )
             route_time = time.monotonic() - t_route
+
+            # Collect per-trip durations for experienced_times
+            if hasattr(self, '_last_trip_durations'):
+                all_trip_durations.append(self._last_trip_durations)
 
             # Aggregate polylines into route_demands dict
             if return_routes and batch_polylines is not None:
@@ -1630,6 +1642,11 @@ class AssignmentSolver:
                 len(route_demands), n_trips,
             )
 
+        # Build experienced_times from collected trip durations
+        experienced_times = None
+        if all_trip_durations:
+            experienced_times = np.concatenate(all_trip_durations)
+
         return StreamResult(
             n_trips=n_trips,
             n_batches=n_batches,
@@ -1640,6 +1657,7 @@ class AssignmentSolver:
             routes=route_demands,
             period_csvs=period_csvs if period_csvs else None,
             period_flows=period_flows,
+            experienced_times=experienced_times,
         )
 
     def reroute_time_dependent(
