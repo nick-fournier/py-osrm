@@ -334,8 +334,10 @@ class AssignmentSolver:
         # Try in-memory path (no engine reload needed)
         if self._in_mem_customizer is not None:
             try:
+                # Unwrap Python OSRM wrapper to get the C++ engine
+                raw_engine = getattr(engine, '_engine', engine)
                 cell_time = self._in_mem_customizer.recustomize(
-                    csv_path, engine,
+                    csv_path, raw_engine,
                 )
                 customize_time = time.monotonic() - t_cust
                 logger.debug(
