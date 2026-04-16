@@ -1462,7 +1462,7 @@ class AssignmentSolver:
             t_route = time.monotonic()
 
             # Initialize period_flows lazily before first batch
-            if n_periods > 0 and period_flows is None:
+            if n_periods > 0 and period_flows is None and state.n_edges > 0:
                 period_flows = np.zeros(
                     (n_periods, state.n_edges), dtype=np.float64
                 )
@@ -1517,8 +1517,19 @@ class AssignmentSolver:
                         np.sum(period_flows, axis=0), 0.0
                     )
             elif n_periods > 0 and isinstance(aon_volume, tuple):
-                # Sparse COO fallback (new edges exceeded buffer)
+                # Sparse COO fallback (new edges exceeded buffer, or first batch)
                 sp_periods, sp_edges, sp_flows = aon_volume
+
+                # Initialize period_flows now that we know edge count
+                if period_flows is None:
+                    period_flows = np.zeros(
+                        (n_periods, state.n_edges), dtype=np.float64
+                    )
+                # Grow if needed
+                if period_flows.shape[1] < state.n_edges:
+                    pad = state.n_edges - period_flows.shape[1]
+                    period_flows = np.pad(period_flows, ((0, 0), (0, pad)))
+
                 np.add.at(period_flows, (sp_periods, sp_edges), sp_flows)
 
                 # Current period's total flow for VDF
