@@ -1225,13 +1225,16 @@ class AssignmentSolver:
                 n_edges_est = n_edges_probe
 
             trips_per_1vpl = n_edges_est / max(avg_edges_per_route, 1.0)
-            batch_size = max(100, int(5 * trips_per_1vpl))
+            # Each trip contributes trip.volume vehicles, not 1.
+            # Scale batch_size down by mean volume so flow/link target holds.
+            mean_volume = total_volume / max(sample_n, 1)
+            batch_size = max(100, int(5 * trips_per_1vpl / max(mean_volume, 1.0)))
 
             logger.info(
-                "Auto-tuned batch_size=%d (~%d batches): "
+                "Auto-tuned batch_size=%d (~%d batches, mean_vol=%.1f): "
                 "%d probe edges → %d est edges, "
                 "%.1f avg edges/route",
-                batch_size, max(1, n_trips // batch_size),
+                batch_size, max(1, n_trips // batch_size), mean_volume,
                 n_edges_probe, n_edges_est, avg_edges_per_route,
             )
 
