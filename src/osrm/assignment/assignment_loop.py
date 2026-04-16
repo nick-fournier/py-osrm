@@ -1312,10 +1312,6 @@ class AssignmentSolver:
         n_batches_in_period = 0
         all_trip_durations: List[np.ndarray] = []
 
-        # Persistent queue stock (vehicles) for bounded spillback
-        link_queue_veh = np.zeros(state.n_edges, dtype=np.float64)
-        delta_t_hrs = (period_duration_s / 3600.0) if period_duration_s else 1.0
-
         # Equilibrium quality tracking
         prev_period_final_flow: Optional[np.ndarray] = None
 
@@ -1364,86 +1360,42 @@ class AssignmentSolver:
                         period_csvs.append("")
                     period_csvs[p_idx] = str(csv_path)
 
-                    # Queue stock model: unserved rate → vehicle stock,
-                    # discharge bounded by capacity.
+                    # Simple carryforward: unserved demand seeds next period
                     unserved = state.unserved_demand
-
-                    # Grow queue array if new edges discovered
-                    if len(link_queue_veh) < state.n_edges:
-                        link_queue_veh = np.append(
-                            link_queue_veh,
-                            np.zeros(state.n_edges - len(link_queue_veh)),
-                        )
-
-                    # Accumulate newly stuck vehicles
-                    link_queue_veh += unserved * delta_t_hrs
-
-                    # Discharge bounded by capacity
-                    q_c = self.vdf.capacity_flow(
-                        state.freeflow_kmh, state.jam_density,
-                        kc_ratio=state.kc_ratio,
-                    )
-                    max_discharge_veh = q_c * delta_t_hrs
-                    discharge_veh = np.minimum(link_queue_veh, max_discharge_veh)
-                    link_queue_veh -= discharge_veh
-                    discharge_rate = discharge_veh / delta_t_hrs
-
-                    total_queued = float(np.sum(link_queue_veh))
-                    n_queued_links = int(np.sum(link_queue_veh > 0))
-                    if n_queued_links > 0:
+                    n_spill = int(np.sum(unserved > 0))
+                    total_spill = float(np.sum(unserved))
+                    if n_spill > 0:
                         logger.info(
-                            "Period %s→%s: queue=%.0f veh on %d links, "
-                            "discharge=%.0f veh/hr",
+                            "Period %s→%s: carrying %.0f veh/hr unserved "
+                            "from %d links",
                             old_period, batch.departure_bin,
-                            total_queued, n_queued_links,
-                            float(np.sum(discharge_rate)),
+                            total_spill, n_spill,
                         )
 
-                    # Seed next period with bounded discharge (not raw unserved)
                     new_period = batch.departure_bin
                     if new_period is not None and new_period < n_periods:
                         if period_flows.shape[1] < state.n_edges:
                             pad = state.n_edges - period_flows.shape[1]
                             period_flows = np.pad(period_flows, ((0, 0), (0, pad)))
-                        period_flows[new_period, :state.n_edges] += discharge_rate
+                        period_flows[new_period, :state.n_edges] += unserved
 
                     # Set state to new period's accumulated flow for VDF
                     state.flow_vph = np.maximum(
                         period_flows[new_period, :], 0.0
                     )
                 else:
-                    # Legacy 1D queue stock model
+                    # Legacy 1D: simple carryforward
                     unserved = state.unserved_demand
-
-                    if len(link_queue_veh) < state.n_edges:
-                        link_queue_veh = np.append(
-                            link_queue_veh,
-                            np.zeros(state.n_edges - len(link_queue_veh)),
-                        )
-
-                    link_queue_veh += unserved * delta_t_hrs
-
-                    q_c = self.vdf.capacity_flow(
-                        state.freeflow_kmh, state.jam_density,
-                        kc_ratio=state.kc_ratio,
-                    )
-                    max_discharge_veh = q_c * delta_t_hrs
-                    discharge_veh = np.minimum(link_queue_veh, max_discharge_veh)
-                    link_queue_veh -= discharge_veh
-                    discharge_rate = discharge_veh / delta_t_hrs
-
-                    total_queued = float(np.sum(link_queue_veh))
-                    n_queued_links = int(np.sum(link_queue_veh > 0))
-                    if n_queued_links > 0:
+                    n_spill = int(np.sum(unserved > 0))
+                    total_spill = float(np.sum(unserved))
+                    if n_spill > 0:
                         logger.info(
-                            "Period %s→%s: queue=%.0f veh on %d links, "
-                            "discharge=%.0f veh/hr",
+                            "Period %s→%s: carrying %.0f veh/hr unserved "
+                            "from %d links",
                             old_period, batch.departure_bin,
-                            total_queued, n_queued_links,
-                            float(np.sum(discharge_rate)),
+                            total_spill, n_spill,
                         )
-
-                    queue_carryforward = discharge_rate.copy()
+                    queue_carryforward = unserved.copy()
                     cumulative_volume = queue_carryforward.copy()
                     state.flow_vph = np.maximum(cumulative_volume, 0.0)
 
