@@ -1302,11 +1302,8 @@ class AssignmentSolver:
         else:
             batch_iter = adapter.iter_batches(batch_size)
 
-        # We don't know total batch count upfront with dynamic sizing
-        n_batches_est = max(1, n_trips // batch_size)
-        logger.info("Estimated ~%d loading batches (dynamic sizing %s)",
-                     n_batches_est,
-                     f"k={halfpoint}" if halfpoint > 0 else "disabled")
+        # Track remaining trips for progress reporting
+        trips_remaining = n_trips
 
         # Cumulative flow within the current period (1D legacy path)
         cumulative_volume = queue_carryforward.copy()
@@ -1667,14 +1664,15 @@ class AssignmentSolver:
                 (t.origin[0], t.origin[1], t.destination[0], t.destination[1])
                 for t in batch.trips
             ))
+            trips_remaining -= len(batch.trips)
             logger.info(
-                "Batch %d/%d: %d trips (%d unique, %.0f veh), "
+                "Batch %d: %d trips (%d unique, %.0f veh, %d remaining), "
                 "mean_vc=%.3f, max_vc=%.3f, "
                 "queue=%.0f veh/hr/lane, "
                 "mean_speed=%.1f km/h, oversat=%d, "
                 "route=%.1fs, accum=%.1fs, cust=%.1fs",
-                bi + 1, n_batches_est, len(batch.trips),
-                n_unique, batch_vol,
+                bi + 1, len(batch.trips),
+                n_unique, batch_vol, trips_remaining,
                 _mean_vc, max_vc,
                 mean_queue_per_lane, batch_result.mean_speed_kmh,
                 batch_result.n_oversaturated,
@@ -1682,7 +1680,7 @@ class AssignmentSolver:
             )
 
             if progress_callback:
-                progress_callback(bi, n_batches_est, mean_queue_per_lane)
+                progress_callback(bi, n_trips, mean_queue_per_lane)
 
         # Final period equilibrium metrics (no transition triggers these)
         if batch_log:
