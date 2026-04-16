@@ -338,19 +338,30 @@ NB_MODULE(osrm_ext, m) {
         }, nb::arg("osrm_path"), nb::arg("speed_csv") = "", nb::arg("threads") = 0)
         .def("recustomize", [](osrm::customizer::InMemoryCustomizer &self,
                                 const std::string &speed_csv,
-                                OSRM *engine) -> double {
+                                OSRM *engine,
+                                std::vector<std::size_t> filter_indices) -> double {
             double cell_time;
             {
                 nb::gil_scoped_release release;
-                cell_time = self.Recustomize(speed_csv);
+                cell_time = self.Recustomize(speed_csv, filter_indices);
             }
 
             // Copy metrics into the engine's memory buffers
             if (engine != nullptr)
             {
                 const auto &metrics = self.GetLatestMetrics();
-                for (std::size_t i = 0; i < metrics.size(); ++i)
+                // If selective filters, only copy those; otherwise copy all
+                auto indices_to_copy = filter_indices.empty()
+                    ? std::vector<std::size_t>{}
+                    : filter_indices;
+                if (indices_to_copy.empty())
                 {
+                    for (std::size_t i = 0; i < metrics.size(); ++i)
+                        indices_to_copy.push_back(i);
+                }
+                for (auto i : indices_to_copy)
+                {
+                    if (i >= metrics.size()) continue;
                     auto prefix = "/mld/metrics/routability/exclude/" + std::to_string(i);
                     engine->UpdateMetricBlock(
                         prefix + "/weights",
@@ -369,7 +380,10 @@ NB_MODULE(osrm_ext, m) {
 
             return cell_time;
         }, nb::arg("speed_csv"), nb::arg("engine") = nb::none(),
+           nb::arg("filter_indices") = std::vector<std::size_t>{},
            "Re-customize and optionally swap metrics into engine in-place.\n"
+           "filter_indices: if non-empty, only re-run cell Dijkstra for these\n"
+           "filter indices (e.g. [0] = default filter only). Empty = all.\n"
            "Returns cell Dijkstra time in seconds.")
         .def_prop_ro("initialized", &osrm::customizer::InMemoryCustomizer::IsInitialized);
 

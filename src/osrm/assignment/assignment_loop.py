@@ -374,7 +374,7 @@ class AssignmentSolver:
                 # Unwrap Python OSRM wrapper to get the C++ engine
                 raw_engine = getattr(engine, '_engine', engine)
                 cell_time = self._in_mem_customizer.recustomize(
-                    csv_path, raw_engine,
+                    csv_path, raw_engine, filter_indices=[0],
                 )
                 customize_time = time.monotonic() - t_cust
                 logger.debug(
