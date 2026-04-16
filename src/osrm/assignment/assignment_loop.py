@@ -40,14 +40,14 @@ def _fmt_num(n: float) -> str:
 
 
 _BATCH_HEADER = (
-    "  {:>5s}  {:>6s}  {:>5s}  {:>6s}  {:>6s}  {:>6s}  {:>6s}  {:>5s}  {:>7s}"
-    "  {:>7s}  {:>5s}  {:>5s}  {:>5s}"
+    " {:>4s} {:>3s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>4s}"
+    " {:>6s} {:>4s} {:>4s} {:>4s}"
 ).format(
-    "Batch", "Period", "Trips", "Veh", "Left",
-    "VCavg", "VCmax", "Speed", "Oversat",
-    "Links", "Route", "Accum", "Cust",
+    "Bat", "Per", "Trips", "Veh", "Left",
+    "VCavg", "VCmax", "Speed", "Osat",
+    "Links", "Rte", "Acc", "Cst",
 )
-_BATCH_SEP = "  " + "─" * (len(_BATCH_HEADER) - 2)
+_BATCH_SEP = " " + "─" * (len(_BATCH_HEADER) - 1)
 
 
 def _fmt_batch_row(
@@ -56,8 +56,8 @@ def _fmt_batch_row(
     oversat: int, links: int, route_s: float, accum_s: float, cust_s: float,
 ) -> str:
     return (
-        "  {:>5d}  {:>6s}  {:>5d}  {:>6s}  {:>6s}  {:>6.3f}  {:>6.3f}  {:>5.1f}  {:>7d}"
-        "  {:>7s}  {:>5.1f}  {:>5.1f}  {:>5.1f}"
+        " {:>4d} {:>3s} {:>5d} {:>5s} {:>5s} {:>5.3f} {:>5.3f} {:>5.1f} {:>4d}"
+        " {:>6s} {:>4.1f} {:>4.1f} {:>4.1f}"
     ).format(
         bi, f"P{period}", n_trips, _fmt_num(veh), _fmt_num(left),
         vc_avg, vc_max, speed, oversat,
@@ -1442,19 +1442,12 @@ class AssignmentSolver:
                     # Simple carryforward: unserved demand seeds next period
                     unserved = state.unserved_demand
                     n_spill = int(np.sum(unserved > 0))
-                    total_spill = float(np.sum(unserved))
                     genuine = unserved > 1.0
                     n_genuine = int(np.sum(genuine))
                     total_genuine = float(np.sum(unserved[genuine]))
 
+                    # Culprit details to DEBUG
                     if n_genuine > 0:
-                        _log(
-                            "  → P%s: %s veh/hr unserved (%d links, %s noise)",
-                            batch.departure_bin,
-                            _fmt_num(total_genuine), n_genuine,
-                            _fmt_num(n_spill - n_genuine),
-                        )
-                        # Culprit details to DEBUG
                         genuine_idx = np.where(genuine)[0]
                         genuine_unserved = unserved[genuine_idx]
                         top_order = np.argsort(genuine_unserved)[::-1][:20]
@@ -1473,8 +1466,6 @@ class AssignmentSolver:
                                 state.flow_vph[ei],
                                 unserved[ei],
                             )
-                    else:
-                        _log("  → P%s: 0 unserved", batch.departure_bin)
 
                     new_period = batch.departure_bin
                     if new_period is not None and new_period < n_periods:
@@ -1488,18 +1479,15 @@ class AssignmentSolver:
                         period_flows[new_period, :], 0.0
                     )
                 else:
+                    n_genuine = 0
+                    total_genuine = 0.0
                     # Legacy 1D: simple carryforward
                     unserved = state.unserved_demand
                     n_spill = int(np.sum(unserved > 0))
                     total_spill = float(np.sum(unserved))
                     if total_spill > 1.0:
-                        _log(
-                            "  → P%s: %s veh/hr unserved (%d links)",
-                            batch.departure_bin,
-                            _fmt_num(total_spill), n_spill,
-                        )
-                    else:
-                        _log("  → P%s: 0 unserved", batch.departure_bin)
+                        n_genuine = n_spill
+                        total_genuine = total_spill
                     queue_carryforward = unserved.copy()
                     cumulative_volume = queue_carryforward.copy()
                     state.flow_vph = np.maximum(cumulative_volume, 0.0)
@@ -1512,8 +1500,20 @@ class AssignmentSolver:
                 # reflect the new period's baseline (unserved demand).
                 self._update_state(state)
                 csv_path = self.writer.write_from_state(state, only_changed=True)
-                engine, _, _ = self._customize_and_reload(str(csv_path), engine)
+                engine, period_cust_time, _ = self._customize_and_reload(str(csv_path), engine)
                 n_batches_in_period = 1  # this batch starts the new period
+
+                # Log period transition (after customize so we can report time)
+                if n_genuine > 0:
+                    _log(
+                        " → P%s: %s veh/hr unserved (%d links) cust %.1fs",
+                        batch.departure_bin,
+                        _fmt_num(total_genuine), n_genuine,
+                        period_cust_time,
+                    )
+                else:
+                    _log(" → P%s: 0 unserved, cust %.1fs",
+                         batch.departure_bin, period_cust_time)
 
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
