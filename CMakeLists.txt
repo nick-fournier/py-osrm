@@ -61,6 +61,7 @@ set(SRCS
   src/types/approach_nb.cpp
   src/types/bearing_nb.cpp
   src/assignment_nb.cpp
+  src/compressed_graph_nb.cpp
 )
 nanobind_add_module(
   ${EXT_NAME}
@@ -83,8 +84,7 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(FetchContent)
 FetchContent_Declare(
   libosrm
-  GIT_REPOSITORY https://github.com/nick-fournier/osrm-backend
-  GIT_TAG feature/multi-period
+  SOURCE_DIR /home/nick/clones/osrm-backend
 )
 
 
@@ -202,6 +202,11 @@ target_include_directories(${EXT_NAME}
   PUBLIC
     ${libosrm_SOURCE_DIR}/include
     ${libosrm_SOURCE_DIR}/third_party/flatbuffers/include
+    ${libosrm_SOURCE_DIR}/third_party/fmt/include
+    ${libosrm_SOURCE_DIR}/third_party/microtar/src
+    ${libosrm_SOURCE_DIR}/third_party/protozero/include
+    ${libosrm_SOURCE_DIR}/third_party/vtzero/include
+    ${libosrm_SOURCE_DIR}/third_party/rapidjson/include
     ${libosrm_BINARY_DIR}/include
 )
 

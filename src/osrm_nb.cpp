@@ -39,6 +39,7 @@
 #include "parameters/tileparameter_nb.h"
 #include "parameters/tripparameter_nb.h"
 #include "assignment_nb.h"
+#include "compressed_graph_nb.h"
 
 namespace nb = nanobind;
 
@@ -82,6 +83,7 @@ NB_MODULE(osrm_ext, m) {
     init_TripParameters(m);
     init_TileParameters(m);
     init_Assignment(m);
+    init_CompressedGraph(m);
 
     nb::class_<OSRM>(m, "OSRM", nb::is_final())
         .def(nb::init<EngineConfig&>(), "Instantiates an instance of OSRM.\n\n"

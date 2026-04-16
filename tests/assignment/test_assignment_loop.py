@@ -280,7 +280,7 @@ class TestCrossPeriodFlowAttribution:
         empty_offsets = np.empty(0, dtype=np.float64)
 
         # 1D baseline
-        vol1d, _, _, _, _ = batch_route_accumulate(
+        vol1d, _, _, _, _, _, _ = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=1, return_routes=False,
             departure_period=-1, period_duration=0.0,
@@ -288,18 +288,19 @@ class TestCrossPeriodFlowAttribution:
         )
         total_1d = float(np.sum(np.asarray(vol1d)))
 
-        # 2D with 900s periods
+        # 2D with 900s periods — returns sparse (periods, edges, flows) tuple
         offsets = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        vol2d, _, _, _, _ = batch_route_accumulate(
+        sparse_2d, _, _, _, _, _, _ = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=1, return_routes=False,
             departure_period=0, period_duration=900.0,
             departure_offsets=offsets, n_periods=4,
         )
-        v2d = np.asarray(vol2d)
-        total_2d = float(np.sum(v2d))
+        periods, edges, flows = sparse_2d
+        total_2d = float(np.sum(np.asarray(flows)))
 
-        assert v2d.shape[0] == 4
+        # All periods should be within [0, 4)
+        assert np.all(np.asarray(periods) < 4)
         assert total_2d == pytest.approx(total_1d, rel=1e-9)
 
     def test_late_departure_spills_to_next_period(self):
@@ -320,25 +321,27 @@ class TestCrossPeriodFlowAttribution:
 
         # Depart 800s into a 900s period — 100s left before period boundary
         offsets = np.array([800.0], dtype=np.float64)
-        vol2d, _, _, _, _ = batch_route_accumulate(
+        sparse_2d, _, _, _, _, _, _ = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=1, return_routes=False,
             departure_period=0, period_duration=900.0,
             departure_offsets=offsets, n_periods=4,
         )
-        v2d = np.asarray(vol2d)
+        periods, edges, flows = sparse_2d
+        periods = np.asarray(periods)
+        flows = np.asarray(flows)
 
-        p0_flow = float(np.sum(v2d[0]))
-        p1_flow = float(np.sum(v2d[1]))
+        p0_flow = float(np.sum(flows[periods == 0]))
+        p1_flow = float(np.sum(flows[periods == 1]))
 
         # Both periods should have some flow (trip straddles boundary)
         assert p0_flow > 0, "Period 0 should have flow (early segments)"
         assert p1_flow > 0, "Period 1 should have flow (spill from late departure)"
         # Total should equal trip volume × number of segments
-        assert float(np.sum(v2d)) == pytest.approx(p0_flow + p1_flow)
+        assert float(np.sum(flows)) == pytest.approx(p0_flow + p1_flow)
 
     def test_2d_shape_matches_n_periods(self):
-        """Returned array should have shape (n_periods, n_edges)."""
+        """Returned sparse tuple should have all periods within [0, n_periods)."""
         from osrm.osrm_ext import batch_route_accumulate
 
         base = "tests/data/mld/monaco.osrm"
@@ -354,15 +357,14 @@ class TestCrossPeriodFlowAttribution:
         offsets = np.array([0.0], dtype=np.float64)
 
         for n_per in [2, 8, 96]:
-            vol, _, _, _, _ = batch_route_accumulate(
+            sparse, _, _, _, _, _, _ = batch_route_accumulate(
                 engine._engine, coords, volumes, edge_ids,
                 n_threads=1, return_routes=False,
                 departure_period=0, period_duration=900.0,
                 departure_offsets=offsets, n_periods=n_per,
             )
-            v = np.asarray(vol)
-            assert v.ndim == 2
-            assert v.shape[0] == n_per
+            periods, edges, flows = sparse
+            assert np.all(np.asarray(periods) < n_per)
 
     def test_n_periods_zero_returns_1d(self):
         """When n_periods=0, should return 1D array (legacy behavior)."""
@@ -379,7 +381,7 @@ class TestCrossPeriodFlowAttribution:
         volumes = np.array([1.0], dtype=np.float64)
         edge_ids = np.zeros((0, 2), dtype=np.uint64)
 
-        vol, _, _, _, _ = batch_route_accumulate(
+        vol, _, _, _, _, _, _ = batch_route_accumulate(
             engine._engine, coords, volumes, edge_ids,
             n_threads=1, return_routes=False,
             departure_period=-1, period_duration=0.0,

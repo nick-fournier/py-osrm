@@ -8,6 +8,7 @@
  */
 
 #include "assignment_nb.h"
+#include "compressed_graph_nb.h"
 
 #include "osrm/osrm.hpp"
 #include "osrm/coordinate.hpp"
@@ -80,7 +81,8 @@ void init_Assignment(nb::module_& m) {
            double period_duration,
            nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu> departure_offsets,
            int    n_periods,
-           nb::object period_flows_obj)
+           nb::object period_flows_obj,
+           CompressedGraphLookup* compressed_graph)
     {
 
         // Optionally cap TBB parallelism
@@ -153,6 +155,12 @@ void init_Assignment(nb::module_& m) {
         for (size_t i = 0; i < n_edges0; ++i) {
             emap[{eid_ptr[i * 2], eid_ptr[i * 2 + 1]}] = static_cast<int>(i);
         }
+
+        // ── 2b. Optional: compressed graph lookup ─────────────
+        // When provided, annotation node pairs are resolved through the
+        // pre-built lookup to get correct freeflow speed and distance
+        // from the compressed edge. No per-batch hash map rebuild needed.
+        const bool use_compressed = (compressed_graph != nullptr);
 
         // ── 3. BatchRoute (TBB parallel, GIL released) ──────────
         std::vector<json::Object>          results(n_trips);
@@ -248,6 +256,28 @@ void init_Assignment(nb::module_& m) {
 
                     if (it != emap.end()) {
                         idx = it->second;
+                    } else if (use_compressed) {
+                        // New sequential edge, but with compressed graph metadata
+                        if (!use_2d) {
+                            idx = static_cast<int>(volume.size());
+                            volume.push_back(0.0);
+                        } else {
+                            idx = static_cast<int>(n_edges0 + new_edges.size());
+                        }
+                        emap[{from_id, to_id}] = idx;
+
+                        int comp_idx = compressed_graph->find(from_id, to_id);
+                        if (comp_idx >= 0) {
+                            // Use compressed edge freeflow and distance
+                            new_edges.push_back({from_id, to_id,
+                                                 compressed_graph->distance(comp_idx),
+                                                 compressed_graph->freeflow(comp_idx)});
+                        } else {
+                            // Not in compressed graph — use annotation speed
+                            double spd_kmh = seg_speed_mps * 3.6;
+                            if (spd_kmh < 1.0) spd_kmh = 1.0;
+                            new_edges.push_back({from_id, to_id, seg_dist_m, spd_kmh});
+                        }
                     } else {
                         // New edge: grow volume vector in lockstep
                         if (!use_2d) {
@@ -381,6 +411,7 @@ void init_Assignment(nb::module_& m) {
     nb::arg("departure_offsets") = nb::ndarray<double, nb::ndim<1>, nb::c_contig, nb::device::cpu>(),
     nb::arg("n_periods") = 0,
     nb::arg("period_flows") = nb::none(),
+    nb::arg("compressed_graph") = nullptr,
     "Route OD pairs and accumulate link volume in C++.\n\n"
     "Accepts (n,4) coordinate array [o_lon, o_lat, d_lon, d_lat] and\n"
     "builds RouteParameters internally — no Python param construction.\n"
@@ -390,7 +421,10 @@ void init_Assignment(nb::module_& m) {
     "departure_period: period index for multi-period routing (-1 = disabled).\n"
     "period_duration: seconds per period (e.g. 900 for 15-min).\n"
     "departure_offsets: per-trip seconds into departure period.\n"
-    "n_periods: total number of periods for 2D attribution (0 = 1D legacy).\n\n"
+    "n_periods: total number of periods for 2D attribution (0 = 1D legacy).\n"
+    "compressed_graph: CompressedGraphLookup from load_compressed_graph().\n"
+    "  When provided, annotation node pairs are mapped to compressed edge\n"
+    "  indices, eliminating micro-segment artifacts.\n\n"
     "Returns (volume, tstt, new_edges, route_geometries, trip_durations).\n"
     "volume is 2D (n_periods, n_edges) when n_periods > 0, else 1D (n_edges,).\n"
     "route_geometries is a list of polyline6 strings when return_routes=True,\n"

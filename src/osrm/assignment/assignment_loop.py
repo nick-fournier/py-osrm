@@ -29,6 +29,42 @@ from osrm.assignment.vdf import BiParabolicVDF
 
 logger = logging.getLogger(__name__)
 
+
+def _fmt_num(n: float) -> str:
+    """Format a number with k/M suffix for compact display."""
+    if abs(n) >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if abs(n) >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n:.0f}"
+
+
+_BATCH_HEADER = (
+    "  {:>5s}  {:>6s}  {:>5s}  {:>6s}  {:>6s}  {:>6s}  {:>6s}  {:>5s}  {:>7s}"
+    "  {:>7s}  {:>5s}  {:>5s}  {:>5s}"
+).format(
+    "Batch", "Period", "Trips", "Veh", "Left",
+    "VCavg", "VCmax", "Speed", "Oversat",
+    "Links", "Route", "Accum", "Cust",
+)
+_BATCH_SEP = "  " + "─" * (len(_BATCH_HEADER) - 2)
+
+
+def _fmt_batch_row(
+    bi: int, period: object, n_trips: int, veh: float,
+    left: int, vc_avg: float, vc_max: float, speed: float,
+    oversat: int, links: int, route_s: float, accum_s: float, cust_s: float,
+) -> str:
+    return (
+        "  {:>5d}  {:>6s}  {:>5d}  {:>6s}  {:>6s}  {:>6.3f}  {:>6.3f}  {:>5.1f}  {:>7d}"
+        "  {:>7s}  {:>5.1f}  {:>5.1f}  {:>5.1f}"
+    ).format(
+        bi, f"P{period}", n_trips, _fmt_num(veh), _fmt_num(left),
+        vc_avg, vc_max, speed, oversat,
+        _fmt_num(links), route_s, accum_s, cust_s,
+    )
+
+
 _VERBOSITY_LEVELS = {
     "NONE": logging.WARNING + 10,   # effectively silent
     "ERROR": logging.ERROR,
@@ -305,6 +341,7 @@ class AssignmentSolver:
         self._engine: Optional[osrm_module.OSRM] = None
         self._incr_customizer: Optional[osrm_module.IncrementalCustomizer] = None
         self._in_mem_customizer: Optional[osrm_module.InMemoryCustomizer] = None
+        self._compressed_graph = None  # loaded lazily by run() / assign_stream()
 
     def _create_engine(self, *, quiet: bool = False) -> osrm_module.OSRM:
         """Create a fresh OSRM engine instance."""
@@ -590,6 +627,11 @@ class AssignmentSolver:
         default_jam = (self.config.default_jam_density_per_lane
                        * self.config.default_n_lanes)
 
+        # Pass compressed graph lookup if available
+        compressed_kwargs = {}
+        if self._compressed_graph is not None:
+            compressed_kwargs = dict(compressed_graph=self._compressed_graph)
+
         volume, tstt, new_edges, route_geoms, trip_durations, route_ms, accum_ms = batch_route_accumulate(
             engine._engine,
             coords,
@@ -602,6 +644,7 @@ class AssignmentSolver:
             departure_offsets=departure_offsets,
             n_periods=n_periods,
             period_flows=period_flows,
+            **compressed_kwargs,
         )
 
         logger.debug(
@@ -858,11 +901,25 @@ class AssignmentSolver:
         # points.  Eliminates numerator/denominator gap inconsistency.
         trips = self._snap_trips(engine, trips)
 
-        # Start with an empty network — edges are discovered continuously
-        # during routing via register_edge().  Annotation speed on a clean
-        # engine (or on edges not in the segment-speed CSV) is always
-        # freeflow, so first-seen speed is correct regardless of step.
+        # Try to load compressed graph for correct freeflow speeds.
+        # Falls back to empty state with on-the-fly edge discovery.
         state = NetworkState.empty()
+        compressed_graph = None
+        try:
+            from osrm.osrm_ext import load_compressed_graph
+            compressed_graph = load_compressed_graph(self.base_path)
+            self._compressed_graph = compressed_graph
+            logger.info(
+                "Loaded compressed graph: %d driving edges, %d node pairs "
+                "(%d non-driving geometries skipped)",
+                compressed_graph.n_edges, compressed_graph.n_pairs,
+                compressed_graph.skipped_non_driving,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not load compressed graph (%s), falling back to discovery",
+                exc,
+            )
 
         if state_patch:
             state_patch(state)
@@ -1269,8 +1326,25 @@ class AssignmentSolver:
             current_effective_bs = max(100, int(base_batch_size * scale))
             return current_effective_bs
 
-        # Network starts empty — edges discovered during routing
+        # Network starts empty — edges discovered during routing.
+        # Load compressed graph lookup for correct freeflow speeds.
         state = NetworkState.empty()
+        compressed_graph = None
+        try:
+            from osrm.osrm_ext import load_compressed_graph
+            compressed_graph = load_compressed_graph(self.base_path)
+            self._compressed_graph = compressed_graph
+            logger.info(
+                "Loaded compressed graph: %d driving edges, %d node pairs "
+                "(%d non-driving geometries skipped)",
+                compressed_graph.n_edges, compressed_graph.n_pairs,
+                compressed_graph.skipped_non_driving,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not load compressed graph (%s), falling back to discovery",
+                exc,
+            )
         if state_patch:
             state_patch(state)
 
@@ -1320,6 +1394,8 @@ class AssignmentSolver:
 
         # Equilibrium quality tracking
         prev_period_final_flow: Optional[np.ndarray] = None
+        _log = logger.info
+        _header_logged = False
 
         for batch in batch_iter:
             if current_period_bin is None:
@@ -1370,13 +1446,38 @@ class AssignmentSolver:
                     unserved = state.unserved_demand
                     n_spill = int(np.sum(unserved > 0))
                     total_spill = float(np.sum(unserved))
-                    if n_spill > 0:
-                        logger.info(
-                            "Period %s→%s: carrying %.0f veh/hr unserved "
-                            "from %d links",
-                            old_period, batch.departure_bin,
-                            total_spill, n_spill,
+                    genuine = unserved > 1.0
+                    n_genuine = int(np.sum(genuine))
+                    total_genuine = float(np.sum(unserved[genuine]))
+
+                    if n_genuine > 0:
+                        _log(
+                            "  → P%s: %s veh/hr unserved (%d links, %s noise)",
+                            batch.departure_bin,
+                            _fmt_num(total_genuine), n_genuine,
+                            _fmt_num(n_spill - n_genuine),
                         )
+                        # Culprit details to DEBUG
+                        genuine_idx = np.where(genuine)[0]
+                        genuine_unserved = unserved[genuine_idx]
+                        top_order = np.argsort(genuine_unserved)[::-1][:20]
+                        for rank, gi in enumerate(top_order):
+                            ei = genuine_idx[gi]
+                            u, v = int(state.edge_ids[ei, 0]), int(state.edge_ids[ei, 1])
+                            logger.debug(
+                                "    culprit #%d: edge=%d→%d vf=%.1f q_c=%.0f "
+                                "flow=%.0f unserved=%.0f",
+                                rank + 1, u, v,
+                                state.freeflow_kmh[ei],
+                                self.vdf.capacity_flow(
+                                    state.freeflow_kmh[ei:ei+1],
+                                    state.jam_density[ei:ei+1],
+                                )[0],
+                                state.flow_vph[ei],
+                                unserved[ei],
+                            )
+                    else:
+                        _log("  → P%s: 0 unserved", batch.departure_bin)
 
                     new_period = batch.departure_bin
                     if new_period is not None and new_period < n_periods:
@@ -1394,13 +1495,14 @@ class AssignmentSolver:
                     unserved = state.unserved_demand
                     n_spill = int(np.sum(unserved > 0))
                     total_spill = float(np.sum(unserved))
-                    if n_spill > 0:
-                        logger.info(
-                            "Period %s→%s: carrying %.0f veh/hr unserved "
-                            "from %d links",
-                            old_period, batch.departure_bin,
-                            total_spill, n_spill,
+                    if total_spill > 1.0:
+                        _log(
+                            "  → P%s: %s veh/hr unserved (%d links)",
+                            batch.departure_bin,
+                            _fmt_num(total_spill), n_spill,
                         )
+                    else:
+                        _log("  → P%s: 0 unserved", batch.departure_bin)
                     queue_carryforward = unserved.copy()
                     cumulative_volume = queue_carryforward.copy()
                     state.flow_vph = np.maximum(cumulative_volume, 0.0)
@@ -1624,9 +1726,8 @@ class AssignmentSolver:
             ))
             trips_remaining -= len(batch.trips)
 
-            # Spatial concentration: top V/C links
+            # Spatial concentration: top V/C links (moved to DEBUG)
             n_active = int(np.sum(active))
-            top5_str = ""
             if n_active > 0:
                 active_vc = vc[active]
                 active_flows = state.flow_vph[active]
@@ -1637,22 +1738,20 @@ class AssignmentSolver:
                     f"{active_flows[i]:.0f}/{active_qc[i]:.0f}(vf={active_vf[i]:.0f})"
                     for i in top_idx
                 )
+                logger.debug("  top V/C: %s", top5_str)
 
+            # Table-format batch log
             period_label = current_period_bin if current_period_bin is not None else "?"
-            logger.info(
-                "Batch %d [P%s]: %d trips (%d unique, %.0f veh, %d remaining), "
-                "mean_vc=%.3f, max_vc=%.3f, "
-                "queue=%.0f veh/hr/lane, "
-                "mean_speed=%.1f km/h, oversat=%d, "
-                "route=%.1fs, accum=%.1fs, cust=%.1fs"
-                + (f" | {n_active} links, top5 V/C: [{top5_str}]" if top5_str else ""),
-                bi + 1, period_label, len(batch.trips),
-                n_unique, batch_vol, trips_remaining,
-                _mean_vc, max_vc,
-                mean_queue_per_lane, batch_result.mean_speed_kmh,
-                batch_result.n_oversaturated,
-                route_time, accum_time, customize_time,
-            )
+            if not _header_logged:
+                _log(_BATCH_HEADER)
+                _log(_BATCH_SEP)
+                _header_logged = True
+            _log(_fmt_batch_row(
+                bi + 1, period_label, len(batch.trips), batch_vol,
+                trips_remaining, _mean_vc, max_vc,
+                batch_result.mean_speed_kmh, batch_result.n_oversaturated,
+                n_active, route_time, accum_time, customize_time,
+            ))
 
             if progress_callback:
                 progress_callback(bi, n_trips, mean_queue_per_lane)
@@ -1833,6 +1932,11 @@ class AssignmentSolver:
         logger.info("Phase 2: routing %d trips with time-dependent weights", n_trips)
         t_route = time.monotonic()
 
+        # Pass compressed graph lookup if available
+        compressed_kwargs2 = {}
+        if self._compressed_graph is not None:
+            compressed_kwargs2 = dict(compressed_graph=self._compressed_graph)
+
         vol, total_tstt, new_edges, _, trip_durations, route_ms, accum_ms = batch_route_accumulate(
             engine._engine,
             coords,
@@ -1844,6 +1948,7 @@ class AssignmentSolver:
             period_duration=period_duration_s,
             departure_offsets=offsets,
             n_periods=0,  # 1D volume — we only need per-trip durations
+            **compressed_kwargs2,
         )
 
         experienced_times = np.asarray(trip_durations, dtype=np.float64)
