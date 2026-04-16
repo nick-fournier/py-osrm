@@ -84,7 +84,8 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(FetchContent)
 FetchContent_Declare(
   libosrm
-  SOURCE_DIR /home/nick/clones/osrm-backend
+  GIT_REPOSITORY https://github.com/nick-fournier/osrm-backend
+  GIT_TAG feature/customize-perf
 )
 
 
