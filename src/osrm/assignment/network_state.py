@@ -84,6 +84,7 @@ class NetworkState:
     flow_vph: np.ndarray = field(init=False)
     density_vpkm: np.ndarray = field(init=False)
     speed_kmh: np.ndarray = field(init=False)
+    speed_kmh_raw: np.ndarray = field(init=False)  # unsmoothed, for unserved calc
     kc_ratio: np.ndarray = field(init=False)
     _edge_index: Dict[Tuple[int, int], int] = field(
         init=False, repr=False, default_factory=dict
@@ -94,6 +95,7 @@ class NetworkState:
         self.flow_vph = np.zeros(n, dtype=np.float64)
         self.density_vpkm = np.zeros(n, dtype=np.float64)
         self.speed_kmh = self.freeflow_kmh.copy()
+        self.speed_kmh_raw = self.freeflow_kmh.copy()
         self.kc_ratio = np.full(n, 1.0 / 3.0, dtype=np.float64)
         self._build_index()
 
@@ -117,7 +119,7 @@ class NetworkState:
         model, ``unserved_demand × Δt`` gives the vehicles that spill into
         the next time period.
         """
-        q_physical = self.density_vpkm * self.speed_kmh
+        q_physical = self.density_vpkm * self.speed_kmh_raw
         return np.maximum(self.flow_vph - q_physical, 0.0)
 
     def edge_ordinal(self, from_id: int, to_id: int) -> Optional[int]:

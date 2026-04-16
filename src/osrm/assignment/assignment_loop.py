@@ -781,10 +781,16 @@ class AssignmentSolver:
             kc_ratio=state.kc_ratio,
         )
 
-        # Optional spatial smoothing (operates on density)
+        # Raw (unsmoothed) speed for unserved demand calculation
+        state.speed_kmh_raw = self.vdf.density_to_speed(
+            state.density_vpkm, state.freeflow_kmh, state.jam_density,
+            kc_ratio=state.kc_ratio,
+        )
+
+        # Optional spatial smoothing (operates on density) — for routing only
         smoothed = self.smoother.smooth(state.density_vpkm)
 
-        # Forward MFD: density → speed
+        # Forward MFD: smoothed density → speed (used for OSRM customize)
         state.speed_kmh = self.vdf.density_to_speed(
             smoothed, state.freeflow_kmh, state.jam_density,
             kc_ratio=state.kc_ratio,
@@ -1617,13 +1623,30 @@ class AssignmentSolver:
                 for t in batch.trips
             ))
             trips_remaining -= len(batch.trips)
+
+            # Spatial concentration: top V/C links
+            n_active = int(np.sum(active))
+            top5_str = ""
+            if n_active > 0:
+                active_vc = vc[active]
+                active_flows = state.flow_vph[active]
+                active_qc = q_c[active]
+                active_vf = state.freeflow_kmh[active]
+                top_idx = np.argsort(active_vc)[-5:][::-1]
+                top5_str = ", ".join(
+                    f"{active_flows[i]:.0f}/{active_qc[i]:.0f}(vf={active_vf[i]:.0f})"
+                    for i in top_idx
+                )
+
+            period_label = current_period_bin if current_period_bin is not None else "?"
             logger.info(
-                "Batch %d: %d trips (%d unique, %.0f veh, %d remaining), "
+                "Batch %d [P%s]: %d trips (%d unique, %.0f veh, %d remaining), "
                 "mean_vc=%.3f, max_vc=%.3f, "
                 "queue=%.0f veh/hr/lane, "
                 "mean_speed=%.1f km/h, oversat=%d, "
-                "route=%.1fs, accum=%.1fs, cust=%.1fs",
-                bi + 1, len(batch.trips),
+                "route=%.1fs, accum=%.1fs, cust=%.1fs"
+                + (f" | {n_active} links, top5 V/C: [{top5_str}]" if top5_str else ""),
+                bi + 1, period_label, len(batch.trips),
                 n_unique, batch_vol, trips_remaining,
                 _mean_vc, max_vc,
                 mean_queue_per_lane, batch_result.mean_speed_kmh,
