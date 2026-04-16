@@ -89,10 +89,12 @@ class TripStreamAdapter:
         if base_batch_size <= 0:
             raise ValueError("base_batch_size must be positive")
 
-        # Group trips by time bin
+        # Group trips by time bin (wrap to day boundary if needed)
+        day_s = 24 * 3600.0
         bins: dict[int, list[DemandTrip]] = {}
         for trip in self._trips:
-            bi = int(trip.departure_time_s // bin_width_s)
+            t = trip.departure_time_s % day_s
+            bi = int(t // bin_width_s)
             bins.setdefault(bi, []).append(trip)
 
         batch_index = 0
@@ -153,7 +155,8 @@ class TripStreamAdapter:
                 batch_index += 1
 
         for trip in self._trips:
-            bin_idx = int(trip.departure_time_s // bin_width_s)
+            t = trip.departure_time_s % (24 * 3600.0)
+            bin_idx = int(t // bin_width_s)
             if current_bin is None:
                 current_bin = bin_idx
             if bin_idx != current_bin:

@@ -1351,12 +1351,9 @@ class AssignmentSolver:
         # Determine total periods for cross-period flow attribution
         n_periods = 0
         if period_duration_s is not None:
-            max_dep = max(
-                (t.departure_time_s for t in snapped_trips), default=0.0
-            )
-            n_periods = int(max_dep / period_duration_s) + 1
-            # Buffer for trips that spill beyond their departure period
-            n_periods += 3
+            # Cap at 24h worth of periods (departure times wrap modulo 24h)
+            day_s = 24 * 3600.0
+            n_periods = int(day_s / period_duration_s)
 
         # 2D period flow tracking: flow[period, edge]
         # Initialized lazily after first batch discovers edges
