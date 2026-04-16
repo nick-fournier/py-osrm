@@ -1662,25 +1662,24 @@ class AssignmentSolver:
             # Update dynamic sizing state — mean V/C drives batch scaling
             _mean_vc = batch_result.mean_vc
 
-            if bi % max(1, n_batches_est // 10) == 0:
-                batch_vol = sum(t.volume for t in batch.trips)
-                n_unique = len(set(
-                    (t.origin[0], t.origin[1], t.destination[0], t.destination[1])
-                    for t in batch.trips
-                ))
-                logger.info(
-                    "Batch %d/%d: %d trips (%d unique, %.0f veh), "
-                    "mean_vc=%.3f, max_vc=%.3f, "
-                    "queue=%.0f veh/hr/lane, "
-                    "mean_speed=%.1f km/h, oversat=%d, "
-                    "route=%.1fs, accum=%.1fs, cust=%.1fs",
-                    bi + 1, n_batches_est, len(batch.trips),
-                    n_unique, batch_vol,
-                    _mean_vc, max_vc,
-                    mean_queue_per_lane, batch_result.mean_speed_kmh,
-                    batch_result.n_oversaturated,
-                    route_time, accum_time, customize_time,
-                )
+            batch_vol = sum(t.volume for t in batch.trips)
+            n_unique = len(set(
+                (t.origin[0], t.origin[1], t.destination[0], t.destination[1])
+                for t in batch.trips
+            ))
+            logger.info(
+                "Batch %d/%d: %d trips (%d unique, %.0f veh), "
+                "mean_vc=%.3f, max_vc=%.3f, "
+                "queue=%.0f veh/hr/lane, "
+                "mean_speed=%.1f km/h, oversat=%d, "
+                "route=%.1fs, accum=%.1fs, cust=%.1fs",
+                bi + 1, n_batches_est, len(batch.trips),
+                n_unique, batch_vol,
+                _mean_vc, max_vc,
+                mean_queue_per_lane, batch_result.mean_speed_kmh,
+                batch_result.n_oversaturated,
+                route_time, accum_time, customize_time,
+            )
 
             if progress_callback:
                 progress_callback(bi, n_batches_est, mean_queue_per_lane)
