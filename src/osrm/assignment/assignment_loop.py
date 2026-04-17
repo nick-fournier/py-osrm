@@ -40,28 +40,35 @@ def _fmt_num(n: float) -> str:
 
 
 _BATCH_HEADER = (
-    " {:>4s} {:>3s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>4s}"
-    " {:>6s} {:>4s} {:>4s} {:>4s}"
+    " {:>7s} {:>3s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s}"
 ).format(
-    "Bat", "Per", "Trips", "Veh", "Left",
-    "VCavg", "VCmax", "Speed", "Osat",
-    "Links", "Rte", "Acc", "Cst",
+    "Bat", "Per", "Routes", "Vol", "Left",
+    "VCavg", "VCmax", "Speed", "Osat", "ETA",
 )
 _BATCH_SEP = " " + "─" * (len(_BATCH_HEADER) - 1)
 
 
+def _fmt_eta(seconds: float) -> str:
+    """Format ETA as compact string."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
 def _fmt_batch_row(
-    bi: int, period: object, n_trips: int, veh: float,
-    left: int, vc_avg: float, vc_max: float, speed: float,
+    bi: int, total: int, period: object, n_routes: int, vol: float,
+    vol_left: float, vc_avg: float, vc_max: float, speed: float,
     oversat: int, links: int, route_s: float, accum_s: float, cust_s: float,
+    eta_s: float = 0.0,
 ) -> str:
     return (
-        " {:>4d} {:>3s} {:>5d} {:>5s} {:>5s} {:>5.3f} {:>5.3f} {:>5.1f} {:>4d}"
-        " {:>6s} {:>4.1f} {:>4.1f} {:>4.1f}"
+        " {:>7s} {:>3s} {:>5d} {:>5s} {:>5s} {:>5.3f} {:>5.3f} {:>5.1f} {:>5s} {:>5s}"
     ).format(
-        bi, f"P{period}", n_trips, _fmt_num(veh), _fmt_num(left),
-        vc_avg, vc_max, speed, oversat,
-        _fmt_num(links), route_s, accum_s, cust_s,
+        f"{bi}/{total}", f"P{period}", n_routes, _fmt_num(vol), _fmt_num(vol_left),
+        vc_avg, vc_max, speed, _fmt_num(oversat),
+        _fmt_eta(eta_s) if eta_s > 0 else "",
     )
 
 
@@ -134,11 +141,12 @@ class AssignmentConfig:
     stagnation_tol: float = 0.001
     stagnation_window: int = 3
     n_threads: int = -1  # -1 = cpu_count - 2; 0 = all cores; >0 = explicit cap
-    # Dynamic batch sizing: scale = k / (mean_vc + k)
-    # k is the half-point: when mean V/C = k, batch size = 50% of base.
-    # 0 disables dynamic sizing (fixed batch size throughout)
-    stream_batch_halfpoint: float = 0.05
-    stream_batch_min_scale: float = 0.1  # floor: never below 10% of base
+    # Trip explosion: split high-volume trips into multiple low-volume routes
+    # with spatial jitter for path diversity.  0 disables explosion.
+    max_vol_per_route: float = 5.0
+    explosion_jitter_m: float = 150.0  # Gaussian sigma in meters
+    # OD-cluster round-robin: max trips drawn per OD-bin per batch.
+    max_trips_per_bin: int = 5
     # Sampled gap: fraction of period trips re-routed at period-final to
     # estimate Wardrop gap.  0 disables (no extra routing cost).
     gap_sample_frac: float = 0.0
@@ -146,6 +154,166 @@ class AssignmentConfig:
     def __post_init__(self):
         if self.n_threads == -1:
             self.n_threads = max(1, (os.cpu_count() or 4) - 2)
+
+
+def _explode_trips(
+    trips: List[DemandTrip],
+    max_vol: float,
+    jitter_m: float,
+    rng: np.random.Generator,
+) -> List[DemandTrip]:
+    """Split high-volume trips into multiple low-volume trips with spatial jitter.
+
+    Each trip with volume > max_vol is split into ceil(volume/max_vol) copies,
+    each with equal share of the volume and independent Gaussian jitter on
+    origin and destination coordinates.  This produces diverse OSRM snap
+    points → diverse routes → less artificial path concentration.
+    """
+    if max_vol <= 0:
+        return trips
+
+    M_PER_DEG_LAT = 111_320.0
+    cos_lat = np.cos(np.radians(37.0))  # approximate for continental US
+    M_PER_DEG_LON = 111_320.0 * cos_lat
+    sigma_lat = jitter_m / M_PER_DEG_LAT
+    sigma_lon = jitter_m / M_PER_DEG_LON
+
+    result: List[DemandTrip] = []
+    n_exploded = 0
+    for trip in trips:
+        if trip.volume <= max_vol:
+            result.append(trip)
+            continue
+        n_copies = int(np.ceil(trip.volume / max_vol))
+        copy_vol = trip.volume / n_copies
+        n_exploded += 1
+        for _ in range(n_copies):
+            o_lon = trip.origin[0] + rng.normal(0, sigma_lon)
+            o_lat = trip.origin[1] + rng.normal(0, sigma_lat)
+            d_lon = trip.destination[0] + rng.normal(0, sigma_lon)
+            d_lat = trip.destination[1] + rng.normal(0, sigma_lat)
+            result.append(DemandTrip(
+                origin=(o_lon, o_lat),
+                destination=(d_lon, d_lat),
+                volume=copy_vol,
+                departure_time_s=trip.departure_time_s,
+                trip_id=trip.trip_id,
+            ))
+
+    if n_exploded > 0:
+        logger.info(
+            "Trip explosion: %d trips → %d (max_vol=%.0f, %d exploded)",
+            len(trips), len(result), max_vol, n_exploded,
+        )
+    return result
+
+
+def _compute_cell_size_km(trips: List[DemandTrip]) -> float:
+    """Derive OD grid cell size from median trip length."""
+    if len(trips) < 10:
+        return 5.0  # fallback
+    # Sample up to 50k trips for speed
+    sample = trips if len(trips) <= 50_000 else [
+        trips[i] for i in np.random.default_rng(0).choice(len(trips), 50_000, replace=False)
+    ]
+    o = np.array([(t.origin[0], t.origin[1]) for t in sample])
+    d = np.array([(t.destination[0], t.destination[1]) for t in sample])
+    # Haversine approximation (flat-earth in km)
+    lat_mid = np.radians((o[:, 1] + d[:, 1]) / 2)
+    dx = (d[:, 0] - o[:, 0]) * np.cos(lat_mid) * 111.32
+    dy = (d[:, 1] - o[:, 1]) * 111.32
+    lengths_km = np.sqrt(dx**2 + dy**2)
+    cell = float(np.median(lengths_km)) / 3.0
+    return max(1.0, cell)  # floor at 1 km
+
+
+def _od_bin_key(
+    trip: DemandTrip, inv_cell_lon: float, inv_cell_lat: float,
+) -> Tuple[int, int, int, int]:
+    """Hash a trip into a 4D OD grid bin."""
+    return (
+        int(np.floor(trip.origin[0] * inv_cell_lon)),
+        int(np.floor(trip.origin[1] * inv_cell_lat)),
+        int(np.floor(trip.destination[0] * inv_cell_lon)),
+        int(np.floor(trip.destination[1] * inv_cell_lat)),
+    )
+
+
+def _build_od_batches(
+    trips: List[DemandTrip],
+    period_duration_s: Optional[float],
+    cell_size_km: float,
+    max_per_bin: int,
+) -> Tuple[List["TripBatch"], int]:
+    """Build spatially-diverse batches via OD-grid round-robin.
+
+    Returns (list_of_TripBatch, n_occupied_bins_max).
+    """
+    from osrm.assignment.trip_stream import TripBatch
+
+    # Convert cell_size from km to degree increments
+    cos_lat = np.cos(np.radians(37.0))  # approximate; good enough for binning
+    cell_lon = cell_size_km / (111.32 * cos_lat)
+    cell_lat = cell_size_km / 111.32
+    inv_cell_lon = 1.0 / cell_lon
+    inv_cell_lat = 1.0 / cell_lat
+
+    # Group trips by departure period first
+    if period_duration_s is not None:
+        from itertools import groupby
+        sorted_trips = sorted(trips, key=lambda t: t.departure_time_s)
+        period_groups = []
+        for dep_bin, grp in groupby(
+            sorted_trips,
+            key=lambda t: int((t.departure_time_s % (24 * 3600.0)) // period_duration_s),
+        ):
+            period_groups.append((dep_bin, list(grp)))
+    else:
+        period_groups = [(None, list(trips))]
+
+    batches: List[TripBatch] = []
+    batch_idx = 0
+    max_bins = 0
+
+    for dep_bin, period_trips in period_groups:
+        # Bin trips by 4D OD grid
+        bins: Dict[Tuple[int, int, int, int], List[DemandTrip]] = {}
+        for t in period_trips:
+            key = _od_bin_key(t, inv_cell_lon, inv_cell_lat)
+            if key not in bins:
+                bins[key] = []
+            bins[key].append(t)
+
+        n_bins = len(bins)
+        if n_bins > max_bins:
+            max_bins = n_bins
+
+        # Round-robin: cycle through bins, take max_per_bin from each
+        bin_iters = {k: iter(v) for k, v in bins.items()}
+        bin_keys = list(bins.keys())
+        exhausted: set = set()
+
+        while len(exhausted) < n_bins:
+            batch_trips: List[DemandTrip] = []
+            for key in bin_keys:
+                if key in exhausted:
+                    continue
+                it = bin_iters[key]
+                for _ in range(max_per_bin):
+                    try:
+                        batch_trips.append(next(it))
+                    except StopIteration:
+                        exhausted.add(key)
+                        break
+            if batch_trips:
+                batches.append(TripBatch(
+                    trips=batch_trips,
+                    batch_index=batch_idx,
+                    departure_bin=dep_bin,
+                ))
+                batch_idx += 1
+
+    return batches, max_bins
 
 
 @dataclass
@@ -352,6 +520,7 @@ class AssignmentSolver:
             storage_config=self.base_path,
             algorithm="MLD",
             use_shared_memory=False,
+            use_mmap=False,
         )
         _log("Engine loaded in %.2fs", time.monotonic() - t0)
         return eng
@@ -368,26 +537,18 @@ class AssignmentSolver:
         """
         t_cust = time.monotonic()
 
-        # Try in-memory path (no engine reload needed)
+        # In-memory path (no engine reload needed)
         if self._in_mem_customizer is not None:
-            try:
-                # Unwrap Python OSRM wrapper to get the C++ engine
-                raw_engine = getattr(engine, '_engine', engine)
-                cell_time = self._in_mem_customizer.recustomize(
-                    csv_path, raw_engine, filter_indices=[0],
-                )
-                customize_time = time.monotonic() - t_cust
-                logger.debug(
-                    "InMemoryCustomizer: cell=%.2fs, total=%.2fs (no reload)",
-                    cell_time, customize_time,
-                )
-                return engine, customize_time, 0.0
-            except Exception:
-                logger.warning(
-                    "InMemoryCustomizer failed, falling back",
-                    exc_info=True,
-                )
-                self._in_mem_customizer = None
+            raw_engine = getattr(engine, '_engine', engine)
+            cell_time = self._in_mem_customizer.recustomize(
+                csv_path, raw_engine, filter_indices=[0],
+            )
+            customize_time = time.monotonic() - t_cust
+            logger.debug(
+                "InMemoryCustomizer: cell=%.2fs, total=%.2fs (no reload)",
+                cell_time, customize_time,
+            )
+            return engine, customize_time, 0.0
 
         # Try incremental path
         if self._incr_customizer is not None:
@@ -1177,7 +1338,6 @@ class AssignmentSolver:
         self,
         trips: List[DemandTrip],
         *,
-        batch_size: Optional[int] = None,
         period_duration_s: Optional[float] = None,
         return_routes: bool = False,
         state_patch=None,
@@ -1199,10 +1359,6 @@ class AssignmentSolver:
             All trips to assign.  If trips have varying
             ``departure_time_s``, they are sorted and routed in
             chronological order.
-        batch_size : int or None
-            Number of trips per loading step.  After each batch, the
-            network state is updated and OSRM is re-customized.
-            If ``None`` (default), auto-tuned from network topology.
         period_duration_s : float or None
             Duration of each time period in seconds.  Trips are grouped
             by departure time into periods.  Unserved demand from period
@@ -1224,8 +1380,6 @@ class AssignmentSolver:
         -------
         StreamResult
         """
-        from osrm.assignment.trip_stream import TripStreamAdapter
-
         t_start = time.monotonic()
         n_trips = len(trips)
 
@@ -1247,84 +1401,41 @@ class AssignmentSolver:
             )
             self._in_mem_customizer = None
 
-        # Sort trips by departure time
-        adapter = TripStreamAdapter(trips, sort_by_departure=True)
-
-        # Snap coordinates (done once for all trips)
-        snapped_trips = self._snap_trips(engine, adapter.trips())
-
-        # Re-wrap after snapping
-        adapter = TripStreamAdapter(snapped_trips, sort_by_departure=False)
-
-        # Auto-tune batch_size so each batch adds ~10 vehicles per link.
-        # Route a probe sample to measure avg edges per route, then:
-        #   trips_per_veh_per_link = n_edges / avg_edges_per_route
-        #   batch_size = 10 × trips_per_veh_per_link
-        if batch_size is None:
-            sample_n = min(5000, n_trips)
-            sample = snapped_trips[:sample_n]
-
-            # Discover network topology from probe
-            probe_state = self._discover_network(engine, sample)
-
-            # Route probe to measure edge traversals per trip.
-            # aon_volume is in trip.volume units; normalize by total
-            # volume to get avg edges per unit of demand.
-            probe_vol, _, _ = self._route_and_accumulate(
-                engine, sample, probe_state,
+        # Explode high-volume trips for path diversity, then build
+        # spatially-diverse batches via OD-grid round-robin.
+        # No explicit snap needed — OSRM Route internally snaps to nearest node.
+        explosion_rng = np.random.default_rng(42)
+        if self.config.max_vol_per_route > 0:
+            trips = _explode_trips(
+                trips, self.config.max_vol_per_route,
+                self.config.explosion_jitter_m, explosion_rng,
             )
-            total_volume = sum(t.volume for t in sample)
-            total_traversals = float(np.sum(probe_vol))
-            avg_edges_per_route = total_traversals / max(total_volume, 1.0)
+            n_trips = len(trips)
 
-            # Extrapolate edge count: probe discovers edges sub-linearly.
-            # If S trips found E edges, full N trips find ~E*(N/S)^0.3.
-            n_edges_probe = probe_state.n_edges
-            if sample_n < n_trips:
-                n_edges_est = int(
-                    n_edges_probe * (n_trips / sample_n) ** 0.3
-                )
-            else:
-                n_edges_est = n_edges_probe
+        # Data-driven cell size from median trip length
+        cell_size_km = _compute_cell_size_km(trips)
+        logger.info(
+            "OD-grid cell size: %.1f km (median trip / 3)", cell_size_km,
+        )
 
-            trips_per_1vpl = n_edges_est / max(avg_edges_per_route, 1.0)
-            # Each trip contributes trip.volume vehicles, not 1.
-            # Scale batch_size down by mean volume so flow/link target holds.
-            mean_volume = total_volume / max(sample_n, 1)
-            batch_size = max(100, int(5 * trips_per_1vpl / max(mean_volume, 1.0)))
-
-            logger.info(
-                "Auto-tuned batch_size=%d (~%d batches, mean_vol=%.1f): "
-                "%d probe edges → %d est edges, "
-                "%.1f avg edges/route",
-                batch_size, max(1, n_trips // batch_size), mean_volume,
-                n_edges_probe, n_edges_est, avg_edges_per_route,
-            )
+        # Build OD-cluster round-robin batches
+        od_batches, n_od_bins = _build_od_batches(
+            trips, period_duration_s, cell_size_km,
+            self.config.max_trips_per_bin,
+        )
+        est_total_batches = len(od_batches)
+        total_vol = sum(t.volume for trip_batch in od_batches for t in trip_batch.trips)
 
         logger.info(
-            "Stream assignment: %d trips, batch_size=%d, n_threads=%d",
-            n_trips, batch_size, self.config.n_threads,
+            "Stream assignment: %d trips, %d OD bins, %d batches "
+            "(max %d/bin), n_threads=%d",
+            n_trips, n_od_bins, est_total_batches,
+            self.config.max_trips_per_bin, self.config.n_threads,
         )
 
         # IncrementalCustomizer was removed — always use full customize
         self._incr_customizer = None
 
-        # Dynamic batch sizing state
-        halfpoint = self.config.stream_batch_halfpoint
-        min_scale = self.config.stream_batch_min_scale
-        base_batch_size = batch_size
-        current_effective_bs = batch_size
-        _mean_vc = 0.0
-
-        def _dynamic_batch_size() -> int:
-            """Compute next batch size from congestion state."""
-            nonlocal current_effective_bs
-            if halfpoint <= 0 or _mean_vc <= 0:
-                current_effective_bs = base_batch_size
-                return base_batch_size
-            scale = max(min_scale, halfpoint / (_mean_vc + halfpoint))
-            current_effective_bs = max(100, int(base_batch_size * scale))
-            return current_effective_bs
 
         # Network starts empty — edges discovered during routing.
         # Load compressed graph lookup for correct freeflow speeds.
@@ -1368,19 +1479,11 @@ class AssignmentSolver:
         if return_routes:
             route_demands = {}
 
-        # Group trips into periods if multi-period requested
-        # Use a generator (not list) so dynamic batch sizing can adapt
-        if period_duration_s is not None:
-            batch_iter = adapter.iter_time_slices_dynamic(
-                bin_width_s=period_duration_s,
-                base_batch_size=batch_size,
-                batch_size_fn=_dynamic_batch_size,
-            )
-        else:
-            batch_iter = adapter.iter_batches(batch_size)
+        batch_iter = iter(od_batches)
 
-        # Track remaining trips for progress reporting
+        # Track remaining volume for progress reporting
         trips_remaining = n_trips
+        vol_remaining = total_vol
 
         # Cumulative flow within the current period (1D legacy path)
         cumulative_volume = queue_carryforward.copy()
@@ -1503,17 +1606,16 @@ class AssignmentSolver:
                 engine, period_cust_time, _ = self._customize_and_reload(str(csv_path), engine)
                 n_batches_in_period = 1  # this batch starts the new period
 
-                # Log period transition (after customize so we can report time)
+                # Log period transition
                 if n_genuine > 0:
                     _log(
-                        " → P%s: %s veh/hr unserved (%d links) cust %.1fs",
+                        " → P%s: %s veh/hr on %d links carried forward",
                         batch.departure_bin,
                         _fmt_num(total_genuine), n_genuine,
-                        period_cust_time,
                     )
                 else:
-                    _log(" → P%s: 0 unserved, cust %.1fs",
-                         batch.departure_bin, period_cust_time)
+                    _log(" → P%s: 0 carried forward", batch.departure_bin)
+                _log(_BATCH_HEADER)
 
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
@@ -1691,7 +1793,7 @@ class AssignmentSolver:
             batch_result = StreamBatchResult(
                 batch_index=bi,
                 n_trips=len(batch.trips),
-                effective_batch_size=current_effective_bs,
+                effective_batch_size=len(batch.trips),
                 route_time_s=route_time,
                 customize_time_s=customize_time,
                 engine_time_s=engine_time,
@@ -1713,15 +1815,9 @@ class AssignmentSolver:
             )
             batch_log.append(batch_result)
 
-            # Update dynamic sizing state — mean V/C drives batch scaling
-            _mean_vc = batch_result.mean_vc
-
             batch_vol = sum(t.volume for t in batch.trips)
-            n_unique = len(set(
-                (t.origin[0], t.origin[1], t.destination[0], t.destination[1])
-                for t in batch.trips
-            ))
             trips_remaining -= len(batch.trips)
+            vol_remaining -= batch_vol
 
             # Spatial concentration: top V/C links (moved to DEBUG)
             n_active = int(np.sum(active))
@@ -1737,17 +1833,25 @@ class AssignmentSolver:
                 )
                 logger.debug("  top V/C: %s", top5_str)
 
-            # Table-format batch log
+            # ETA from running average batch time
+            elapsed_s = time.monotonic() - t_start
+            avg_batch_s = elapsed_s / n_batches if n_batches > 0 else 0
+            eta_batches = max(0, est_total_batches - n_batches)
+            eta_s = avg_batch_s * eta_batches
+
+            # Table-format batch log with progress
             period_label = current_period_bin if current_period_bin is not None else "?"
             if not _header_logged:
                 _log(_BATCH_HEADER)
                 _log(_BATCH_SEP)
                 _header_logged = True
             _log(_fmt_batch_row(
-                bi + 1, period_label, len(batch.trips), batch_vol,
-                trips_remaining, _mean_vc, max_vc,
+                n_batches, est_total_batches, period_label,
+                len(batch.trips), batch_vol,
+                vol_remaining, batch_result.mean_vc, max_vc,
                 batch_result.mean_speed_kmh, batch_result.n_oversaturated,
                 n_active, route_time, accum_time, customize_time,
+                eta_s=eta_s,
             ))
 
             if progress_callback:

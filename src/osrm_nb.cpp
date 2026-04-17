@@ -363,18 +363,25 @@ NB_MODULE(osrm_ext, m) {
                 {
                     if (i >= metrics.size()) continue;
                     auto prefix = "/mld/metrics/routability/exclude/" + std::to_string(i);
-                    engine->UpdateMetricBlock(
+                    bool ok = true;
+                    ok &= engine->UpdateMetricBlock(
                         prefix + "/weights",
                         metrics[i].weights.data(),
                         metrics[i].weights.size() * sizeof(EdgeWeight));
-                    engine->UpdateMetricBlock(
+                    ok &= engine->UpdateMetricBlock(
                         prefix + "/durations",
                         metrics[i].durations.data(),
                         metrics[i].durations.size() * sizeof(EdgeDuration));
-                    engine->UpdateMetricBlock(
+                    ok &= engine->UpdateMetricBlock(
                         prefix + "/distances",
                         metrics[i].distances.data(),
                         metrics[i].distances.size() * sizeof(EdgeDistance));
+                    if (!ok)
+                    {
+                        throw std::runtime_error(
+                            "UpdateMetricBlock failed for filter " + std::to_string(i) +
+                            ". Ensure the OSRM engine was created with use_mmap=False.");
+                    }
                 }
             }
 
