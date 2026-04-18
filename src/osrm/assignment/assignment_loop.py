@@ -39,13 +39,18 @@ def _fmt_num(n: float) -> str:
     return f"{n:.0f}"
 
 
-_BATCH_HEADER = (
-    " {:>7s} {:>3s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s}"
-).format(
-    "Bat", "Per", "Routes", "Vol", "Left",
-    "VCavg", "VCmax", "Speed", "Osat", "ETA",
-)
-_BATCH_SEP = " " + "─" * (len(_BATCH_HEADER) - 1)
+def _batch_header(timing: bool = False) -> str:
+    base = (
+        " {:>7s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s} {:>5s}"
+    ).format("Bat", "Per", "Routes", "Vol", "Left",
+             "VCavg", "VCmax", "Speed", "Osat")
+    if timing:
+        base += "  {:>4s} {:>4s} {:>4s}".format("Rte", "Acc", "Cst")
+    return base
+
+
+def _batch_sep(timing: bool = False) -> str:
+    return " " + "─" * (len(_batch_header(timing)) - 1)
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -57,19 +62,34 @@ def _fmt_eta(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
+def _period_to_clock(period_bin: object, period_duration_s: float) -> str:
+    """Convert period bin number to clock time string like '4:00'."""
+    try:
+        secs = int(period_bin) * period_duration_s
+    except (TypeError, ValueError):
+        return str(period_bin)
+    h = int(secs // 3600) % 24
+    m = int((secs % 3600) // 60)
+    return f"{h}:{m:02d}"
+
+
 def _fmt_batch_row(
     bi: int, total: int, period: object, n_routes: int, vol: float,
     vol_left: float, vc_avg: float, vc_max: float, speed: float,
     oversat: int, links: int, route_s: float, accum_s: float, cust_s: float,
-    eta_s: float = 0.0,
+    eta_s: float = 0.0, timing: bool = False,
+    period_duration_s: float = 900.0,
 ) -> str:
-    return (
-        " {:>7s} {:>3s} {:>5d} {:>5s} {:>5s} {:>5.3f} {:>5.3f} {:>5.1f} {:>5s} {:>5s}"
+    clock = _period_to_clock(period, period_duration_s)
+    row = (
+        " {:>7s} {:>5s} {:>5d} {:>5s} {:>5s} {:>5.3f} {:>5.3f} {:>5.1f} {:>5s}"
     ).format(
-        f"{bi}/{total}", f"P{period}", n_routes, _fmt_num(vol), _fmt_num(vol_left),
+        f"{bi}/{total}", clock, n_routes, _fmt_num(vol), _fmt_num(vol_left),
         vc_avg, vc_max, speed, _fmt_num(oversat),
-        _fmt_eta(eta_s) if eta_s > 0 else "",
     )
+    if timing:
+        row += "  {:>4.1f} {:>4.1f} {:>4.1f}".format(route_s, accum_s, cust_s)
+    return row
 
 
 _VERBOSITY_LEVELS = {
@@ -150,6 +170,8 @@ class AssignmentConfig:
     # Sampled gap: fraction of period trips re-routed at period-final to
     # estimate Wardrop gap.  0 disables (no extra routing cost).
     gap_sample_frac: float = 0.0
+    # Show per-batch timing breakdown (Route/Accum/Cust columns)
+    log_timing: bool = False
 
     def __post_init__(self):
         if self.n_threads == -1:
@@ -188,10 +210,14 @@ def _explode_trips(
         copy_vol = trip.volume / n_copies
         n_exploded += 1
         for _ in range(n_copies):
-            o_lon = trip.origin[0] + rng.normal(0, sigma_lon)
-            o_lat = trip.origin[1] + rng.normal(0, sigma_lat)
-            d_lon = trip.destination[0] + rng.normal(0, sigma_lon)
-            d_lat = trip.destination[1] + rng.normal(0, sigma_lat)
+            if copy_vol > 1.0:
+                o_lon = trip.origin[0] + rng.normal(0, sigma_lon)
+                o_lat = trip.origin[1] + rng.normal(0, sigma_lat)
+                d_lon = trip.destination[0] + rng.normal(0, sigma_lon)
+                d_lat = trip.destination[1] + rng.normal(0, sigma_lat)
+            else:
+                o_lon, o_lat = trip.origin
+                d_lon, d_lat = trip.destination
             result.append(DemandTrip(
                 origin=(o_lon, o_lat),
                 destination=(d_lon, d_lat),
@@ -1432,6 +1458,13 @@ class AssignmentSolver:
             n_trips, n_od_bins, est_total_batches,
             self.config.max_trips_per_bin, self.config.n_threads,
         )
+        if period_duration_s is not None:
+            mins = int(period_duration_s / 60)
+            n_per_day = int(24 * 3600 / period_duration_s)
+            logger.info(
+                "Period: %dmin (%ds), %d periods/day",
+                mins, int(period_duration_s), n_per_day,
+            )
 
         # IncrementalCustomizer was removed — always use full customize
         self._incr_customizer = None
@@ -1606,16 +1639,24 @@ class AssignmentSolver:
                 engine, period_cust_time, _ = self._customize_and_reload(str(csv_path), engine)
                 n_batches_in_period = 1  # this batch starts the new period
 
-                # Log period transition
+                # Log period transition with ETA
+                elapsed_so_far = time.monotonic() - t_start
+                avg_s = elapsed_so_far / n_batches if n_batches > 0 else 0
+                remaining = max(0, est_total_batches - n_batches)
+                eta_str = _fmt_eta(avg_s * remaining) if n_batches > 0 else ""
                 if n_genuine > 0:
                     _log(
-                        " → P%s: %s veh/hr on %d links carried forward",
-                        batch.departure_bin,
-                        _fmt_num(total_genuine), n_genuine,
+                        " → %s: %s veh/hr on %d links carried forward  [ETA %s]",
+                        _period_to_clock(batch.departure_bin, period_duration_s or 3600.0),
+                        _fmt_num(total_genuine), n_genuine, eta_str,
                     )
                 else:
-                    _log(" → P%s: 0 carried forward", batch.departure_bin)
-                _log(_BATCH_HEADER)
+                    _log(
+                        " → %s: 0 carried forward  [ETA %s]",
+                        _period_to_clock(batch.departure_bin, period_duration_s or 3600.0),
+                        eta_str,
+                    )
+                _log(_batch_header(self.config.log_timing))
 
             # 1. Route this batch against current (congested) weights
             t_route = time.monotonic()
@@ -1842,8 +1883,8 @@ class AssignmentSolver:
             # Table-format batch log with progress
             period_label = current_period_bin if current_period_bin is not None else "?"
             if not _header_logged:
-                _log(_BATCH_HEADER)
-                _log(_BATCH_SEP)
+                _log(_batch_header(self.config.log_timing))
+                _log(_batch_sep(self.config.log_timing))
                 _header_logged = True
             _log(_fmt_batch_row(
                 n_batches, est_total_batches, period_label,
@@ -1851,7 +1892,8 @@ class AssignmentSolver:
                 vol_remaining, batch_result.mean_vc, max_vc,
                 batch_result.mean_speed_kmh, batch_result.n_oversaturated,
                 n_active, route_time, accum_time, customize_time,
-                eta_s=eta_s,
+                eta_s=eta_s, timing=self.config.log_timing,
+                period_duration_s=period_duration_s or 3600.0,
             ))
 
             if progress_callback:
