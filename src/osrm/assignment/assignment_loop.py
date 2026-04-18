@@ -172,6 +172,11 @@ class AssignmentConfig:
     gap_sample_frac: float = 0.0
     # Show per-batch timing breakdown (Route/Accum/Cust columns)
     log_timing: bool = False
+    # Maximum batch rows logged per period.  When a period has more batches
+    # than this, rows are evenly sampled so at most this many appear.
+    # The first and last batch of each period are always included.
+    # 0 = log every batch (no limit).
+    max_batch_rows_per_period: int = 5
 
     def __post_init__(self):
         if self.n_threads == -1:
@@ -1437,6 +1442,9 @@ class AssignmentSolver:
         # spatially-diverse batches via OD-grid round-robin.
         # No explicit snap needed — OSRM Route internally snaps to nearest node.
         explosion_rng = np.random.default_rng(42)
+        n_original_trips = len(trips)
+        original_trip_ids = [t.trip_id for t in trips]
+        original_volumes = np.array([t.volume for t in trips], dtype=np.float64)
         if self.config.max_vol_per_route > 0:
             trips = _explode_trips(
                 trips, self.config.max_vol_per_route,
@@ -1529,6 +1537,7 @@ class AssignmentSolver:
         current_period_bin = None  # set from first batch
         n_batches = 0
         n_batches_in_period = 0
+        n_periods_seen = 1  # count of distinct periods encountered
         all_trip_durations: List[np.ndarray] = []
 
         # Equilibrium quality tracking
@@ -1645,6 +1654,7 @@ class AssignmentSolver:
                 csv_path = self.writer.write_from_state(state, only_changed=True)
                 engine, period_cust_time, _ = self._customize_and_reload(str(csv_path), engine)
                 n_batches_in_period = 1  # this batch starts the new period
+                n_periods_seen += 1
 
                 # Log period transition with ETA
                 elapsed_so_far = time.monotonic() - t_start
@@ -1887,21 +1897,35 @@ class AssignmentSolver:
             eta_batches = max(0, est_total_batches - n_batches)
             eta_s = avg_batch_s * eta_batches
 
-            # Table-format batch log with progress
+            # Table-format batch log with progress (throttled per period)
             period_label = current_period_bin if current_period_bin is not None else "?"
-            if not _header_logged:
-                _log(_batch_header(self.config.log_timing))
-                _log(_batch_sep(self.config.log_timing))
-                _header_logged = True
-            _log(_fmt_batch_row(
-                n_batches, est_total_batches, period_label,
-                len(batch.trips), batch_vol,
-                vol_remaining, batch_result.mean_vc, max_vc,
-                batch_result.mean_speed_kmh, batch_result.n_oversaturated,
-                n_active, route_time, accum_time, customize_time,
-                eta_s=eta_s, timing=self.config.log_timing,
-                period_duration_s=period_duration_s or 3600.0,
-            ))
+            _max_rows = self.config.max_batch_rows_per_period
+            _is_last = n_batches >= est_total_batches
+            _is_first_in_period = n_batches_in_period == 1
+            _should_log = (
+                _is_last
+                or _is_first_in_period
+                or _max_rows <= 0
+            )
+            if not _should_log and _max_rows > 0:
+                # Estimate total batches in this period from overall pace
+                _est_per_period = max(1, est_total_batches // max(1, n_periods_seen))
+                _stride = max(1, _est_per_period // _max_rows)
+                _should_log = (n_batches_in_period % _stride == 0)
+            if _should_log:
+                if not _header_logged:
+                    _log(_batch_header(self.config.log_timing))
+                    _log(_batch_sep(self.config.log_timing))
+                    _header_logged = True
+                _log(_fmt_batch_row(
+                    n_batches, est_total_batches, period_label,
+                    len(batch.trips), batch_vol,
+                    vol_remaining, batch_result.mean_vc, max_vc,
+                    batch_result.mean_speed_kmh, batch_result.n_oversaturated,
+                    n_active, route_time, accum_time, customize_time,
+                    eta_s=eta_s, timing=self.config.log_timing,
+                    period_duration_s=period_duration_s or 3600.0,
+                ))
 
             if progress_callback:
                 progress_callback(bi, n_trips, mean_queue_per_lane)
@@ -1965,6 +1989,34 @@ class AssignmentSolver:
         experienced_times = None
         if all_trip_durations:
             experienced_times = np.concatenate(all_trip_durations)
+
+        # Aggregate exploded trip times back to original trip count.
+        # Each original trip may have been split into multiple exploded
+        # copies sharing the same trip_id.  We volume-weighted-average
+        # the experienced times so the returned array is 1:1 with the
+        # caller's original trip list.
+        if (
+            experienced_times is not None
+            and len(experienced_times) > n_original_trips
+        ):
+            exploded_ids = [t.trip_id for t in trips]
+            exploded_vols = np.array([t.volume for t in trips], dtype=np.float64)
+            agg_times = np.zeros(n_original_trips, dtype=np.float64)
+            agg_weights = np.zeros(n_original_trips, dtype=np.float64)
+            # Build original trip_id → index mapping
+            orig_id_to_idx: dict = {}
+            for i, tid in enumerate(original_trip_ids):
+                if tid is not None:
+                    orig_id_to_idx[tid] = i
+            for j, (tid, vol) in enumerate(zip(exploded_ids, exploded_vols)):
+                idx = orig_id_to_idx.get(tid)
+                if idx is not None and j < len(experienced_times):
+                    agg_times[idx] += experienced_times[j] * vol
+                    agg_weights[idx] += vol
+            mask = agg_weights > 0
+            agg_times[mask] /= agg_weights[mask]
+            experienced_times = agg_times
+            n_trips = n_original_trips
 
         return StreamResult(
             n_trips=n_trips,
