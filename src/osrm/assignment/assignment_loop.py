@@ -566,13 +566,19 @@ class AssignmentSolver:
         # In-memory path (no engine reload needed)
         if self._in_mem_customizer is not None:
             raw_engine = getattr(engine, '_engine', engine)
-            cell_time = self._in_mem_customizer.recustomize(
+            result = self._in_mem_customizer.recustomize(
                 csv_path, raw_engine, filter_indices=[0],
             )
             customize_time = time.monotonic() - t_cust
             logger.debug(
-                "InMemoryCustomizer: cell=%.2fs, total=%.2fs (no reload)",
-                cell_time, customize_time,
+                "InMemoryCustomizer: dirty=%d geom, %d edges, %d cells, %d clean | "
+                "csv=%.3f copy=%.3f upd=%.3f acc=%.3f patch=%.3f cell=%.3f total=%.3fs",
+                result["dirty_geometries"], result["edges_patched"],
+                result["dirty_cells"], result["newly_clean"],
+                result["phase1_csv_s"], result["phase1_copy_s"],
+                result["phase1_update_s"], result["phase2_accum_s"],
+                result["phase3_patch_s"], result["phase4_cell_s"],
+                customize_time,
             )
             return engine, customize_time, 0.0
 
@@ -1635,6 +1641,7 @@ class AssignmentSolver:
                 # but that was on old-period flow — we need weights that
                 # reflect the new period's baseline (unserved demand).
                 self._update_state(state)
+                self.writer.reset_delta()
                 csv_path = self.writer.write_from_state(state, only_changed=True)
                 engine, period_cust_time, _ = self._customize_and_reload(str(csv_path), engine)
                 n_batches_in_period = 1  # this batch starts the new period
@@ -1785,7 +1792,7 @@ class AssignmentSolver:
             csv_time = 0.0
             if n_batches_in_period > 1:
                 t_csv = time.monotonic()
-                csv_path = self.writer.write_from_state(state, only_changed=True)
+                csv_path = self.writer.write_from_state(state, delta=True)
                 csv_time = time.monotonic() - t_csv
                 engine, customize_time, engine_time = self._customize_and_reload(
                     str(csv_path), engine,

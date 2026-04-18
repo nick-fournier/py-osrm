@@ -41,6 +41,7 @@ class SegmentSpeedWriter:
                 output_dir = tempfile.gettempdir()
         self.output_dir = Path(output_dir)
         self.prefix = prefix
+        self._prev_speeds: Optional[np.ndarray] = None
 
     def write(
         self,
@@ -74,10 +75,11 @@ class SegmentSpeedWriter:
         speeds = np.clip(speeds_kmh, min_speed_kmh, None)
 
         with open(path, "w") as f:
-            for i in range(len(edge_ids)):
-                f.write(
-                    f"{int(edge_ids[i, 0])},{int(edge_ids[i, 1])},{speeds[i]:.4f}\n"
-                )
+            lines = [
+                f"{int(edge_ids[i, 0])},{int(edge_ids[i, 1])},{speeds[i]:.4f}\n"
+                for i in range(len(edge_ids))
+            ]
+            f.write("".join(lines))
 
         return path
 
@@ -87,6 +89,7 @@ class SegmentSpeedWriter:
         suffix: str = "",
         only_changed: bool = False,
         tolerance_kmh: float = 0.5,
+        delta: bool = False,
     ) -> Path:
         """Write CSV from a NetworkState, optionally only changed edges.
 
@@ -101,22 +104,44 @@ class SegmentSpeedWriter:
             by more than tolerance_kmh. Reduces CSV size.
         tolerance_kmh : float
             Speed change threshold for only_changed mode.
+        delta : bool
+            If True, only write edges that changed since the last call
+            (compares to previous speeds, not freeflow). Implies
+            only_changed=True. Call reset_delta() at period transitions.
 
         Returns
         -------
         Path
             Path to the written CSV file.
         """
-        if only_changed:
-            delta = np.abs(network_state.speed_kmh - network_state.freeflow_kmh)
-            mask = delta > tolerance_kmh
+        if delta and self._prev_speeds is not None:
+            cur = network_state.speed_kmh
+            prev = self._prev_speeds
+            n_common = min(len(cur), len(prev))
+            # Compare common edges; any new edges beyond prev length are "changed"
+            diff = np.zeros(len(cur))
+            diff[:n_common] = np.abs(cur[:n_common] - prev[:n_common])
+            diff[n_common:] = tolerance_kmh + 1.0  # force new edges into delta
+            mask = diff > tolerance_kmh
+            edge_ids = network_state.edge_ids[mask]
+            speeds = cur[mask]
+            self._prev_speeds = cur.copy()
+        elif only_changed:
+            delta_ff = np.abs(network_state.speed_kmh - network_state.freeflow_kmh)
+            mask = delta_ff > tolerance_kmh
             edge_ids = network_state.edge_ids[mask]
             speeds = network_state.speed_kmh[mask]
+            self._prev_speeds = network_state.speed_kmh.copy()
         else:
             edge_ids = network_state.edge_ids
             speeds = network_state.speed_kmh
+            self._prev_speeds = network_state.speed_kmh.copy()
 
         return self.write(edge_ids, speeds, suffix=suffix)
+
+    def reset_delta(self) -> None:
+        """Reset delta tracking. Call at period transitions."""
+        self._prev_speeds = None
 
     def cleanup(self, suffix: str = "") -> None:
         """Remove a previously written CSV file."""

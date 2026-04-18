@@ -339,18 +339,17 @@ NB_MODULE(osrm_ext, m) {
         .def("recustomize", [](osrm::customizer::InMemoryCustomizer &self,
                                 const std::string &speed_csv,
                                 OSRM *engine,
-                                std::vector<std::size_t> filter_indices) -> double {
-            double cell_time;
+                                std::vector<std::size_t> filter_indices) -> nb::dict {
+            osrm::customizer::RecustomizeResult result;
             {
                 nb::gil_scoped_release release;
-                cell_time = self.Recustomize(speed_csv, filter_indices);
+                result = self.Recustomize(speed_csv, filter_indices);
             }
 
             // Copy metrics into the engine's memory buffers
             if (engine != nullptr)
             {
                 const auto &metrics = self.GetLatestMetrics();
-                // If selective filters, only copy those; otherwise copy all
                 auto indices_to_copy = filter_indices.empty()
                     ? std::vector<std::size_t>{}
                     : filter_indices;
@@ -385,7 +384,19 @@ NB_MODULE(osrm_ext, m) {
                 }
             }
 
-            return cell_time;
+            nb::dict d;
+            d["phase1_csv_s"] = result.phase1_csv_s;
+            d["phase1_copy_s"] = result.phase1_copy_s;
+            d["phase1_update_s"] = result.phase1_update_s;
+            d["phase2_accum_s"] = result.phase2_accum_s;
+            d["phase3_patch_s"] = result.phase3_patch_s;
+            d["phase4_cell_s"] = result.phase4_cell_s;
+            d["dirty_geometries"] = result.dirty_geometries;
+            d["edges_patched"] = result.edges_patched;
+            d["dirty_cells"] = result.dirty_cells;
+            d["newly_clean"] = result.newly_clean;
+            d["total_s"] = result.total_s;
+            return d;
         }, nb::arg("speed_csv"), nb::arg("engine") = nb::none(),
            nb::arg("filter_indices") = std::vector<std::size_t>{},
            "Re-customize and optionally swap metrics into engine in-place.\n"
