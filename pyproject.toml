@@ -50,13 +50,13 @@ before-all = """
   rpm --import https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux || true
   yum install -y tbb-devel bzip2-devel wget tar pkgconfig expat-devel zlib-devel lua-devel
   
-  # Build Boost from source (static only to minimize wheel size)
+  # Build Boost from source (static + shared, but strip debug symbols from wheel)
   cd /tmp
   wget --no-check-certificate -O boost_1_85_0.tar.gz https://sourceforge.net/projects/boost/files/boost/1.85.0/boost_1_85_0.tar.gz/download
   tar xzf boost_1_85_0.tar.gz
   cd boost_1_85_0
   ./bootstrap.sh --with-libraries=date_time,filesystem,iostreams,program_options,regex,system,thread,test
-  ./b2 install --prefix=/usr/local -j$(nproc) link=static cxxflags=-fPIC cflags=-fPIC
+  ./b2 install --prefix=/usr/local -j$(nproc) link=static,shared cxxflags=-fPIC cflags=-fPIC
   cd /tmp && rm -rf boost_1_85_0*
 """
 environment = { LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib:/usr/local/lib/intel64/gcc4.8/", PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/local/lib/pkgconfig" }
