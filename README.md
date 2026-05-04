@@ -1,7 +1,11 @@
-# py-osrm
-![PUSH_CI](https://github.com/gis-ops/py-osrm/actions/workflows/push_master.yml/badge.svg)
+# py-osrm-revival
 
-**py-osrm is a Python package that binds to [osrm-backend](https://github.com/Project-OSRM/osrm-backend) using [nanobind](https://github.com/wjakob/nanobind).**
+[![Build Wheels](https://github.com/nick-fournier/py-osrm/actions/workflows/build_wheels.yml/badge.svg)](https://github.com/nick-fournier/py-osrm/actions/workflows/build_wheels.yml)
+[![PyPI](https://img.shields.io/pypi/v/py-osrm-revival)](https://pypi.org/project/py-osrm-revival/)
+
+**py-osrm-revival is an actively maintained continuation of [py-osrm](https://github.com/gis-ops/py-osrm), providing Python bindings to [osrm-backend](https://github.com/Project-OSRM/osrm-backend) using [nanobind](https://github.com/wjakob/nanobind).**
+
+> This project was forked from [gis-ops/py-osrm](https://github.com/gis-ops/py-osrm) which is now archived and unmaintained. Development continues here.
 
 This package binds to **OSRM v6.0.0** backend and includes preprocessing functionality.
 
@@ -16,18 +20,18 @@ Windows | x86_64
 ---
 
 ## Installation
-py-osrm is supported on **CPython 3.9+**.
+py-osrm-revival is supported on **CPython 3.9+**.
 
-**Quick Install (with auto-platform detection):**
+**Install from PyPI:**
 ```bash
-python -c "$(curl -fsSL https://raw.githubusercontent.com/nick-fournier/py-osrm/revival/scripts/install.py)"
+pip install py-osrm-revival
 ```
 
-**Or manually install from GitHub Releases:**
+**Or install from GitHub Releases:**
 
 Download the appropriate wheel for your platform from [Releases](https://github.com/nick-fournier/py-osrm/releases):
 ```bash
-pip install https://github.com/nick-fournier/py-osrm/releases/download/v0.0.2/py_osrm-0.0.2-cp39-abi3-linux_x86_64.whl
+pip install https://github.com/nick-fournier/py-osrm/releases/download/v0.1.0/py_osrm_revival-0.1.0-cp39-abi3-linux_x86_64.whl
 ```
 
 **Development install (requires compilation, ~5-10 min):**
@@ -89,7 +93,7 @@ result = py_osrm.Nearest(
 )
 ```
 
-See the [documentation](https://gis-ops.github.io/py-osrm/) for Trip, Match, and Tile services.
+See the [documentation](https://nick-fournier.github.io/py-osrm/) for Trip, Match, and Tile services.
 
 ### Bulk Processing (Concurrent)
 
@@ -119,8 +123,8 @@ print(results.select(["distance", "duration", "success"]))
 
 **Installation with bulk processing support:**
 ```bash
-pip install py-osrm[bulk]           # Polars only
-pip install py-osrm[bulk-progress]  # Polars + tqdm progress bar
+pip install py-osrm-revival[bulk]           # Polars only
+pip install py-osrm-revival[bulk-progress]  # Polars + tqdm progress bar
 ```
 
 **Key features:**
@@ -160,7 +164,7 @@ python -m osrm extract data.osm.pbf --profile car
 python -m osrm contract data
 ```
 
-For **MLD (Multi-Level Dijkstra)** on larger datasets, see [preprocessing documentation](https://gis-ops.github.io/py-osrm/).
+For **MLD (Multi-Level Dijkstra)** on larger datasets, see [preprocessing documentation](https://nick-fournier.github.io/py-osrm/).
 
 ## Advanced Usage
 
@@ -188,4 +192,7 @@ This pattern is useful when constructing parameters programmatically or reusing 
 ---
 
 ## Documentation
-[Documentation Page](https://gis-ops.github.io/py-osrm/)
+[Documentation Page](https://nick-fournier.github.io/py-osrm/)
+
+## Acknowledgments
+This project is a continuation of [gis-ops/py-osrm](https://github.com/gis-ops/py-osrm). Thanks to the original authors for their foundational work.
