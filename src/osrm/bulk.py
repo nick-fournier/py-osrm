@@ -3,8 +3,9 @@
 import asyncio
 import math
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, overload
+
+import aiohttp
 
 from ._params import RouteParameters as _RouteParameters, set_param as _set_param
 
@@ -23,47 +24,7 @@ def _bulk_route_http(
     concurrency: int,
     fail_fast: bool,
 ) -> List[Optional[Dict]]:
-    """Dispatch bulk routes over HTTP using async I/O with aiohttp, or thread fallback."""
-    try:
-        import aiohttp
-        return _bulk_route_aiohttp(osrm_instance, rows, build_params_fn, concurrency, fail_fast)
-    except ImportError:
-        # Fallback to threaded requests if aiohttp not installed
-        return _bulk_route_threaded(osrm_instance, rows, build_params_fn, concurrency, fail_fast)
-
-
-def _bulk_route_threaded(
-    osrm_instance,
-    rows: List[Dict],
-    build_params_fn: Callable,
-    concurrency: int,
-    fail_fast: bool,
-) -> List[Optional[Dict]]:
-    """Fallback: ThreadPoolExecutor with synchronous requests."""
-    workers = min(concurrency, len(rows))
-
-    def _route_one(row):
-        try:
-            kw = build_params_fn(row)
-            return osrm_instance.Route(**kw)
-        except Exception:
-            if fail_fast:
-                raise
-            return None
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(_route_one, rows))
-
-
-def _bulk_route_aiohttp(
-    osrm_instance,
-    rows: List[Dict],
-    build_params_fn: Callable,
-    concurrency: int,
-    fail_fast: bool,
-) -> List[Optional[Dict]]:
     """Async HTTP routing with aiohttp and semaphore-based concurrency control."""
-    import aiohttp
 
     async def _run():
         sem = asyncio.Semaphore(concurrency)
