@@ -170,14 +170,31 @@ def bulk_route(
             _set_param(rp, key, value)
         params_list.append(rp)
 
-    # Dispatch all routes via native C++ TBB parallelism (single GIL release)
-    try:
-        batch_results = osrm_instance._engine.BatchRoute(params_list)
-    except Exception as e:
-        if fail_fast:
-            raise
-        # Total failure — mark all rows as errors
-        batch_results = [None] * len(rows)
+    # Detect whether this is a native C++ engine (has BatchRoute) or HTTP client
+    _has_batch = hasattr(osrm_instance, '_engine') and hasattr(osrm_instance._engine, 'BatchRoute')
+
+    if _has_batch:
+        # Native C++ path — TBB parallel via single GIL release
+        try:
+            batch_results = osrm_instance._engine.BatchRoute(params_list)
+        except Exception as e:
+            if fail_fast:
+                raise
+            batch_results = [None] * len(rows)
+    else:
+        # HTTP/fallback path — ThreadPoolExecutor with individual Route calls
+        def _route_one(row):
+            try:
+                kw = build_params_for_row(row)
+                return osrm_instance.Route(**kw)
+            except Exception as e:
+                if fail_fast:
+                    raise
+                return None
+
+        workers = max_workers or min(os.cpu_count() or 4, len(rows))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            batch_results = list(pool.map(_route_one, rows))
 
     # Unpack results into row dicts
     results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
@@ -185,7 +202,7 @@ def bulk_route(
         result = row.copy()
         try:
             if raw is not None:
-                response = raw.to_dict()
+                response = raw.to_dict() if hasattr(raw, 'to_dict') else raw
                 if response and 'routes' in response and len(response['routes']) > 0:
                     route = response['routes'][0]
                     result['distance'] = route.get('distance')
