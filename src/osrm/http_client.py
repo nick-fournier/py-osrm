@@ -48,15 +48,29 @@ class OSRM_HTTP:
         base_url: str = "http://localhost:5000",
         profile: str = "driving",
         timeout: float = 30.0,
-        session: Optional[Any] = None
+        session: Optional[Any] = None,
+        pool_connections: int = 16,
+        pool_maxsize: int = 16,
     ):
         import requests
+        from requests.adapters import HTTPAdapter
         self._requests = requests
         
         self.base_url = base_url.rstrip('/')
         self.profile = profile
         self.timeout = timeout
-        self.session = session or requests.Session()
+
+        if session is not None:
+            self.session = session
+        else:
+            self.session = requests.Session()
+            # Increase connection pool for concurrent bulk_route usage
+            adapter = HTTPAdapter(
+                pool_connections=pool_connections,
+                pool_maxsize=pool_maxsize,
+            )
+            self.session.mount('http://', adapter)
+            self.session.mount('https://', adapter)
         
         # Verify server is accessible
         try:
