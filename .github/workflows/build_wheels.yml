@@ -5,13 +5,11 @@ on:
   push:
     branches:
       - main
-      - optimize-wheel-sizes
     paths-ignore:
       - '*.md'
   pull_request:
     branches:
       - main
-      - optimize-wheel-sizes
     paths-ignore:
       - '*.md'
 
