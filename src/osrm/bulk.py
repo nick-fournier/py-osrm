@@ -1,18 +1,113 @@
 """Bulk processing functions for py-osrm using concurrent execution."""
 
+import asyncio
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, TypeVar, Union, overload
+from typing import Any, Callable, Dict, List, Optional, TypeVar, Union, overload
 
 from ._params import RouteParameters as _RouteParameters, set_param as _set_param
 
 # Default concurrent HTTP requests — high enough for throughput,
 # low enough to avoid overwhelming a remote server
-_DEFAULT_HTTP_WORKERS = 8
+_DEFAULT_HTTP_WORKERS = 16
 
 # TypeVar for DataFrame type (Polars DataFrame)
 DataFrameT = TypeVar('DataFrameT')
+
+
+def _bulk_route_http(
+    osrm_instance,
+    rows: List[Dict],
+    build_params_fn: Callable,
+    concurrency: int,
+    fail_fast: bool,
+) -> List[Optional[Dict]]:
+    """Dispatch bulk routes over HTTP using async I/O with aiohttp, or thread fallback."""
+    try:
+        import aiohttp
+        return _bulk_route_aiohttp(osrm_instance, rows, build_params_fn, concurrency, fail_fast)
+    except ImportError:
+        # Fallback to threaded requests if aiohttp not installed
+        return _bulk_route_threaded(osrm_instance, rows, build_params_fn, concurrency, fail_fast)
+
+
+def _bulk_route_threaded(
+    osrm_instance,
+    rows: List[Dict],
+    build_params_fn: Callable,
+    concurrency: int,
+    fail_fast: bool,
+) -> List[Optional[Dict]]:
+    """Fallback: ThreadPoolExecutor with synchronous requests."""
+    workers = min(concurrency, len(rows))
+
+    def _route_one(row):
+        try:
+            kw = build_params_fn(row)
+            return osrm_instance.Route(**kw)
+        except Exception:
+            if fail_fast:
+                raise
+            return None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(_route_one, rows))
+
+
+def _bulk_route_aiohttp(
+    osrm_instance,
+    rows: List[Dict],
+    build_params_fn: Callable,
+    concurrency: int,
+    fail_fast: bool,
+) -> List[Optional[Dict]]:
+    """Async HTTP routing with aiohttp and semaphore-based concurrency control."""
+    import aiohttp
+
+    async def _run():
+        sem = asyncio.Semaphore(concurrency)
+        connector = aiohttp.TCPConnector(limit=concurrency, keepalive_timeout=30)
+
+        async def _fetch_one(session: aiohttp.ClientSession, row: Dict) -> Optional[Dict]:
+            kw = build_params_fn(row)
+            coordinates = kw.pop('coordinates')
+            request_data = osrm_instance._build_request('route', coordinates, kw)
+
+            async with sem:
+                try:
+                    async with session.get(
+                        request_data['url'],
+                        params=request_data['params'],
+                        timeout=aiohttp.ClientTimeout(total=osrm_instance.timeout),
+                    ) as resp:
+                        if resp.status == 200:
+                            return await resp.json()
+                        return None
+                except Exception:
+                    if fail_fast:
+                        raise
+                    return None
+
+        async with aiohttp.ClientSession(connector=connector) as session:
+            tasks = [_fetch_one(session, row) for row in rows]
+            return await asyncio.gather(*tasks)
+
+    # Run the event loop — handle case where one is already running (e.g. Jupyter)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # Already in an async context (Jupyter, etc.) — use thread to run new loop
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            future = pool.submit(asyncio.run, _run())
+            return future.result()
+    else:
+        return asyncio.run(_run())
+
 
 
 @overload
@@ -188,21 +283,11 @@ def bulk_route(
                 raise
             batch_results = [None] * len(rows)
     else:
-        # HTTP/fallback path — ThreadPoolExecutor with concurrency control.
-        # Default to fewer workers for HTTP to avoid overwhelming remote servers.
-        workers = max_workers or min(_DEFAULT_HTTP_WORKERS, len(rows))
+        # HTTP/fallback path — use async I/O for maximum throughput
+        concurrency = max_workers or _DEFAULT_HTTP_WORKERS
 
-        def _route_one(row):
-            try:
-                kw = build_params_for_row(row)
-                return osrm_instance.Route(**kw)
-            except Exception as e:
-                if fail_fast:
-                    raise
-                return None
-
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            batch_results = list(pool.map(_route_one, rows))
+        batch_results = _bulk_route_http(osrm_instance, rows, build_params_for_row,
+                                         concurrency, fail_fast)
 
     # Unpack results into row dicts
     results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
