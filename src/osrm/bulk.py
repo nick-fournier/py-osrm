@@ -23,6 +23,7 @@ def _bulk_route_http(
     build_params_fn: Callable,
     concurrency: int,
     fail_fast: bool,
+    show_progress: bool = True,
 ) -> List[Optional[Dict]]:
     """Async HTTP routing with aiohttp and semaphore-based concurrency control."""
 
@@ -30,7 +31,7 @@ def _bulk_route_http(
         sem = asyncio.Semaphore(concurrency)
         connector = aiohttp.TCPConnector(limit=concurrency, keepalive_timeout=30)
 
-        async def _fetch_one(session: aiohttp.ClientSession, row: Dict) -> Optional[Dict]:
+        async def _fetch_one(session: aiohttp.ClientSession, idx: int, row: Dict) -> tuple:
             kw = build_params_fn(row)
             coordinates = kw.pop('coordinates')
             request_data = osrm_instance._build_request('route', coordinates, kw)
@@ -43,16 +44,35 @@ def _bulk_route_http(
                         timeout=aiohttp.ClientTimeout(total=osrm_instance.timeout),
                     ) as resp:
                         if resp.status == 200:
-                            return await resp.json()
-                        return None
+                            return idx, await resp.json()
+                        return idx, None
                 except Exception:
                     if fail_fast:
                         raise
-                    return None
+                    return idx, None
 
+        # Set up optional progress bar
+        pbar = None
+        if show_progress:
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(total=len(rows), desc="Routing (HTTP)", unit="req")
+            except ImportError:
+                pass
+
+        results = [None] * len(rows)
         async with aiohttp.ClientSession(connector=connector) as session:
-            tasks = [_fetch_one(session, row) for row in rows]
-            return await asyncio.gather(*tasks)
+            tasks = [asyncio.ensure_future(_fetch_one(session, i, row))
+                     for i, row in enumerate(rows)]
+            for coro in asyncio.as_completed(tasks):
+                idx, result = await coro
+                results[idx] = result
+                if pbar:
+                    pbar.update(1)
+
+        if pbar:
+            pbar.close()
+        return results
 
     # Run the event loop — handle case where one is already running (e.g. Jupyter)
     try:
@@ -248,7 +268,7 @@ def bulk_route(
         concurrency = max_workers or _DEFAULT_HTTP_WORKERS
 
         batch_results = _bulk_route_http(osrm_instance, rows, build_params_for_row,
-                                         concurrency, fail_fast)
+                                         concurrency, fail_fast, show_progress)
 
     # Unpack results into row dicts
     results: List[Dict[str, Any]] = [None] * len(rows)  # type: ignore
