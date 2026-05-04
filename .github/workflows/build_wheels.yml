@@ -73,7 +73,7 @@ jobs:
         path: ${{ github.workspace }}\vcpkg-bincache
         key: vcpkg-bincache-${{ runner.os }}-x64-windows-static-${{ hashFiles('vcpkg.json') }}
 
- (cl.exe) environment
+    - name: Setup MSVC (cl.exe) environment
       if: runner.os == 'Windows'
       uses: ilammy/msvc-dev-cmd@v1
       with:
