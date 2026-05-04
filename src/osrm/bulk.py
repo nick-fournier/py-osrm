@@ -7,6 +7,10 @@ from typing import Any, Dict, List, Optional, TypeVar, Union, overload
 
 from ._params import RouteParameters as _RouteParameters, set_param as _set_param
 
+# Default concurrent HTTP requests — high enough for throughput,
+# low enough to avoid overwhelming a remote server
+_DEFAULT_HTTP_WORKERS = 8
+
 # TypeVar for DataFrame type (Polars DataFrame)
 DataFrameT = TypeVar('DataFrameT')
 
@@ -54,7 +58,9 @@ def bulk_route(
             Optional per-row params: steps, alternatives, annotations, geometries, 
                                      overview, radiuses, bearings, exclude
             For multi-waypoint routes: waypoints (list of (lon, lat) tuples)
-        max_workers: Number of parallel workers (default: os.cpu_count())
+        max_workers: Number of parallel workers. For native OSRM, this is ignored
+            (TBB handles threading). For HTTP clients, defaults to 8 to avoid
+            overwhelming the remote server. Override with caution.
         fail_fast: If True, raise on first error; if False, collect all results
         timeout: Timeout in seconds for individual route requests
         show_progress: If True (default), display progress bar with processing rate and error count
@@ -182,7 +188,10 @@ def bulk_route(
                 raise
             batch_results = [None] * len(rows)
     else:
-        # HTTP/fallback path — ThreadPoolExecutor with individual Route calls
+        # HTTP/fallback path — ThreadPoolExecutor with concurrency control.
+        # Default to fewer workers for HTTP to avoid overwhelming remote servers.
+        workers = max_workers or min(_DEFAULT_HTTP_WORKERS, len(rows))
+
         def _route_one(row):
             try:
                 kw = build_params_for_row(row)
@@ -192,7 +201,6 @@ def bulk_route(
                     raise
                 return None
 
-        workers = max_workers or min(os.cpu_count() or 4, len(rows))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             batch_results = list(pool.map(_route_one, rows))
 
