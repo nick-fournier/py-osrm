@@ -60,7 +60,7 @@ before-all = """
   cd /tmp && rm -rf boost_1_85_0*
 """
 environment = { LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib:/usr/local/lib/intel64/gcc4.8/", PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/local/lib/pkgconfig" }
-repair-wheel-command = "auditwheel repair --strip -w {dest_dir} {wheel}"
+repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
 environment = "MACOSX_DEPLOYMENT_TARGET=15.0"
