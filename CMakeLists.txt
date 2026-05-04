@@ -143,8 +143,8 @@ find_package(Lua REQUIRED)
 # Fallback logic for Lua paths (Windows only)
 if (WIN32)
   if (NOT LUA_LIBRARIES OR NOT LUA_INCLUDE_DIR)
-    set(LUA_LIBRARIES "C:/vcpkg/installed/x64-windows/lib/lua.lib")
-    set(LUA_INCLUDE_DIR "C:/vcpkg/installed/x64-windows/include")
+    set(LUA_LIBRARIES "C:/vcpkg/installed/x64-windows-static/lib/lua.lib")
+    set(LUA_INCLUDE_DIR "C:/vcpkg/installed/x64-windows-static/include")
   endif()
 endif()
 
@@ -214,6 +214,8 @@ target_link_libraries(${EXT_NAME}
 
 if (MSVC)
   add_definitions(-DBOOST_ALL_NO_LIB)
+  # Use static CRT to avoid bundling vcruntime DLLs
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 # Install Python source files
